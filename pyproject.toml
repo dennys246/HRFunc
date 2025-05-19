@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hrfunc"
+version = "0.1.0"
+description = "The HRFunc library is a tool for modeling hemodynamic response functions and estimating neural activity from functional near infrared spectroscopy"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "BSD-3-Clause"}
+authors = [
+    { name="Denny Schaedig", email="dennys@rmdig.ai" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "numpy",
+    "mne",
+    "mne_nirs",
+    "scipy",
+    "nilearn",
+    "matplotlib",
+    "glob",
+    "json",
+    "collections",
+    "math",
+    "random",
+    "hashlib",
+]
+
+[project.urls]
+Homepage = "https://github.com/dennys246/hrfunc"
+Documentation = "https://github.com/dennys246/hrfunc"
