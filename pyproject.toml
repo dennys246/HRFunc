@@ -36,3 +36,6 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/dennys246/hrfunc"
 Documentation = "https://github.com/dennys246/hrfunc"
+
+[tool.setuptools]
+include-package-data = true
