@@ -235,7 +235,7 @@ class montage:
         self.generate_distribution(duration)
 
 
-    def deconvolve_nirs(self, nirx_obj, hrfs_filename = "hrfs.json", _lambda = 1e-3, **kwargs):
+    def deconvolve_nirs(self, nirx_obj, _lambda = 1e-3, **kwargs):
         """
         Deconvlve a fNIRS scan using estimated HRF's localized to optodes location
 
