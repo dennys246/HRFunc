@@ -111,13 +111,18 @@ class Tree:
         h_val = (hrf.x, hrf.y, hrf.z)[axis]
         n_val = (node.x, node.y, node.z)[axis]
 
-        if h_val < n_val:
-            if node.left is None:
+        # Handle duplicates by jittering location
+        if h_val == n_val and hrf.x == node.x and hrf.y == node.y and hrf.z == node.z:
+            for val in (hrf.x, hrf.y, hrf.z):
+                val += 1e-10 # Jitter location while staying above 64-precision double threshold
+            
+        if h_val < n_val: # If the current node is less than the new node
+            if node.left is None: # If the left node is empty
                 node.left = hrf
                 return node.left
-            else:
+            else: # If the left node is not empty
                 return self.insert(hrf, depth + 1, node.left)
-        else:
+        else: # If the current node is greater than the new node
             if node.right is None:
                 node.right = hrf
                 return node.right
@@ -179,16 +184,7 @@ class Tree:
                 # Check if the next node is not closer
                 current_distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.x, node.y, node.z])))
                 if current_distance <= max_distance:
-                    left_distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.left.x, node.left.y, node.left.z])))
-                    right_distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.right.x, node.right.y, node.right.z])))
-                    
-                    # If the next neighbors are farther away than optode
-                    if current_distance <= right_distance and current_distance <= left_distance: 
-                        return node
-                    elif current_distance >= right_distance: # Move to the right node
-                        return self.search_dfs(optode, max_distance, depth + 1, node.right, max_point, min_point)
-                    else: # Move to the left node
-                        return self.search_dfs(optode, max_distance, depth + 1, node.left, max_point, min_point)
+                    return self.nearest_neighbor(node, optode, depth)
 
         axis = depth % 3
         if (axis == 0 and min_point[0] < node.x) or (axis == 1 and min_point[1] < node.y) or (axis == 2 and min_point[2] < node.z):
@@ -196,7 +192,7 @@ class Tree:
         else:
             return self.search_dfs(optode, max_distance, depth + 1, node.right, max_point, min_point)
 
-    def search_bfs(self, optode, max_distance):
+    def search_bfs(self, optode, max_distance, max_point = None, min_point = None):
         """
         Searches the tree to find a HRF node within the max distance using BFS
         
@@ -211,8 +207,9 @@ class Tree:
 
         # Find max/min x, y and z if not calculated
 
-        min_point = [optode[0] - max_distance, optode[1] - max_distance, optode[2] - max_distance]
-        max_point = [optode[0] + max_distance, optode[1] + max_distance, optode[2] + max_distance]
+        if max_point == None:
+            min_point = [optode[0] - max_distance, optode[1] - max_distance, optode[2] - max_distance]
+            max_point = [optode[0] + max_distance, optode[1] + max_distance, optode[2] + max_distance]
 
         queue = deque([self.root])
         while queue:
@@ -224,22 +221,59 @@ class Tree:
                     current_distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.x, node.y, node.z])))
                     if current_distance <= max_distance:
                         # Check if the next node is not closer
-                        left_distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.left.x, node.left.y, node.left.z])))
-                        right_distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.right.x, node.right.y, node.right.z])))
-                        # If the next neighbors are farther away than optode
-                        if current_distance <= right_distance and current_distance <= left_distance: 
-                            return node
-                        elif current_distance >= right_distance: # Move to the right node
-                            queue.append(node.right)
-                        else: # Move to the left node
-                            queue.append(node.left)
-                        continue
+                        return self.nearest_neighbor(node, optode)
             if node.left:
                 queue.append(node.left)
             if node.right:
                 queue.append(node.right)
         return None
-      
+        
+    def nearest_neighbor(self, node, optode, depth=0, best=None):
+        """
+        Find the nearest neighbor to a target point in the 3D k-d tree.
+        
+        Arguments:
+            node (HRF) - The current node in the search
+            target (HRF) - The target HRF to find the nearest neighbor for
+            depth (int) - The current depth of the search
+            best (tuple) - The best node and distance found so far
+        Returns:
+            best (tuple) - The best node and distance found so far
+        """
+        if node is None: # Handle base case
+            return best
+
+        k = 3 
+        axis = depth % k
+
+        #Define current and target points
+        point = (node.x, node.y, node.z)
+        target_point = (optode.x, optode.y, optode.z)
+
+        # Calculate euclidian distance
+        distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.x, node.y, node.z])))
+
+        # Check if this node is closer than the best found so far
+        if best is None or distance < best[1]:
+            best = (node, distance)
+
+        # Figure out which side needs exploring
+        if target_point[axis] < point[axis]:
+            near_branch = node.left
+            far_branch = node.right
+        else:
+            near_branch = node.right
+            far_branch = node.left
+
+        # Search nearest branch
+        best = self.nearest_neighbor(near_branch, optode, depth + 1, best)
+
+        # Check if far branch needs to be explored
+        if abs(target_point[axis] - point[axis]) < best[1]:
+            best = self.nearest_neighbor(far_branch, optode, depth + 1, best)
+
+        return best
+
     def save(self, hrfs_filename = 'tree_hrfs.json'):
         hrfs = self.gather(self.root)
         # Save to a JSON file
