@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from glob import glob
 
-def estimate_hrfs(nirx_folder, nirx_identifier, events, hrfs_filename = "hrf_estimates.json", **kwargs):
+def estimate_hrfs(nirx_folder, nirx_identifier, events, hrfs_filename = "hrf_estimates.json", plot_dir = None, **kwargs):
     """
     This function is the primary call for estimating an HRF across a subject pool
     fNIRS data. To accomplish this, the function creates a hrfunc.montage and for
@@ -38,7 +38,7 @@ def estimate_hrfs(nirx_folder, nirx_identifier, events, hrfs_filename = "hrf_est
 
         _montage.deconvolve_hrf(nirx_obj, events) # Estimate the HRF
 
-    _montage.generate_distribution(context['duration']) # Generate HRF distribution
+    _montage.generate_distribution(context['duration'], plot_dir) # Generate HRF distribution
 
     _montage.save(hrfs_filename, context['doi'], **kwargs) # Save montage
 
@@ -177,7 +177,7 @@ class montage:
         """
         return np.convolve(events, hrf, mode='full')
 
-    def deconvolve_hrf(self, nirx_obj, events, duration = 12.0, _lambda = 1e-3, shorten_events = False):
+    def deconvolve_hrf(self, nirx_obj, events, duration = 12.0, _lambda = 1e-3, plot_dir = None, shorten_events = False):
         """
         Estimate an HRF subject wise given a nirx object and event impulse series using toeplitz 
         deconvolution with regularization.
@@ -233,7 +233,7 @@ class montage:
             self.subject_estimates[channel['ch_name']]['estimates'].append(hrf_estimate)
             self.subject_estimates[channel['ch_name']]['events'].append(events)
         
-        self.generate_distribution(duration)
+        self.generate_distribution(duration, plot_dir)
 
 
     def deconvolve_nirs(self, nirx_obj, _lambda = 1e-3, **kwargs):
@@ -491,7 +491,7 @@ class montage:
         peak2 = scipy.stats.gamma.pdf(time_stamps, 16) / 6.0 # undershoot at ~16s
 
         canonical_hrf = peak1 - peak2
-        canonical_hrf /= np.max(hrf)  # Normalize peak to 1
+        canonical_hrf /= np.max(canonical_hrf)  # Normalize peak to 1
 
         corr_matrix = np.zeros((len(self.hbo_channels) + len(self.hbr_channels), 2))
         for ind, ch_name in enumerate(self.hbo_channels + self.hbr_channels):
