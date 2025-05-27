@@ -397,7 +397,7 @@ class montage:
         global_std = np.mean(hrf_stds, axis = 0)
 
         # Create a global HRF variable
-        global_hrf = hrtree.HRF(
+        global_hrf = HRF(
             doi = self.channels[ch_name].context['doi'],
             ch_name = "global",
             duration = self.channels[ch_name].context['duration'],
@@ -567,7 +567,7 @@ class montage:
             ch_name = ' '.join(key_split)
 
             # create an empty HRF object
-            empty_hrf = hrtree.HRF(
+            empty_hrf = HRF(
                 doi,
                 ch_name, 
                 channel['context']['duration'], 
