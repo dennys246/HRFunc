@@ -92,7 +92,7 @@ class montage:
         self.context = {**self.context, **kwargs} # Add user input
 
         # Initialize an empty tree
-        self.tree = hrtree.Tree(**kwargs)
+        self.tree = tree(**kwargs)
 
         self.channels = {} # Create variable for holding poiners to each channel
         self.subject_estimates = {} # Create hold variable for storing intermediary data
