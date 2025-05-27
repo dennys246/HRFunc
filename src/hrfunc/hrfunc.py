@@ -1,4 +1,5 @@
-import scipy.linalg, hrtree, json, mne
+import scipy.linalg, json, mne
+from .hrtree import tree
 import numpy as np
 import matplotlib.pyplot as plt
 from glob import glob
@@ -24,7 +25,7 @@ def estimate_hrfs(nirx_folder, nirx_identifier, events, hrfs_filename = "hrf_est
             'protocol': None,
             'age_range': None,
             'demographics': None
-        }
+    }
     context = {**context, **kwargs} # Add user input
 
     # Grab all available nirx files
