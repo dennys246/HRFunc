@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hrfunc"
-version = "0.1.0"
-description = "Tools for modeling HRFs and estimating neural activity from fNIRS"
+version = "0.3.0"
+description = "Tools for modeling HRFs and estimating neural activity from fNIRS brain signals"
 readme = "README.md"
 requires-python = ">=3.8"
 license = "BSD-3-Clause"
 authors = [
-    { name="Denny Schaedig", email="dennys@rmdig.ai" }
+    { name="Denny Schaedig", email="dennys@wustl.edu" }
     ]
 classifiers = [
     "Programming Language :: Python :: 3",
