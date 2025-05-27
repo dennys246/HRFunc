@@ -1,7 +1,7 @@
 
 import random, math, hashlib
 
-class HashTable: 
+class hasher: 
 	"""
 	Hash table for storing and looking up various contexts associated to an estimated HRF.
 	This hashtable uses pen addressing for collisions resolution for lower memory requirements
