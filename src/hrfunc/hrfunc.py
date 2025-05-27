@@ -358,7 +358,7 @@ class montage:
         
         return nirx_obj
 
-    def generate_distribution(self, duration = 12.0):
+    def generate_distribution(self, duration = 12.0, plot_dir = None):
         """
         Calculate average and standard deviation of HRF across subjects for each channel
 
@@ -410,25 +410,23 @@ class montage:
         #Insert global hrf into tree and attach pointer to channels dict
         self.channels['global'] = self.tree.insert(global_hrf)
         
-        # Plot all of the channel HRF estimates
-        for channel, hrf in self.channels.items():
-            hrf_mean = hrf.trace
-            hrf_std = hrf.trace_std
-            time = np.arange(len(hrf_mean))
+        if plot_dir:# Plot all of the channel HRF estimates
+            for channel, hrf in self.channels.items():
+                hrf_mean = hrf.trace
+                hrf_std = hrf.trace_std
+                time = np.arange(len(hrf_mean))
 
-            plt.figure(figsize=(8, 4))
-            plt.plot(time, hrf_mean, label='Mean HRF', color='blue')
-            plt.fill_between(time, hrf_mean - hrf_std, hrf_mean + hrf_std, color='blue', alpha=0.3, label='±1 SD')
+                plt.figure(figsize=(8, 4))
+                plt.plot(time, hrf_mean, label='Mean HRF', color='blue')
+                plt.fill_between(time, hrf_mean - hrf_std, hrf_mean + hrf_std, color='blue', alpha=0.3, label='±1 SD')
 
-            plt.xlabel('Samples')
-            plt.ylabel('HRF amplitude')
-            plt.title(f'Estimated HRF for {channel} with Standard Deviation')
-            plt.legend()
-            plt.grid(True)
-            plt.tight_layout()
-            plt.savefig(f"/storage1/fs1/perlmansusan/Active/moochie/github/hrc/tests/plots/{channel}_hrf_estimate.png")
-
-        # Estimate global HRF?
+                plt.xlabel('Samples')
+                plt.ylabel('HRF amplitude')
+                plt.title(f'Estimated HRF for {channel} with Standard Deviation')
+                plt.legend()
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(f"{plot_dir}/{"-".join(channel.split(' '))}_hrf_estimate.png")
 
     def correlate_hrf(self, plot_filename = "montage_correlation.png"):
         """
