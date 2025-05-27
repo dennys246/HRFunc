@@ -5,16 +5,12 @@ from scipy.interpolate import interp1d
 from collections import deque
 from nilearn.glm.first_level import spm_hrf
 
-class Tree:
+class tree:
     """
     This object is intended to generate a synthetic hemodynamic response function to be
-    convovled with a NIRS object. You can pass in a variety of optional parameters like mean window,
-    sigma and scaling factor to alter the way your hrf is generated.
+    deconvovled from fNIRS signals to aquire neural signal estimates. You can pass in a
+    variety of optional parameters like mean window, sigma and scaling factor to alter the way your hrf is generated.
 
-    Class attributes:
-
-    Class functions:
-    
     """
     def __init__(self, hrf_filename = "hrfs.json", **kwargs):
         self.root = None
@@ -38,7 +34,7 @@ class Tree:
         self.context = {**self.context, **kwargs} 
         self.context_weights = {key: 1.0 for key in self.context.keys()}
 
-        self.hashtable = hrhash.HashTable(self.context)
+        self.hashtable = hrhash.hasher(self.context)
 
     def build(self, hrf_filename = None, sim_threshold = 0.0, context_weights = None):
         """
