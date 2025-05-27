@@ -1,5 +1,5 @@
 import scipy.linalg, json, mne
-from .hrtree import tree
+from .hrtree import tree, HRF
 import numpy as np
 import matplotlib.pyplot as plt
 from glob import glob
@@ -112,7 +112,7 @@ class montage:
                 location = channel['loc'][:3]
 
                 # create an empty HRF object
-                empty_hrf = hrtree.HRF(
+                empty_hrf = HRF(
                     self.context['doi'],
                     ch_name, 
                     self.context['duration'], 

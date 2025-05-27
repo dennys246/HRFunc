@@ -35,7 +35,7 @@ class tree:
         self.context = {**self.context, **kwargs} 
         self.context_weights = {key: 1.0 for key in self.context.keys()}
 
-        self.hashtable = hrhash.hasher(self.context)
+        self.hasher = hrhash.hasher(self.context)
 
     def build(self, hrf_filename = None, sim_threshold = 0.0, context_weights = None):
         """
@@ -88,7 +88,7 @@ class tree:
         for key, values in self.context.items(): # Iterate through all context items
             for value in values: # Iterate through each item in a context area
                 # Hash on the value and iterate through the tree pointers
-                context_references = self.hashtable.search(value)
+                context_references = self.hasher.search(value)
                 for node in context_references:
                     branch.insert(node) # Insert node pointer into branch
         return branch
