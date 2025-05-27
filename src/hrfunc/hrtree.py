@@ -1,4 +1,5 @@
-import json, random, math, hrhash
+import json, random, math
+from . import hrhash
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
