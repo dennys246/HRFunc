@@ -107,7 +107,7 @@ class hasher:
 		else:
 			print('Empty universal hash table initialized')
 
-	def add(self, key):
+	def add(self, key, pointer):
 		fill = float(self.size/self.capacity)
 		if self.min_fill > fill or fill > self.max_fill:
 			self.resize()
@@ -118,7 +118,10 @@ class hasher:
 			if self.table[hashkey] == '!tombstone!': # If a tombstone was found
 				break # Replace tombstone
 			hashkey = self.prober(key, hashkey)
+
 		self.table[hashkey] = key # insert the new key into the found hash
+		self.contexts[hashkey] = pointer # Add node pointer
+
 		self.size += 1 # Increment size
 		self.probe_count = 0 # Reset
 
