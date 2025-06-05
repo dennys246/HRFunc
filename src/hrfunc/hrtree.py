@@ -1,5 +1,5 @@
-import json, random, math
-from . import hrhash
+import json, random, math, re, scipy
+from . import hrhash, hrfunc
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
@@ -66,12 +66,22 @@ class tree:
             ch_name = ' '.join(split)
 
             # create a new hrf node
-            new_hrf = HRF(ch_name, doi, channel['duration'], channel['sfreq'], channel['hrf_mean'], channel['hrf_std'], channel['location'], **self.context)
+            new_hrf = HRF(
+                ch_name, 
+                doi, 
+                channel['duration'], 
+                channel['sfreq'], 
+                channel['hrf_mean'], 
+                channel['hrf_std'], 
+                channel['location'], 
+                **self.context)
             
             # Insert hrf node into tree
             node = self.insert(new_hrf)
 
-            # Add newly added node into HRHash table?
+            # Add newly added node into HRHash table
+            for context in self.context:
+                self.hasher.add(context, node)
 
     def branch(self, **kwargs):
         """
@@ -83,7 +93,7 @@ class tree:
         """
         self.context = {**self.context, **kwargs} # Update context
 
-        branch = Tree()
+        branch = tree('hrf_branch.json')
 
         for key, values in self.context.items(): # Iterate through all context items
             for value in values: # Iterate through each item in a context area
@@ -97,6 +107,7 @@ class tree:
         """Insert a new node into the 3D k-d tree based on spatial position."""
 
         if self.root is None:
+            print(f"Setting root... {hrf}")
             self.root = hrf
             return self.root
 
@@ -111,15 +122,19 @@ class tree:
         # Handle duplicates by jittering location
         if h_val == n_val and hrf.x == node.x and hrf.y == node.y and hrf.z == node.z:
             for val in (hrf.x, hrf.y, hrf.z):
+                print(f"WARNING: Jittering location for {hrf.ch_name}, same location as the following node.../n{node.__repr__()}")
                 val += 1e-10 # Jitter location while staying above 64-precision double threshold
-            
-        if h_val < n_val: # If the current node is less than the new node
+        
+        # If the current node is less than the new node
+        if h_val < n_val: 
             if node.left is None: # If the left node is empty
                 node.left = hrf
                 return node.left
             else: # If the left node is not empty
                 return self.insert(hrf, depth + 1, node.left)
-        else: # If the current node is greater than the new node
+            
+        # If the current node is greater than the new node
+        else: 
             if node.right is None:
                 node.right = hrf
                 return node.right
@@ -164,16 +179,15 @@ class tree:
             node (HRF) - The HRF node within the max distance
         """
         if node is None:
-            node = self.root
-
-        if node is None: # Establish base case
-            return None
-        
+            if self.root:
+                node = self.root
+            else:
+                return None
+    
         # Find max/min x, y and z if not calculated
         if max_point == None:
             min_point = [optode.x - max_distance, optode.y - max_distance, optode.z - max_distance]
             max_point = [optode.x + max_distance, optode.y + max_distance, optode.z + max_distance]
-            
 
         if min_point[0] > node.x and min_point[1] > node.y and min_point[2] > node.z:
             # Check if right node
@@ -185,9 +199,15 @@ class tree:
 
         axis = depth % 3
         if (axis == 0 and min_point[0] < node.x) or (axis == 1 and min_point[1] < node.y) or (axis == 2 and min_point[2] < node.z):
-            return self.search_dfs(optode, max_distance, depth + 1, node.left, max_point, min_point)
+            if node.left:
+                return self.search_dfs(optode, max_distance, depth + 1, node.left, max_point, min_point)
+            else:
+                return None
         else:
-            return self.search_dfs(optode, max_distance, depth + 1, node.right, max_point, min_point)
+            if node.right:
+                return self.search_dfs(optode, max_distance, depth + 1, node.right, max_point, min_point)
+            else:
+                return None
 
     def search_bfs(self, optode, max_distance, max_point = None, min_point = None):
         """
@@ -271,11 +291,11 @@ class tree:
 
         return best
 
-    def save(self, hrfs_filename = 'tree_hrfs.json'):
+    def save(self, filename = 'tree_hrfs.json'):
         hrfs = self.gather(self.root)
         # Save to a JSON file
-        with open(hrfs_filename, "w") as file:
-            json.dump(hrfs, file, indent=4)  # indent is optional, just makes it pretty
+        with open(filename, "w") as file:
+            json.dump(hrfs, file, indent=4)
         return
 
     def gather(self, node):
@@ -287,13 +307,14 @@ class tree:
             hrfs |= self.gather(node.right)
         hrfs |= {
             f"{'-'.join(node.ch_name.split(' '))}-{node.doi}": {
-                "hrf_mean": node.trace,
-                "hrf_std": node.trace_std,
+                "hrf_mean": node.trace.tolist(),
+                "hrf_std": node.trace_std.tolist(),
                 "location": [
                     node.x,
                     node.y,
                     node.z
                 ],
+                "oxygenation":node.oxygenation,
                 "sfreq": node.sfreq,
                 "context": node.context
             }
@@ -351,7 +372,7 @@ class tree:
         return min([node, left_min, right_min], key=lambda n: getattr(n, ["x", "y", "z"][axis]) if n else float('inf'))
 
 class HRF:
-    def __init__(self, doi, ch_name, duration, sfreq, trace, trace_std = None, location = None, **kwargs):
+    def __init__(self, doi, ch_name, duration, sfreq, trace, trace_std = None, location = None, estimates = None, **kwargs):
         """
         Object for storing all information apart of an estimated HRF from an fNIRS optode
 
@@ -372,9 +393,12 @@ class HRF:
             **kwargs - Context attributes to be updated, only used by class or developers
 
         """
-        # Add doi and channel names
+        # Add doi
         self.doi = doi
-        self.ch_name = ch_name
+
+        # Clean and add channel name
+        self.ch_name = re.sub(r'[_\-\s]+', '_', ch_name.lower())
+        self.oxygenation = hrfunc._is_oxygenated(self.ch_name)
 
         # Attach passed into info to class 
         self.sfreq = sfreq
@@ -416,16 +440,23 @@ class HRF:
         self.left = None
         self.right = None
 
+        if estimates:
+            self.estimates = estimates
+        else:
+            self.estimates = []
+
         self.hrf_processes = [self.spline_interp]
         self.process_names = ['spline_interpolate']
         self.process_options = []
 
+        self.built = False
+
     def __repr__(self):
         """String representation of the HRF object."""
-        print(f"HRF: {self.doi} - {self.ch_name} \nSampling frequency: {self.sfreq}\nTrace length: {len(self.trace)}\nTrace standrad deviation: {len(self.trace_std)}")
+        return f"HRF: {self.doi} - {self.ch_name} \nSampling frequency: {self.sfreq}\nLocation: [{self.x}, {self.y}, {self.z}]\nTrace length: {len(self.trace)}\nTrace standrad deviation: {self.trace_std}"
 
     def build(self, new_sfreq, plot = False, show = False):
-        # Define the processes for generating an hrf
+        """ Run through the processes requested for generating an hrf """
         self.target_length = new_sfreq * float(self.context['duration'])
         for process, process_name, process_option in zip(self.hrf_processes, self.process_names, self.process_options):
             
@@ -438,6 +469,7 @@ class HRF:
                 title = f"HRF - {process_name}"
                 filename = f"plots/{'-'.join(process_name.split(' ')).lower()}_{self.type}_hrf_results.png"
                 self.plot(title, filename, show)
+        self.built = True
 
 
     def spline_interp(self):
@@ -492,25 +524,29 @@ class HRF:
         # Resample trace
         return [mean + (std_seed * std) for mean, std in zip(self.trace, self.trace_std)]
 
-
-    def plot(self, title = None, filepath = None, show = True):
+    def plot(self, plot_dir):
         """
         # Function to plot the current HRF
 
         Function attributes:
-
+            title (str) - Title for the plot
+            filepath (str) - Path to save plots for each HRF stage
+            show (bool) - Whether to show the HRF state in-between processes
         """
 
-        plt.plot(self.trace) # Plot trace
+        hrf_mean = self.trace # scipy.ndimage.gaussian_filter1d(self.trace, 1)
+        hrf_std = self.trace_std
+        samples = np.arange(len(hrf_mean))
 
-        # Format plot
-        plt.title(title) 
-        
-        if filepath: # If filepath provided
-            plt.savefig(filepath) # Save
+        plt.figure(figsize=(8, 4))
+        plt.plot(samples, hrf_mean, label='Mean HRF', color='blue')
+        plt.fill_between(samples, hrf_mean - hrf_std, hrf_mean + hrf_std, color='blue', alpha=0.3, label='±1 SD')
 
-        elif show: # If plot requested to be shown
-            plt.show() # Show plot
-
-        plt.close() # Close all plots
+        plt.xlabel('Samples')
+        plt.ylabel('HRF amplitude')
+        plt.title(f'Estimated HRF for {self.ch_name} with Standard Deviation')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(f"{plot_dir}/{self.ch_name}_hrf_estimate.png")
         
