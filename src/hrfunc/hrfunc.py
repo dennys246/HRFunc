@@ -143,9 +143,9 @@ class montage(tree):
 
             else: # If hrf not found locally
                 print(f"Local HRF with given context couldn't be found for channel {ch_name}, searching for global HRF")
-                # Adjust channel location temporarily to global node nexus -0.5
+                # Adjust channel location temporarily to global node nexus 360
                 ch_location = [optode.x, optode.y, optode.z] 
-                optode.x, optode.y, optode.z = -0.5, -0.5, -0.5
+                optode.x, optode.y, optode.z = 360, 360, 360
                 
                 # Search for global HRF with similar context
                 hrf = self.search_bfs(self.channels[ch_name], max_distance)
@@ -168,7 +168,7 @@ class montage(tree):
         """
         return np.convolve(events, hrf, mode='full')
 
-    def deconvolve_hrf(self, nirx_obj, events, duration = 12.0, _lambda = 1e-4, plot_dir = None, shorten_events = False):
+    def deconvolve_hrf(self, nirx_obj, events, duration = 12.0, _lambda = 1e-3, edge_expansion = 0.15, plot_dir = None):
         """
         Estimate an HRF subject wise given a nirx object and event impulse series using toeplitz 
         deconvolution with regularization.
@@ -185,19 +185,37 @@ class montage(tree):
         if isinstance(events, list) == False:
             return ValueError(f"Events passed in must be of type list, object of type {type(events)} was passed in...")
 
-        events = np.array(events)
+        events = np.array(events) # Convert events to numpy array
 
-        nirx_obj.load_data()
-        data = nirx_obj.get_data()
+        # Expand event and duration to account for toeplitz edge artifacts (removed later)
+        timeshift = int(round((self.sfreq * duration) * edge_expansion, 0))
+        new_events = np.zeros_like(events)
+        for ind in range(events.shape[0]): # Iterate through all events
+            if events[ind] != 0: # if we found an event
+                if (ind - timeshift) < 0: # Check if we can expand the event
+                    print("WARNING: An event has been ommited due to edge expansion falling outside of the scan timeframe")
+                    continue
+                new_events[ind - timeshift] = 1
+        
+        # Update events and duration to reflect expansion
+        events = new_events
 
-        hrf_len = int(round(nirx_obj.info['sfreq'] * duration, 0)) # Calculate HRF length
+        # Update new time HRF estimation duration to account for edge expansion
+        duration *= (1 + 2 * edge_expansion)
+
+        nirx_obj.load_data() # Load nirx object
+        data = nirx_obj.get_data() # Grab data
+
+        hrf_len = int(round(self.sfreq * duration, 0))  # Calculate HRF length
         scan_len = data.shape[1] # Grab single channel signal length
 
-        if events.shape[0] > scan_len and shorten_events:
+        if events.shape[0] > scan_len:
             events = events[:scan_len]
+            print(f"Warning: Shortening events for {nirx_obj}")
         elif events.shape[0] != scan_len:
-            raise ValueError(f"Expected events to be of length {hrf_len} but got length {events.shape[0]}...\n\nAdjust your events to match the size of the NIRS scan or if you need to cut the events short to match the NIRS scan, pass the argument shorten_events as True...")
-
+            raise ValueError(f"Expected events to be of length {scan_len} but got length {events.shape[0]}...")
+    
+        print(f"Events: {events}")
         # Build Toeplitz matrix
         X = scipy.linalg.toeplitz(events, np.zeros(hrf_len))
         for fnirs_signal, channel in zip(data[:], nirx_obj.info['chs']) : # For each channel
@@ -220,6 +238,13 @@ class montage(tree):
             # Denormalize HRF estimate
             #hrf_estimate = hrf_estimate * np.max(np.abs(fnirs_signal))
             #hrf_estimate = hrf_estimate * std + mean
+
+            # Adjust the remove the added edges from the hrf_estimate
+            start = int(round(hrf_len * edge_expansion, 0))
+            end = hrf_len - start
+            hrf_estimate = hrf_estimate[start:end]
+
+            # Append estimate to channel estimates
             self.channels[channel['ch_name']].estimates.append(hrf_estimate)
         
         self.generate_distribution(plot_dir)
@@ -304,6 +329,7 @@ class montage(tree):
             if optode is None or 'global' in optode.ch_name: # Catch base case
                 return
 
+            # Calculate the mean and standard deviation of the HRF across estimates
             optode.trace = np.mean(optode.estimates, axis = 0)
             optode.trace_std = np.std(optode.estimates, axis = 0)
 
@@ -333,7 +359,7 @@ class montage(tree):
                 sfreq = self.sfreq,
                 trace = global_mean,
                 trace_std = global_std,
-                location = [-0.5 + random.random(), -0.5 + random.random(), -0.5 + random.random()]
+                location = [360 + random.random(), 360 + random.random(), 360 + random.random()]
             )
             #Insert global hrf into tree and attach pointer to channels dict
             if oxygenation:
