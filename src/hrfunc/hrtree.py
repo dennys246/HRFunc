@@ -394,6 +394,7 @@ class HRF:
 
         """
         # Add doi
+        # Add doi
         self.doi = doi
 
         # Clean and add channel name
@@ -534,7 +535,7 @@ class HRF:
             show (bool) - Whether to show the HRF state in-between processes
         """
 
-        hrf_mean = self.trace # scipy.ndimage.gaussian_filter1d(self.trace, 1)
+        hrf_mean = self.trace
         hrf_std = self.trace_std
         samples = np.arange(len(hrf_mean))
 
