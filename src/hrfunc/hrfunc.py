@@ -1,51 +1,12 @@
-import scipy.linalg, json, mne, random, re
-from .hrtree import tree, HRF
+import scipy.linalg, json, mne, random, re, os, hrfunc
 import numpy as np
 import matplotlib.pyplot as plt
+from .hrtree import tree, HRF
+from itertools import compress
 from glob import glob
 
-def estimate_hrfs(nirx_folder, nirx_identifier, events, hrfs_filename = "hrf_estimates.json", plot_dir = None, **kwargs):
-    """
-    This function is the primary call for estimating an HRF across a subject pool
-    fNIRS data. To accomplish this, the function creates a hrfunc.montage and for
-    each nirx file found using the nirx_folder and nirx_identifier estimates an 
-    event wise HRF then generates a channel wise distribution after deconvolving all
-    available subjects.
-    """
-    # Set data context
-    context = {
-            'type': 'global',
-            'doi': 'temp',
-            'study': None,
-            'task': None,
-            'conditions': None,
-            'stimulus': None,
-            'intensity': None,
-            'duration': 12.0,
-            'protocol': None,
-            'age_range': None,
-            'demographics': None
-    }
-    context = {**context, **kwargs} # Add user input
 
-    # Grab all available nirx files
-    nirx_files = glob(f"{nirx_folder}/**/{nirx_identifier}")
-    
-    _montage = montage(_load_fnirs(nirx_files[0]), hrfs_filename, **kwargs)
-
-    for nirx_filename in nirx_files: # For each nirx object
-        nirx_obj = _load_fnirs(nirx_filename) # Load the nirx
-
-        _montage.deconvolve_hrf(nirx_obj, events) # Estimate the HRF
-
-    _montage.generate_distribution(context['duration'], plot_dir) # Generate HRF distribution
-
-    _montage.save(hrfs_filename, context['doi'], **kwargs) # Save montage
-
-    return _montage
-
-
-def locate_hrfs(nirx_obj, hrfs_filename = 'hrfs.json', **kwargs):
+def locate_hrfs(nirx_obj, similarity_threshold = 0.95, **kwargs):
     """
     Locate local HRF's for the nirx object and return a montage with found HRF's
 
@@ -53,11 +14,11 @@ def locate_hrfs(nirx_obj, hrfs_filename = 'hrfs.json', **kwargs):
         nirx_obj (mne raw object) - NIRS file loaded through mne
     """
     # Build a montage
-    _montage = montage(nirx_obj, hrfs_filename, **kwargs)
+    _montage = montage(nirx_obj, **kwargs)
+    _montage.load_hrfs()
     return _montage
 
 class montage(tree):
-
     """
     Class functions:
         - localize_hrf() - Tries to find a previously derived HRFs localized to the same region
@@ -76,22 +37,25 @@ class montage(tree):
         - channel_estimates (list) - List of channel HRF distribution estimates (position 0 is mean and 1 is std)
     """
 
-    def __init__(self, nirx_obj = None, hrfs_filename = None, deconv_method = None, conv_method = None, **kwargs):
+    def __init__(self, nirx_obj = None, hrfs_filename = None, **kwargs):
         if nirx_obj is None and hrfs_filename is None: # Check if enough info sent in
             raise ValueError(f"A NIRX object or a previously estimated HRFs.json must be passed in to initialize a HRFunc.montage")
 
         self.root = None # Set an empty root
 
+        # Save runtime parameters to object
+        self.lib_dir = os.path.dirname(hrfunc.__file__)
+
         # Set data context
         self.context = {
-                'type': 'global',
+                'method': 'toeplitz',
                 'doi': 'temp',
                 'study': None,
                 'task': None,
                 'conditions': None,
                 'stimulus': None,
                 'intensity': 1.0,
-                'duration': 12.0,
+                'duration': 30.0,
                 'protocol': None,
                 'age_range': None,
                 'demographics': None
@@ -99,29 +63,30 @@ class montage(tree):
         self.context = {**self.context, **kwargs} # Add user input
         self.context_weights = {context: 1.0 for context in self.context.keys()}
 
-        # Initialize an empty tree
-        self.hbo_tree = tree("deoxy_hrfs.json", **kwargs)
-        self.hbr_tree = tree("oxy_hrfs.json", **kwargs)
-
-        self.hbo_channels = [ch for ch in nirx_obj.ch_names if ch.endswith('hbo')]
-        self.hbr_channels = [ch for ch in nirx_obj.ch_names if ch.endswith('hbr')]
+        self.hbo_channels = [ch for ch in nirx_obj.ch_names if _is_oxygenated(ch) == True]
+        self.hbr_channels = [ch for ch in nirx_obj.ch_names if _is_oxygenated(ch) == False]
 
         self.channels = {} # Create variable for holding poiners to each channel
         
-        self.sfreq = nirx_obj.info['sfreq'] # Sampling frequency
+        self.sfreq = nirx_obj.info['sfreq'] # Sampling frequency            
 
-        if hrfs_filename: # If previously estimated hrfs provided, load in
-            self.load(hrfs_filename)
-        
-        else: # Merge the NIRX object montage into the hrfunc.montage object
+        self.hbo_tree = tree(f"{self.lib_dir}/hrfs/hbo_hrfs.json", **kwargs)
+        self.hbr_tree = tree(f"{self.lib_dir}/hrfs/hbr_hrfs.json", **kwargs)
+
+        # Merge nirx object into montage
+        if hrfs_filename and os.path.exists(hrfs_filename):
+            print(f"Loading in previous estimates {hrfs_filename}")
+            self.load_montage(hrfs_filename)
+        else:
+            print(f"Creating new HRF montage from {nirx_obj}")
             self._merge_montages(nirx_obj) # Add empty HRF nodes to the tree for each HRF
         
         self.__repr__()
 
     def __repr__(self):
-        return f" - Montage object - \nNumber of channels: {len(self.channels)}\n Sampling frequency: {self.sfreq}\nHbO channels (count of {len(self.hbo_channels)}): {self.hbo_channels}\n HbR channels (count of {len(self.hbr_channels)}): {self.hbr_channels}\n\n"
+        return f" - Montage object - \nNumber of channels: {len(self.channels)}\n Sampling frequency: {self.sfreq}\nHbO channels (count of {len(self.hbo_channels)}): {self.hbo_channels}\n HbR channels (count of {len(self.hbr_channels)}): {self.hbr_channels}\n - Contexts - \n{'\n'.join([f'{key} - {value} - {self.context_weights[key]}' for key, value in self.context.items()])}\n"
 
-    def localize_hrfs(self, max_distance = 3.0):
+    def localize_hrfs(self, max_distance = 0.01):
         """
         Tries to find local HRFs to each of the fNIRS optodes using the tree structure
         functionality to quickly find nearby HRF's. If it can't it will default to a
@@ -133,9 +98,9 @@ class montage(tree):
         
         for ch_name, optode in self.channels.items(): # Iterate through channels apart of nirx data
             if _is_oxygenated(ch_name):
-                hrf = self.hbo_tree.search_dfs(optode, max_distance) # Search in space for similar HRF
+                hrf = self.hbo_tree.nearest_neighbor(optode, max_distance) # Search in space for similar HRF
             else:
-                hrf = self.hbr_tree.search_dfs(optode, max_distance)
+                hrf = self.hbr_tree.nearest_neighbor(optode, max_distance)
 
             if hrf: # If found
                 optode.trace = hrf.trace # Add mean and std to montage for channel
@@ -145,10 +110,10 @@ class montage(tree):
                 print(f"Local HRF with given context couldn't be found for channel {ch_name}, searching for global HRF")
                 # Adjust channel location temporarily to global node nexus 360
                 ch_location = [optode.x, optode.y, optode.z] 
-                optode.x, optode.y, optode.z = 360, 360, 360
+                optode.x, optode.y, optode.z = 360.0, 360.0, 360.0
                 
                 # Search for global HRF with similar context
-                hrf = self.search_bfs(self.channels[ch_name], max_distance)
+                hrf = self.nearest_neighbor(self.channels[ch_name], max_distance)
                 if hrf: # If found
                     optode.trace = hrf.trace # Add mean and std to montage for channel
                     optode.trace_std = hrf.trace_std
@@ -168,7 +133,7 @@ class montage(tree):
         """
         return np.convolve(events, hrf, mode='full')
 
-    def deconvolve_hrf(self, nirx_obj, events, duration = 12.0, _lambda = 1e-3, edge_expansion = 0.15, plot_dir = None):
+    def deconvolve_hrf(self, nirx_obj, events, duration = 30.0, _lambda = 1e-3, edge_expansion = 0.15, preprocess = True):
         """
         Estimate an HRF subject wise given a nirx object and event impulse series using toeplitz 
         deconvolution with regularization.
@@ -205,8 +170,11 @@ class montage(tree):
 
         nirx_obj.load_data() # Load nirx object
         data = nirx_obj.get_data() # Grab data
+        if preprocess:
+            preprocess_fnirs(nirx_obj, deconvolution = True)
 
         hrf_len = int(round(self.sfreq * duration, 0))  # Calculate HRF length
+        print(f"HRF length: {hrf_len}")
         scan_len = data.shape[1] # Grab single channel signal length
 
         if events.shape[0] > scan_len:
@@ -215,11 +183,9 @@ class montage(tree):
         elif events.shape[0] != scan_len:
             raise ValueError(f"Expected events to be of length {scan_len} but got length {events.shape[0]}...")
     
-        print(f"Events: {events}")
         # Build Toeplitz matrix
         X = scipy.linalg.toeplitz(events, np.zeros(hrf_len))
         for fnirs_signal, channel in zip(data[:], nirx_obj.info['chs']) : # For each channel
-            
             # Grab channel data and normalize
             #Y = fnirs_signal / np.max(np.abs(fnirs_signal))
             mean = np.mean(fnirs_signal)
@@ -240,17 +206,19 @@ class montage(tree):
             #hrf_estimate = hrf_estimate * std + mean
 
             # Adjust the remove the added edges from the hrf_estimate
-            start = int(round(hrf_len * edge_expansion, 0))
-            end = hrf_len - start
+            start = timeshift
+            end = hrf_len - timeshift
             hrf_estimate = hrf_estimate[start:end]
+            print(f"HRF Estimate (length of {len(hrf_estimate)}): {channel['ch_name']}\n{hrf_estimate}\n{nirx_obj}")
 
             # Append estimate to channel estimates
+            print(f"Channels: {", ".join(self.channels.keys())}")
             self.channels[channel['ch_name']].estimates.append(hrf_estimate)
-        
-        self.generate_distribution(plot_dir)
+
+            print(f"Single HRF estimate for {channel['ch_name']}: {hrf_estimate}")
 
 
-    def deconvolve_activity(self, nirx_obj, _lambda = 1e-4, **kwargs):
+    def deconvolve_activity(self, nirx_obj, _lambda = 1e-4, hrf_model = 'toeplitz', preprocess = True):
         """
         Deconvlve a fNIRS scan using estimated HRF's localized to optodes location
         to gain a neural activity estimate
@@ -261,6 +229,8 @@ class montage(tree):
         """
             
         nirx_obj.load_data()
+        if preprocess:
+            preprocess_fnirs(nirx_obj, deconvolution = True)
 
         # Define hrf deconvolve function to pass nirx object
         def deconvolution(nirx):
@@ -305,14 +275,27 @@ class montage(tree):
         for ch_name, hrf in self.channels.items():
             if 'global' in ch_name: continue # Skip if global hrf estimate
             
+            # If canonical HRF requested
+            if hrf_model == 'canonical':
+                print(f"Using canonical HRF for {nirx_obj}")
+                estimate_hrf = hrf # Temporarily replace HRF
+                if _is_oxygenated(ch_name): # with oxygenated canonical
+                    hrf = self.hbo_tree.root.right
+                else: # with deoxygenated canonical
+                    hrf = self.hbr_tree.root.right
+
+
             # Figure out which channel to apply to
             for nirx_channel in nirx_obj.info['chs']:
                 standard_ch_name = re.sub(r'[_\-\s]+', '_', nirx_channel['ch_name'].lower())
                 if ch_name == standard_ch_name:
                     break
+                
             print(f"Deconvolving channel {ch_name}...") # Apply deconvolution
             nirx_obj.apply_function(deconvolution, picks = [nirx_channel['ch_name']]) # Apply deconvolution for channel
         
+            if hrf_model == 'canonical':
+                hrf = estimate_hrf # Replace the original HRF
         return nirx_obj
 
     def generate_distribution(self, plot_dir = None):
@@ -325,14 +308,10 @@ class montage(tree):
         hbr_estimates = []
         hbo_estimates = []
 
-        def estimate(optode, plot_dir):
-            if optode is None or 'global' in optode.ch_name: # Catch base case
-                return
-
-            # Calculate the mean and standard deviation of the HRF across estimates
+        for channel in self.channels.keys():
+            optode = self.channels[channel]
             optode.trace = np.mean(optode.estimates, axis = 0)
             optode.trace_std = np.std(optode.estimates, axis = 0)
-
             if plot_dir:
                 optode.plot(plot_dir)
             
@@ -341,15 +320,11 @@ class montage(tree):
             else:
                 hbr_estimates.append(optode.trace)
 
-            estimate(optode.left, plot_dir)
-            estimate(optode.right, plot_dir)
-
-        estimate(self.root, plot_dir) # Call to recursive estimate
-
         # Calculate global HRF mean and standard deviation
         for oxygenation, estimates in zip([True, False], [hbo_estimates, hbr_estimates]):
-            global_mean = np.mean(estimates)
-            global_std = np.std(estimates)
+            type_estimates = np.vstack(estimates)
+            global_mean = np.mean(type_estimates, axis = 0)
+            global_std = np.std(type_estimates, axis = 0)
 
             # Create a global HRF variable
             global_hrf = HRF(
@@ -380,14 +355,10 @@ class montage(tree):
             for hbr_ind, hbr_channel in enumerate(self.hbr_channels):
                 hbr_hrf = self.channels[hbr_channel].trace
                 
-                print(f"Correlating {hbo_channel} with {hbr_channel}")
-                
                 corr_coefficient, p_value = scipy.stats.spearmanr(hbo_hrf, hbr_hrf)
                 
                 corr_matrix[hbo_ind, hbr_ind, 0] = corr_coefficient
                 corr_matrix[hbo_ind, hbr_ind, 1] = p_value
-        
-        print(f"Correlation matrix: {corr_matrix[:, :, 0]}")
 
         # Plot the correlation matrix
         plt.figure(figsize=(10, 8))
@@ -421,13 +392,12 @@ class montage(tree):
         
         return corr_matrix
 
-    def correlate_canonical(self, plot_filename = "canonical_correlation.png", duration = 12.0):
+    def correlate_canonical(self, plot_filename = "canonical_correlation.png", duration = 30.0):
         """
         Correlate the HRF estimates with a canonical HRF to assess similarity
         """
         # Generate canonical HRF
-        dt = 1.0 / self.sfreq
-        time_stamps = np.arange(0, duration, dt)
+        time_stamps = np.arange(0, len(self.root.trace), 1)
 
         # Parameters for the double-gamma HRF
         peak1 = scipy.stats.gamma.pdf(time_stamps, 6) # peak at ~6s
@@ -435,23 +405,23 @@ class montage(tree):
 
         canonical_hrf = peak1 - peak2
         canonical_hrf /= np.max(canonical_hrf)  # Normalize peak to 1
-
         corr_matrix = np.zeros((len(self.hbo_channels) + len(self.hbr_channels), 2))
         for ind, ch_name in enumerate(self.hbo_channels + self.hbr_channels):
             hrf = self.channels[ch_name]
-            corr_coefficient, p_value = scipy.stats.spearmanr(hrf.trace, canonical_hrf)
+
+            corr_coefficient, p_value = scipy.stats.spearmanr(canonical_hrf, hrf.trace)
             corr_matrix[ind, 0] = corr_coefficient
             corr_matrix[ind, 1] = p_value
 
         # Plot the correlation matrix
         plt.figure(figsize=(10, 8))
-        plt.imshow(corr_matrix[:, :, 0], cmap='viridis', aspect='auto')
+        plt.imshow(corr_matrix[:, 0][np.newaxis, :], cmap='viridis', aspect='auto')
         plt.colorbar(label='Correlation Coefficient')
         plt.title('Correlation Matrix of HRF Estimates with Cannonical HRF')
         plt.xlabel('Montage Channels')
         plt.ylabel('Cannonical HRF')
-        plt.xticks(range(len(self.channels.keys())), range(len(self.channels.keys())), rotation=90)
-        plt.yticks(range(len(self.channels.keys())), range(len(self.channels.keys())))
+        plt.xticks(range(len(self.hbo_channels) + len(self.hbr_channels)), self.hbo_channels + self.hbr_channels, rotation=90)
+        plt.yticks(range(1), ['Canonical'])
         plt.tight_layout()
 
         plt.savefig(plot_filename)
@@ -459,13 +429,13 @@ class montage(tree):
 
         # Plot p-values
         plt.figure(figsize=(10, 8))
-        plt.imshow(corr_matrix[:, :, 1], cmap='viridis', aspect='auto')
+        plt.imshow(corr_matrix[:, 1][np.newaxis, :], cmap='viridis', aspect='auto')
         plt.colorbar(label='P-value')
         plt.title('P-values of Correlation with Cannonical HRF')
         plt.xlabel('Montage Channels')
         plt.ylabel('Cannonical HRF')
-        plt.xticks(range(len(self.channels.keys())), range(len(self.channels.keys())), rotation=90)
-        plt.yticks(range(len(self.channels.keys())), range(len(self.channels.keys())))
+        plt.xticks(range(len(self.hbo_channels) + len(self.hbr_channels)), self.hbo_channels + self.hbr_channels, rotation=90)
+        plt.yticks(range(1), ['Canonical'])
         plt.tight_layout()
         plt.savefig(plot_filename.replace(".png", "_pvalues.png"))
         plt.close()
@@ -480,14 +450,14 @@ class montage(tree):
             Filename (str) - Filename to save the montage HRFs as
         """
         hrfs = self.gather(self.root)
-        print(f"Final HRF: {hrfs}")
+        print(f"Final HRF: {hrfs.keys()}")
         # Save to a JSON file
         with open(filename, "w") as file:
             json.dump(hrfs, file, indent=4)
         return
     
 
-    def load(self, json_filename):
+    def load_montage(self, json_filename):
         """ Load montage with the given json filename """
         # Read in json
         with open(json_filename, 'r') as file:
@@ -499,6 +469,10 @@ class montage(tree):
             doi = key_split.pop()
             ch_name = '-'.join(key_split)
 
+            # Skip if canonical HRF
+            if ch_name == 'canonical':
+                continue
+
             # create an empty HRF object
             empty_hrf = HRF(
                 doi,
@@ -509,13 +483,19 @@ class montage(tree):
                 np.asarray(channel['hrf_std'], dtype=np.float64), 
                 channel['location']
             )
+
             # Insert empty hrf into tree and attach pointer to channel
             oxygenation = _is_oxygenated(ch_name)
             if oxygenation:
                 self.channels[ch_name] = self.hbo_tree.insert(empty_hrf)
+                # Add context to tree
+                for context in self.context:
+                    self.hbo_tree.hasher.add(context, self.channels[ch_name])
             elif oxygenation == False:
                 self.channels[ch_name] = self.hbr_tree.insert(empty_hrf)
-            
+                # Add context to tree
+                for context in self.context:
+                    self.hbr_tree.hasher.add(context, self.channels[ch_name])
         return
     
     def _merge_montages(self, nirx_obj):
@@ -535,10 +515,16 @@ class montage(tree):
         """
         # Add each nirx object channel to the hrfunc.montage
         for channel in nirx_obj.info['chs']:
+                # (Re)set runtime variables
+                results = None
+
                 # Grab pertinent info from nirx header
                 ch_name = channel['ch_name']
                 location = channel['loc'][:3]
-                print(f"Channel {ch_name} location: {location}")
+
+                # Skip if canonical HRF
+                if ch_name == 'canonical':
+                    continue
 
                 # create an empty HRF object
                 empty_hrf = HRF(
@@ -555,9 +541,10 @@ class montage(tree):
                 # Check if an HRF in this area already exists 
                 # NOTE: This is necessary to localize nodes with slight
                 # channel name differences in the same location
-                results = self.search_dfs(empty_hrf, max_distance = 1e-9)
-                if results: # If previously defined channel hrf found
-                    print(f"Local HRF found in the channel {results.ch_name}, merging with optode {ch_name}")
+                if empty_hrf.oxygenation:
+                    results = self.nearest_neighbor(empty_hrf, max_distance = 1e-9)
+                if results and results[0].doi != 'canonical': # If previously defined channel hrf found
+                    print(f"Local HRF found in the channel {results}\n merging with optode {ch_name}")
                     self.channels[ch_name] = results # Attach node to channel
                 else: # If new channel
                     self.channels[ch_name] = self.insert(empty_hrf) # Insert empty hrf into montage tree
@@ -578,6 +565,81 @@ class montage(tree):
         with open(filename, "w") as file:
             json.dump(hrfs, file, indent=4)
         return
+
+def preprocess_fnirs(scan, deconvolution = False):
+    """
+    Preprocess fNIRS data in an MNE Raw object.
+
+    Steps:
+    - Optical density conversion
+    - Scalp coupling index evaluation and bad channel marking
+    - Motion artifact correction using TDDR
+    - Optional polynomial detrending for deconvolution
+    - Haemoglobin conversion via Beer-Lambert Law
+    - Optional bandpass filtering for GLM-based analysis
+
+    Parameters:
+    - scan: mne.io.Raw
+        The raw fNIRS MNE object to preprocess.
+    - deconvolution: bool
+        If True, performs detrending and skips filtering.
+
+    Returns:
+    - haemo: mne.io.Raw
+        Preprocessed data with haemoglobin concentration channels.
+    """
+
+    scan.load_data()
+
+    raw_od = mne.preprocessing.nirs.optical_density(scan)
+
+    # scalp coupling index
+    sci = mne.preprocessing.nirs.scalp_coupling_index(raw_od)
+    raw_od.info['bads'] = list(compress(raw_od.ch_names, sci < 0.95))
+
+    if len(raw_od.info['bads']) == len(scan.ch_names):
+        print("All channels are bad, skipping subject...")
+        return
+
+    if len(raw_od.info['bads']) > 0:
+        print("Bad channels in subject", raw_od.info['subject_info']['his_id'], ":", raw_od.info['bads'])
+
+    # Interpolate bad channels
+    raw_od.interpolate_bads(reset_bads=False)
+
+    # temporal derivative distribution repair (motion attempt)
+    od = mne.preprocessing.nirs.tddr(raw_od)
+
+    # If running deconvolution, polynomial detrend to remove pysiological without cutting into the frequency spectrum
+    if deconvolution:
+        od = polynomial_detrend(od, order=1)
+
+    # haemoglobin conversion using Beer Lambert Law 
+    haemo = mne.preprocessing.nirs.beer_lambert_law(od.copy(), ppf=0.1)
+
+    haemo = baseline_correct(haemo, baseline=(None, 0.0))
+
+    if not deconvolution:
+        haemo.filter(0.01, 0.2)
+
+    return haemo
+
+def baseline_correct(raw, baseline=(None, 0.0)):
+    return raw.apply_function(lambda x: mne.baseline.rescale(x, times=raw.times, baseline=baseline, mode='mean'), picks='data')
+
+def polynomial_detrend(raw, order = 1):
+    raw_detrended = raw.copy()
+    times = raw.times
+    times_scaled = (times - times.mean()) / times.std()  # or just (times - mean)
+    X = np.vander(times_scaled, N=order + 1, increasing=True)
+
+    for idx in range(len(raw.ch_names)):
+        y = raw.get_data(picks = idx)[0]
+        beta = np.linalg.lstsq(X.T @ X, X.T @ y, rcond = None)[0]
+        y_detrended = y - X @ beta
+        raw_detrended._data[idx] = y_detrended
+
+    return raw_detrended
 
 def _load_fnirs(nirs_filename):
     """ Load the fNIRS file based on the format found """
@@ -600,11 +662,22 @@ def _load_fnirs(nirs_filename):
  
 def _is_oxygenated(ch_name):
     """ Check in whether the channel is HbR or HbO """
-    split = ch_name.split('hb')
-    if split[1][0] == 'o': # If oxygenated channel
-        return True
-    elif split[1][0] == 'r': # If deoxygenated channel
-        return False
-    else:
-        raise ValueError(f"Channel {ch_name} oxygenation status could not be determines, ensure each channel has appropriate naming scheme with HbO/HbR included")
-
+    if ch_name[-2] == 'b':
+        split = ch_name.split('hb')
+        if split[1][0] == 'o': # If oxygenated channel
+            return True
+        elif split[1][0] == 'r': # If deoxygenated channel
+            return False
+        else:
+            raise ValueError(f"Channel {ch_name} oxygenation status could not be determines, ensure each channel has appropriate naming scheme with HbO/HbR included")
+    elif ch_name[-1] == '0':
+        try:
+            wavelength = int(ch_name[-3:])
+            if wavelength >= 760 and wavelength <= 780:
+                return False
+            elif wavelength >= 830 and wavelength <= 850:
+                return True
+            else:
+                LookupError(f"Wavelength found, but failed to evaluate oxygenation status of channel {ch_name}")
+        except:
+            LookupError(f"Failed to evaluate oxygenation status of channel {ch_name}")
