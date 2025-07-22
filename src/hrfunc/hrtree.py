@@ -1,4 +1,4 @@
-import json, random, math, re, scipy
+import json, random, math, re, nilearn, scipy, os
 from . import hrhash, hrfunc
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,27 +7,39 @@ from collections import deque
 from nilearn.glm.first_level import spm_hrf
 
 class tree:
-    """
-    This object is intended to generate a synthetic hemodynamic response function to be
-    deconvovled from fNIRS signals to aquire neural signal estimates. You can pass in a
-    variety of optional parameters like mean window, sigma and scaling factor to alter the way your hrf is generated.
 
-    """
-    def __init__(self, hrf_filename = "hrfs.json", **kwargs):
+    def __init__(self, hrf_filename = None, **kwargs):
+        """
+        A k-d tree data structure for storing HRF estimates across NIRX space
+
+        Arguments:
+            - hrf_filename (str) - Filepath to json file containing HRF estimates
+            - context arguments - Any context item you'd like to include in the HRF search
+
+        Functions:
+            - compare() - Filter the HRF file for contexts of interest
+        """
+        # Find hrfunc install library
+        self.lib_dir = os.path.dirname(hrfunc.__file__)
+        if hrf_filename:
+            self.hrf_filename = hrf_filename
+        else:
+            self.hrf_filename = None
+
         self.root = None
-
-        self.hrf_filename = hrf_filename
+        self.branched = False     
 
         # Set and update context
         self.context = {
-            'type': 'global',
+            'method': 'toeplitz',
             'doi': 'temp',
+            'ch_name': 'global',
             'study': None,
             'task': None,
             'conditions': None,
             'stimulus': None,
             'intensity': None,
-            'duration': 12.0,
+            'duration': 30.0,
             'protocol': None,
             'age_range': None,
             'demographics': None
@@ -37,7 +49,10 @@ class tree:
 
         self.hasher = hrhash.hasher(self.context)
 
-    def build(self, hrf_filename = None, sim_threshold = 0.0, context_weights = None):
+        if self.hrf_filename and os.path.exists(self.hrf_filename):
+            self.load_hrfs(self.hrf_filename)
+
+    def load_hrfs(self, hrf_filename, similarity_threshold = 0.0, oxygenated = None):
         """
         Orchestrate building the HRF tree while filtering for specific context
 
@@ -46,35 +61,41 @@ class tree:
             sim_threshold (float) - Threshold to allow or exclude HRF's based on context, defaults to 0.0 or no threshold
             context_weights (dict) - Weight to attach to each context during similarity comparison
         """
-        if hrf_filename == None: # If no json filename provided
-            hrf_filename = self.hrf_filename # Set as class default
 
-        hrfs_json = json.load(hrf_filename) # Load HRFs from json
+        with open(hrf_filename, 'r') as json_file:
+            hrfs_json = json.load(json_file) # Load HRFs from json
         
-        for channel in hrfs_json:
-
-            # If requesting a similarity comparison
-            if sim_threshold > 0.0: 
-                # Check if the hrf matches the context
-                similarity = self.compare_context(self.context, channel['context'], context_weights)
-                if similarity < sim_threshold: # If not similar enough to requested context
-                    continue # Exclude derived HRF
+        for key, channel in hrfs_json.items():
             
             # Grab channel and doi info
-            split = channel.split('-')
+            split = key.split('-')
             doi = split.pop()
             ch_name = ' '.join(split)
 
+            # Skip if oxygenation/deoxygenation filtering requested
+            oxygenation = hrfunc._is_oxygenated(ch_name)
+            if oxygenated == False and oxygenation:
+                continue
+            if oxygenated and oxygenation == False:
+                continue
+
+            # If similarity check requested
+            if similarity_threshold > 0.0:
+                context_similarity = self.compare_context(self.context, channel['context'], self.context_weights)
+                if context_similarity < similarity_threshold:
+                    print(f"Skipping {channel}")
+                    continue
+
             # create a new hrf node
             new_hrf = HRF(
-                ch_name, 
                 doi, 
-                channel['duration'], 
-                channel['sfreq'], 
-                channel['hrf_mean'], 
-                channel['hrf_std'], 
+                ch_name, 
+                float(channel['context']['duration']), 
+                float(channel['sfreq']), 
+                np.asarray(channel['hrf_mean'], dtype=np.float64), 
+                np.asarray(channel['hrf_std'], dtype=np.float64), 
                 channel['location'], 
-                **self.context)
+                channel['context'])
             
             # Insert hrf node into tree
             node = self.insert(new_hrf)
@@ -82,26 +103,6 @@ class tree:
             # Add newly added node into HRHash table
             for context in self.context:
                 self.hasher.add(context, node)
-
-    def branch(self, **kwargs):
-        """
-        Accepts context keyword inputs via kwargs, updates the trees context
-        and then builds a new tree filtering for just the context
-
-        Arguments:
-            **kwargs - Any context keyword value pair to branch on (i.e. doi, age, etc)
-        """
-        self.context = {**self.context, **kwargs} # Update context
-
-        branch = tree('hrf_branch.json')
-
-        for key, values in self.context.items(): # Iterate through all context items
-            for value in values: # Iterate through each item in a context area
-                # Hash on the value and iterate through the tree pointers
-                context_references = self.hasher.search(value)
-                for node in context_references:
-                    branch.insert(node) # Insert node pointer into branch
-        return branch
 
     def insert(self, hrf, depth = 0, node = None):
         """Insert a new node into the 3D k-d tree based on spatial position."""
@@ -113,6 +114,22 @@ class tree:
 
         if node is None:
             node = self.root
+
+            canonical_hrf = nilearn.glm.first_level.glover_hrf(tr = 0.128, oversampling = 1, time_length = 30.0)
+            if self.root.oxygenation:
+                ch_name = 'global-hbo'
+            else:
+                canonical_hrf = [-point for point in canonical_hrf]
+                ch_name = 'global-hbr'
+
+            self.root.right = HRF(
+                'canonical',
+                ch_name,
+                30.0,
+                7.81,
+                canonical_hrf,
+                location = [359.0, 359.0, 359.0]
+            )
 
         axis = depth % 3  # Cycle through x, y, z
 
@@ -141,7 +158,33 @@ class tree:
             else:
                 return self.insert(hrf, depth + 1, node.right)
 
-    def compare_context(self, first_context, second_context, context_weights):
+    def filter(self, similarity_threshold = 0.95, node = None, **kwargs):
+        """
+        Filter on experimental contexts
+        """
+        if node is None: # Set up filtering
+            if self.root is None: # If nothing loaded yet
+                raise ValueError("No HRFs loaded yet, nothing to filter")
+            
+            node = self.root # Set root at node
+            self.context = {**self.context, **kwargs} 
+
+            if self.branched == False: # Branch to reduce number of hard comparison
+                print("Branching tree on context before filtering")
+                self.branch()
+
+        if node.left: # If there's a left node
+            self.filter(similarity_threshold, node.left)
+
+        if node.right: # If there's a right node
+            self.filter(similarity_threshold, node.right)
+
+        # Check if the hrf matches the context
+        context_similarity = self.compare_context(self.context, node.context, self.context_weights)
+        if context_similarity > similarity_threshold: # If not similar enough to requested context
+            self.delete(node) # Exclude derived HRF
+
+    def compare_context(self, first_context, second_context):
         """
         Compare two contexts to see how similar they are
         """
@@ -154,8 +197,8 @@ class tree:
             same = 0 # Create a context specific similarity value
             for value in values:
                 if value in second_context[key]:
-                    if context_weights: # If a context weight provided
-                        same += 1 * context_weights[key] # Weight similarity score
+                    if self.context_weights: # If a context weight provided
+                        same += 1 * self.context_weights[key] # Weight similarity score
                     else: # add 
                         same += 1
 
@@ -163,89 +206,30 @@ class tree:
             context_similarity.append(same/len(first_context)) 
         
         return sum(context_similarity) / len(context_similarity) # Average similarity and return
-    
-    def search_dfs(self, optode, max_distance = 0.5, depth=0, node = None, max_point = None, min_point = None):
+
+    def branch(self, **kwargs):
         """
-        Searches the tree to find a HRF node within the max distance
+        Accepts context keyword inputs via kwargs, updates the trees context
+        and then builds a new tree filtering for just the context
 
         Arguments:
-            optode (list of floats) - The x, y, z coordinates of the optode
-            max_distance (float) - The maximum distance to search for a HRF node
-            depth (int) - The current depth of the search
-            node (HRF) - The current node in the search
-            max_point (list of floats) - The maximum x, y, z coordinates of the search
-            min_point (list of floats) - The minimum x, y, z coordinates of the search
-        Returns:
-            node (HRF) - The HRF node within the max distance
+            **kwargs - Any context keyword value pair to branch on (i.e. doi, age, etc)
         """
-        if node is None:
-            if self.root:
-                node = self.root
-            else:
-                return None
-    
-        # Find max/min x, y and z if not calculated
-        if max_point == None:
-            min_point = [optode.x - max_distance, optode.y - max_distance, optode.z - max_distance]
-            max_point = [optode.x + max_distance, optode.y + max_distance, optode.z + max_distance]
+        if kwargs:
+            self.context = {**self.context, **kwargs} # Update context
 
-        if min_point[0] > node.x and min_point[1] > node.y and min_point[2] > node.z:
-            # Check if right node
-            if max_point[0] < node.x and max_point[1] < node.y and max_point[2] < node.z:
-                # Check if the next node is not closer
-                current_distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.x, node.y, node.z])))
-                if current_distance <= max_distance:
-                    return self.nearest_neighbor(node, optode, depth)
+        branch = tree('hrf_branch.json')
 
-        axis = depth % 3
-        if (axis == 0 and min_point[0] < node.x) or (axis == 1 and min_point[1] < node.y) or (axis == 2 and min_point[2] < node.z):
-            if node.left:
-                return self.search_dfs(optode, max_distance, depth + 1, node.left, max_point, min_point)
-            else:
-                return None
-        else:
-            if node.right:
-                return self.search_dfs(optode, max_distance, depth + 1, node.right, max_point, min_point)
-            else:
-                return None
+        for key, values in self.context.items(): # Iterate through all context items
+            for value in values: # Iterate through each item in a context area
+                # Hash on the value and iterate through the tree pointers
+                context_references = self.hasher.search(value)
+                for node in context_references:
+                    branch.insert(node) # Insert node pointer into branch
+        self.branched = True
+        return branch
 
-    def search_bfs(self, optode, max_distance, max_point = None, min_point = None):
-        """
-        Searches the tree to find a HRF node within the max distance using BFS
-        
-        Arguments:
-            optode (list of floats) - The x, y, z coordinates of the optode
-            max_distance (float) - The maximum distance to search for a HRF node
-        Returns:
-            node (HRF) - The HRF node within the max distance
-        """
-        if self.root is None:
-            return None
-
-        # Find max/min x, y and z if not calculated
-
-        if max_point == None:
-            min_point = [optode[0] - max_distance, optode[1] - max_distance, optode[2] - max_distance]
-            max_point = [optode[0] + max_distance, optode[1] + max_distance, optode[2] + max_distance]
-
-        queue = deque([self.root])
-        while queue:
-            node = queue.popleft()
-            # Check if node in range
-            if min_point[0] > node.x and min_point[1] > node.y and min_point[2] > node.z:
-                if max_point[0] < node.x and max_point[1] < node.y and max_point[2] < node.z:
-                    # Check if current node distance to optode is within max distance
-                    current_distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.x, node.y, node.z])))
-                    if current_distance <= max_distance:
-                        # Check if the next node is not closer
-                        return self.nearest_neighbor(node, optode)
-            if node.left:
-                queue.append(node.left)
-            if node.right:
-                queue.append(node.right)
-        return None
-        
-    def nearest_neighbor(self, node, optode, depth=0, best=None):
+    def nearest_neighbor(self, optode, max_distance, node = None, depth=0, best=None):
         """
         Find the nearest neighbor to a target point in the 3D k-d tree.
         
@@ -283,13 +267,51 @@ class tree:
             far_branch = node.left
 
         # Search nearest branch
-        best = self.nearest_neighbor(near_branch, optode, depth + 1, best)
+        best = self.nearest_neighbor(optode, max_distance, near_branch, depth + 1, best)
 
         # Check if far branch needs to be explored
         if abs(target_point[axis] - point[axis]) < best[1]:
-            best = self.nearest_neighbor(far_branch, optode, depth + 1, best)
+            best = self.nearest_neighbor(optode, max_distance, far_branch, depth + 1, best)
 
-        return best
+        if best and best[1] <= max_distance:
+            return best  # return the node only
+        else:
+            return self.root.right, 0.0  # fallback to canonical HRF
+
+    def radius_search(self, optode, radius, node = None, depth=0, results=None):
+        """
+        Collect all HRFs within a radius and return them
+
+        Arguments:
+            node (HRF object) - HRF estimate to compare against
+            optode (HRF object) - HRF optode object passed in
+            radius (float) - Maximum euclidian distance of radius 
+            depth (int) - Current depths of the search (range 0 - 2)
+            results (list) - Nodes found to be within a range passed through resursions
+        """
+        if node is None:
+            return results or []
+
+        if results is None:
+            results = []
+
+        axis = depth % 3
+        node_coords = (node.x, node.y, node.z)
+        optode_coords = (optode.x, optode.y, optode.z)
+
+        # Check distance
+        distance = math.sqrt(sum((a - b) ** 2 for a, b in zip(optode_coords, node_coords)))
+        if distance <= radius:
+            results.append((node, distance))
+
+        # Decide which branches to explore
+        if optode_coords[axis] - radius < node_coords[axis]:
+            self.radius_search(optode, radius, node.left, depth + 1, results)
+            
+        if optode_coords[axis] + radius > node_coords[axis]:
+            self.radius_search(optode, radius, node.right, depth + 1, results)
+
+        return results
 
     def save(self, filename = 'tree_hrfs.json'):
         hrfs = self.gather(self.root)
@@ -307,8 +329,8 @@ class tree:
             hrfs |= self.gather(node.right)
         hrfs |= {
             f"{'-'.join(node.ch_name.split(' '))}-{node.doi}": {
-                "hrf_mean": node.trace.tolist(),
-                "hrf_std": node.trace_std.tolist(),
+                "hrf_mean": np.asarray(node.trace).tolist(),
+                "hrf_std": np.asarray(node.trace_std).tolist(),
                 "location": [
                     node.x,
                     node.y,
@@ -319,8 +341,19 @@ class tree:
                 "context": node.context
             }
         }
+        print(f"Node {node.ch_name} std: {node.trace_std}")
         return hrfs
+    
+    def traverse(self, node = None):
+        if node is None:
+            node = self.root
+        
+        if node.left:
+            self.traverse(node.left)
+        if node.right:
+            self.traverse(node.right)
 
+        print(f"Node {node.ch_name}")
 
     def delete(self, hrf):
         """
@@ -372,7 +405,7 @@ class tree:
         return min([node, left_min, right_min], key=lambda n: getattr(n, ["x", "y", "z"][axis]) if n else float('inf'))
 
 class HRF:
-    def __init__(self, doi, ch_name, duration, sfreq, trace, trace_std = None, location = None, estimates = None, **kwargs):
+    def __init__(self, doi, ch_name, duration, sfreq, trace, trace_std = None, location = None, estimates = [], **kwargs):
         """
         Object for storing all information apart of an estimated HRF from an fNIRS optode
 
@@ -421,7 +454,7 @@ class HRF:
 
         # Set HRF default context
         self.context = {
-            'type': 'global',
+            'method': 'global',
             'doi': doi,
             'study': None,
             'task': None,
@@ -441,10 +474,7 @@ class HRF:
         self.left = None
         self.right = None
 
-        if estimates:
-            self.estimates = estimates
-        else:
-            self.estimates = []
+        self.estimates = estimates
 
         self.hrf_processes = [self.spline_interp]
         self.process_names = ['spline_interpolate']
@@ -525,29 +555,38 @@ class HRF:
         # Resample trace
         return [mean + (std_seed * std) for mean, std in zip(self.trace, self.trace_std)]
 
-    def plot(self, plot_dir):
+    def plot(self, plot_dir, show_legend = True):
         """
-        # Function to plot the current HRF
+        Function to plot the current HRF in seconds.
 
-        Function attributes:
-            title (str) - Title for the plot
-            filepath (str) - Path to save plots for each HRF stage
-            show (bool) - Whether to show the HRF state in-between processes
+        Parameters:
+            plot_dir (str): Path to save plots for each HRF stage
+            show_legend (bool): Whether to show the HRF legend
         """
-
         hrf_mean = self.trace
         hrf_std = self.trace_std
-        samples = np.arange(len(hrf_mean))
+        time = np.arange(len(hrf_mean)) / self.sfreq  # Convert samples to seconds
 
         plt.figure(figsize=(8, 4))
-        plt.plot(samples, hrf_mean, label='Mean HRF', color='blue')
-        plt.fill_between(samples, hrf_mean - hrf_std, hrf_mean + hrf_std, color='blue', alpha=0.3, label='±1 SD')
+        plt.plot(time, hrf_mean, label='Mean HRF', color='blue')
+        plt.fill_between(time, hrf_mean - hrf_std, hrf_mean + hrf_std, color='blue', alpha=0.3, label='±1 SD')
 
-        plt.xlabel('Samples')
+        plt.xlabel('Time (s)')
         plt.ylabel('HRF amplitude')
         plt.title(f'Estimated HRF for {self.ch_name} with Standard Deviation')
-        plt.legend()
         plt.grid(True)
+
+        # Auto-scale y-axis ticks nicely
+        y_min = round(min(hrf_mean - hrf_std), 1) - 0.1
+        y_max = round(max(hrf_mean + hrf_std), 1) + 0.1
+        plt.yticks(np.arange(y_min, y_max, 0.1))
+
+        # Cleaner x-axis ticks based on time
+        plt.xticks(np.arange(0, max(time) + 0.3, 2))  # e.g., every 2 seconds
+
+        if show_legend:
+            plt.legend()
+
         plt.tight_layout()
         plt.savefig(f"{plot_dir}/{self.ch_name}_hrf_estimate.png")
-        
+            
