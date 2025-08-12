@@ -182,3 +182,4 @@ build/
 
 # HRFunc ignore files
 **/._*
+databases/
