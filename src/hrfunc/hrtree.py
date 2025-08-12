@@ -51,6 +51,8 @@ class tree:
 
         if self.hrf_filename and os.path.exists(self.hrf_filename):
             self.load_hrfs(self.hrf_filename)
+        else:
+            print(f"Failed to load HRF json {self.hrf_filename}...")
 
     def load_hrfs(self, hrf_filename, similarity_threshold = 0.0, oxygenated = None):
         """
@@ -72,6 +74,7 @@ class tree:
             doi = split.pop()
             ch_name = ' '.join(split)
 
+
             # Skip if oxygenation/deoxygenation filtering requested
             oxygenation = hrfunc._is_oxygenated(ch_name)
             if oxygenated == False and oxygenation:
@@ -83,7 +86,7 @@ class tree:
             if similarity_threshold > 0.0:
                 context_similarity = self.compare_context(self.context, channel['context'], self.context_weights)
                 if context_similarity < similarity_threshold:
-                    print(f"Skipping {channel}")
+                    print(f"Skipping {ch_name}, similarity threshold not met")
                     continue
 
             # create a new hrf node
@@ -110,12 +113,9 @@ class tree:
         if self.root is None:
             print(f"Setting root... {hrf}")
             self.root = hrf
-            return self.root
-
-        if node is None:
-            node = self.root
-
+            
             canonical_hrf = nilearn.glm.first_level.glover_hrf(tr = 0.128, oversampling = 1, time_length = 30.0)
+
             if self.root.oxygenation:
                 ch_name = 'global-hbo'
             else:
@@ -130,6 +130,11 @@ class tree:
                 canonical_hrf,
                 location = [359.0, 359.0, 359.0]
             )
+            return self.root
+
+        if node is None:
+            node = self.root
+
 
         axis = depth % 3  # Cycle through x, y, z
 
@@ -139,7 +144,7 @@ class tree:
         # Handle duplicates by jittering location
         if h_val == n_val and hrf.x == node.x and hrf.y == node.y and hrf.z == node.z:
             for val in (hrf.x, hrf.y, hrf.z):
-                print(f"WARNING: Jittering location for {hrf.ch_name}, same location as the following node.../n{node.__repr__()}")
+                print(f"WARNING: Jittering location for {hrf.ch_name}, same location as the following node.../n{node.ch_name}")
                 val += 1e-10 # Jitter location while staying above 64-precision double threshold
         
         # If the current node is less than the new node
@@ -225,11 +230,11 @@ class tree:
                 # Hash on the value and iterate through the tree pointers
                 context_references = self.hasher.search(value)
                 for node in context_references:
-                    branch.insert(node) # Insert node pointer into branch
+                    branch.channels[node.ch_name] = branch.insert(node) # Insert node pointer into branch
         self.branched = True
         return branch
 
-    def nearest_neighbor(self, optode, max_distance, node = None, depth=0, best=None):
+    def nearest_neighbor(self, optode, max_distance, node = 'root', depth = 0, best = None):
         """
         Find the nearest neighbor to a target point in the 3D k-d tree.
         
@@ -241,8 +246,16 @@ class tree:
         Returns:
             best (tuple) - The best node and distance found so far
         """
-        if node is None: # Handle base case
+        # Handle base cases
+        if node is None: 
             return best
+        
+        if self.root is None:
+            return None, 0.0
+        
+        # If first call, attach root to node
+        if node == 'root':
+            node = self.root
 
         k = 3 
         axis = depth % k
@@ -256,7 +269,8 @@ class tree:
 
         # Check if this node is closer than the best found so far
         if best is None or distance < best[1]:
-            best = (node, distance)
+            if node.ch_name[:9] != 'canonical' and node.ch_name[:7] != "global":
+                best = (node, distance)
 
         # Figure out which side needs exploring
         if target_point[axis] < point[axis]:
@@ -321,7 +335,7 @@ class tree:
         return
 
     def gather(self, node):
-
+        print(f"Gathering node... {node}")
         hrfs = {}
         if node.left:
             hrfs |= self.gather(node.left)
@@ -341,13 +355,12 @@ class tree:
                 "context": node.context
             }
         }
-        print(f"Node {node.ch_name} std: {node.trace_std}")
         return hrfs
     
     def traverse(self, node = None):
         if node is None:
             node = self.root
-        
+
         if node.left:
             self.traverse(node.left)
         if node.right:
@@ -427,11 +440,10 @@ class HRF:
 
         """
         # Add doi
-        # Add doi
         self.doi = doi
 
         # Clean and add channel name
-        self.ch_name = re.sub(r'[_\-\s]+', '_', ch_name.lower())
+        self.ch_name = hrfunc.standardize_name(ch_name)
         self.oxygenation = hrfunc._is_oxygenated(self.ch_name)
 
         # Attach passed into info to class 
@@ -484,7 +496,7 @@ class HRF:
 
     def __repr__(self):
         """String representation of the HRF object."""
-        return f"HRF: {self.doi} - {self.ch_name} \nSampling frequency: {self.sfreq}\nLocation: [{self.x}, {self.y}, {self.z}]\nTrace length: {len(self.trace)}\nTrace standrad deviation: {self.trace_std}"
+        return f"HRF: {self.doi} - {self.ch_name} \nSampling frequency: {self.sfreq}\nLocation: [{self.x}, {self.y}, {self.z}]\nTrace: {self.trace}\nTrace standrad deviation: {self.trace_std}"
 
     def build(self, new_sfreq, plot = False, show = False):
         """ Run through the processes requested for generating an hrf """

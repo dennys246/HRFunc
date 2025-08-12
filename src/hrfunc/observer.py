@@ -1,4 +1,4 @@
-import mne, os
+import mne, os, math
 import numpy as np
 from scipy.signal import welch
 from mne_nirs.preprocessing import peak_power
@@ -38,8 +38,8 @@ class lens:
         self.plot_nirx(subject_id, preproc_nirx, deconv_nirx, events, channel, length)
 
         # Grab raw NIRX quality metrics scalp coupling index and peakpower
-        self.metrics['SCI'] = np.concatenate((self.metrics['SCI'], self.calc_sci(subject_id, raw_nirx, 'raw')), axis = 0)
-        self.calc_pp(subject_id, raw_nirx, 'raw')
+        #self.metrics['SCI'] = np.concatenate((self.metrics['SCI'], self.calc_sci(subject_id, raw_nirx, 'raw')), axis = 0)
+        #self.calc_pp(subject_id, raw_nirx, 'raw')
 
         meters = [self.calc_skewness_and_kurtosis, self.calc_snr]
         for meter in meters: # Iterate through other metrcis comparing preprocessed and deconvolved data
@@ -59,6 +59,10 @@ class lens:
             'Preprocessed': [],
             'Deconvolved': []
         }
+
+        count = 0
+        _min = -0.02
+        _max = 0.07
         
         for state in ['Preprocessed', 'Deconvolved']:
             count = 0
@@ -77,7 +81,12 @@ class lens:
             for channel in channels:
                 skewness[state].append(channel_skewness[state][channel] / count)
                 kurtosis[state].append(channel_kurtosis[state][channel] / count) 
-
+        
+        print(f"Average {state} skew: {sum(skewness[state]) / len(skewness[state])} \nAverage {state} kurtosis: {sum(kurtosis[state]) / len(kurtosis[state])}")
+        
+        preprocess_snr = [self.metrics['Preprocessed']['snr'][subject] for subject in self.metrics['Preprocessed']['snr'].keys()]
+        deconvolved_snr = [self.metrics['Deconvolved']['snr'][subject] for subject in self.metrics['Deconvolved']['snr'].keys()]
+        print(f"Average preprocessed SNR: {sum(preprocess_snr) / len(preprocess_snr)}\nAverage deconvolved SNR: {sum(deconvolved_snr) / len(deconvolved_snr)}")
         for metric, metric_name in zip([kurtosis, skewness], ['Kurtosis', 'Skewness']):    
             plt.figure(figsize=(10, 8))
 
@@ -86,12 +95,14 @@ class lens:
             x = np.arange(len(channels))  # The x locations for the groups
 
             # Create the bar plot
-            plt.bar(x - bar_width/2, metric['Preprocessed'], width=bar_width, label=f'Preprocessed {metric_name}', color='b', align='center')
-            plt.bar(x + bar_width/2, metric['Deconvolved'], width=bar_width, label=f'Deconvolved {metric_name}', color='g', align='center')
+            plt.bar(x - bar_width / 2, metric['Preprocessed'], width = bar_width, label = f'Convolved Hemoglobin', color='r', align='center')
+            plt.bar(x + bar_width / 2, metric['Deconvolved'], width = bar_width, label = f'Deconvolved Neural Activity', color='b', align='center')
+
+            plt.ylim(_min, _max)
 
             # Adding labels and title
             plt.xlabel('Positions')
-            plt.ylabel('Values')
+            plt.ylabel(metric_name)
             plt.title(f'Effects of Deconvolution on {metric_name}')
             plt.xticks(x, channels, rotation='vertical')  # Set the position names as x-tick labels
             plt.legend()
@@ -100,12 +111,12 @@ class lens:
             plt.savefig(f'{self.working_directory}/plots/channel_wise_{metric_name.lower()}.jpeg')
             plt.close()
 
-        print(f"SCI: {self.metrics['SCI'].shape}")
+        #print(f"SCI: {self.metrics['SCI'].shape}")
 
-        plt.hist(self.metrics['SCI'])
-        plt.title(f'Scalp Coupling Index')
-        plt.savefig(f'{self.working_directory}/plots/subject_wise_sci.jpeg')
-        plt.close()
+        #plt.hist(self.metrics['SCI'])
+        #plt.title(f'Scalp Coupling Index')
+        #plt.savefig(f'{self.working_directory}/plots/subject_wise_sci.jpeg')
+        #plt.close()
 
     def plot_nirx(self, subject_id, preproc_scan, deconv_scan, events, channel = 1, length = 500):
 
@@ -119,15 +130,22 @@ class lens:
         if os.path.exists(f"{self.working_directory}/plots/channel_data/") == False:
             os.mkdir(f"{self.working_directory}/plots/channel_data/")
 
+        # Prepare preprocessed Signal
+        # Normalize source to 0–1
+        source_norm = (preproc_data[0, :length] - preproc_data[0, :length].min()) / (preproc_data[0, :length].max() - preproc_data[0, :length].min())
+
+        # Rescale to match target range
+        target_min = deconv_data[0, :length].min()
+        target_max = deconv_data[0, :length].max()
+        preproc_scaled = source_norm * (target_max - target_min) + target_min
+
         # Plot the preprocessed and deconvolved data
         plt.figure(figsize=(14, 8)) 
-        #plt.plot(preproc_data, color='blue', label='Preprocessed NIRS data')
-        plt.plot(deconv_data[0, :length], color='orange', label='Deconvolved NIRS')
-        plt.plot(preproc_data[0, :length], color = 'blue', label = "Standard Preprocessed NIRS")
+        plt.plot(preproc_scaled[:length], color='red', linestyle='--', label='Convolved Hemoglobin')
+        plt.plot(deconv_data[0, :length], color='blue', label='Deconvolved Neural Activity')
 
-        plt.xlabel('Samples')
-        plt.ylabel('µmol/L')
-        plt.title(f'fNIRS channel data')
+        plt.xlabel('fNIRS Samples')
+        plt.title(f'fNIRS Channel Data')
 
         plt.legend(loc='best')
         
@@ -137,11 +155,11 @@ class lens:
             if event_ind > length: break
             
             if event: # If event present
-                plt.axvline(x = event_ind, color = 'green', label = 'Trial')
+                plt.axvline(x = event_ind, color = 'orange', label = 'Trial')
         
-        plot_filename = f'{self.working_directory}/plots/channel_data/{subject_id}_channel_data.jpeg'
+        plot_filename = f'{self.working_directory}/plots/channel_data/{subject_id}_channel_data.png'
         print(f"Saving deconv plot too {plot_filename}")
-        plt.savefig(f'{self.working_directory}/plots/channel_data/{subject_id}_channel_data.jpeg')
+        plt.savefig(f'{self.working_directory}/plots/channel_data/{subject_id}_channel_data.png')
         plt.close()
 
     def calc_pp(self, subject_id, scan, state):
