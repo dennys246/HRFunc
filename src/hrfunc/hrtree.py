@@ -21,10 +21,8 @@ class tree:
         """
         # Find hrfunc install library
         self.lib_dir = os.path.dirname(hrfunc.__file__)
-        if hrf_filename:
-            self.hrf_filename = hrf_filename
-        else:
-            self.hrf_filename = None
+
+        self.hrf_filename = hrf_filename
 
         self.root = None
         self.branched = False     
@@ -51,10 +49,11 @@ class tree:
 
         if self.hrf_filename and os.path.exists(self.hrf_filename):
             self.load_hrfs(self.hrf_filename)
+            print(f"Tree initialized with HRFs from {hrf_filename}")
         else:
-            print(f"Failed to load HRF json {self.hrf_filename}...")
+            print(f"Tree intiialized without HRFs loaded...")
 
-    def load_hrfs(self, hrf_filename, similarity_threshold = 0.0, oxygenated = None):
+    def load_hrfs(self, hrf_filename, similarity_threshold = 0.0, oxygenated = None, rich = False):
         """
         Orchestrate building the HRF tree while filtering for specific context
 
@@ -89,6 +88,10 @@ class tree:
                     print(f"Skipping {ch_name}, similarity threshold not met")
                     continue
 
+            if rich == False:
+                channel['estimates'] = []
+                channel['locations'] = []
+
             # create a new hrf node
             new_hrf = HRF(
                 doi, 
@@ -98,7 +101,10 @@ class tree:
                 np.asarray(channel['hrf_mean'], dtype=np.float64), 
                 np.asarray(channel['hrf_std'], dtype=np.float64), 
                 channel['location'], 
-                channel['context'])
+                channel['estimates'],
+                channel['locations'],
+                channel['context']
+                )
             
             # Insert hrf node into tree
             node = self.insert(new_hrf)
@@ -111,16 +117,16 @@ class tree:
         """Insert a new node into the 3D k-d tree based on spatial position."""
 
         if self.root is None:
-            print(f"Setting root... {hrf}")
+            print(f"Setting root... {hrf.ch_name}")
             self.root = hrf
             
             canonical_hrf = nilearn.glm.first_level.glover_hrf(tr = 0.128, oversampling = 1, time_length = 30.0)
 
             if self.root.oxygenation:
-                ch_name = 'global-hbo'
+                ch_name = 'canonical-hbo'
             else:
                 canonical_hrf = [-point for point in canonical_hrf]
-                ch_name = 'global-hbr'
+                ch_name = 'canonical-hbr'
 
             self.root.right = HRF(
                 'canonical',
@@ -128,8 +134,11 @@ class tree:
                 30.0,
                 7.81,
                 canonical_hrf,
-                location = [359.0, 359.0, 359.0]
+                location = [359.0, 359.0, 359.0],
+                estimates = [canonical_hrf],
+                locations = [[359.0, 359.0, 390.0]]
             )
+            self.root.context['method'] = 'canonical'
             return self.root
 
         if node is None:
@@ -144,9 +153,10 @@ class tree:
         # Handle duplicates by jittering location
         if h_val == n_val and hrf.x == node.x and hrf.y == node.y and hrf.z == node.z:
             for val in (hrf.x, hrf.y, hrf.z):
-                print(f"WARNING: Jittering location for {hrf.ch_name}, same location as the following node.../n{node.ch_name}")
-                val += 1e-10 # Jitter location while staying above 64-precision double threshold
-        
+                if node.oxygenation == hrf.oxygenation:
+                    print(f"WARNING: Jittering location for {hrf.ch_name}, same location as the following node.../n{node.ch_name}")
+                    val += 1e-10 # Jitter location while staying above 64-precision double threshold
+            
         # If the current node is less than the new node
         if h_val < n_val: 
             if node.left is None: # If the left node is empty
@@ -234,29 +244,33 @@ class tree:
         self.branched = True
         return branch
 
-    def nearest_neighbor(self, optode, max_distance, node = 'root', depth = 0, best = None):
+    def nearest_neighbor(self, optode, max_distance, node = 'root', depth = 0, best = None, verbose = False):
         """
         Find the nearest neighbor to a target point in the 3D k-d tree.
         
         Arguments:
-            node (HRF) - The current node in the search
-            target (HRF) - The target HRF to find the nearest neighbor for
-            depth (int) - The current depth of the search
-            best (tuple) - The best node and distance found so far
+            optode (obj) -
+            max_distance (float) - 
+            node (obj) - Internal argument for passing the node to search
+            depth (int) - Current dimensional orientation of the k-d tree
+            best (tuple) - Best node found
         Returns:
             best (tuple) - The best node and distance found so far
         """
-        # Handle base cases
-        if node is None: 
-            return best
-        
-        if self.root is None:
-            return None, 0.0
-        
         # If first call, attach root to node
         if node == 'root':
+            if verbose: print(f"Attaching root ({(self.root.ch_name if self.root else self.root)}) to search node for {optode.ch_name} search")
             node = self.root
 
+        # Handle base cases
+        if node == None: 
+            if best:
+                if verbose: print(f"No node found, returning {best[0].ch_name}")
+                return best
+            else:
+                if verbose: print("No node found, returning canonical HRF")
+                return None, float("inf")
+        
         k = 3 
         axis = depth % k
 
@@ -266,11 +280,7 @@ class tree:
 
         # Calculate euclidian distance
         distance = math.sqrt(sum((a - b) ** 2 for a, b in zip([optode.x, optode.y, optode.z], [node.x, node.y, node.z])))
-
-        # Check if this node is closer than the best found so far
-        if best is None or distance < best[1]:
-            if node.ch_name[:9] != 'canonical' and node.ch_name[:7] != "global":
-                best = (node, distance)
+        if verbose: print(f"__________\nOptode {optode.ch_name}: {target_point} \nSearch Node {node.ch_name}: {point}\nDistance: {distance}\n_________")
 
         # Figure out which side needs exploring
         if target_point[axis] < point[axis]:
@@ -280,17 +290,24 @@ class tree:
             near_branch = node.right
             far_branch = node.left
 
+        # Check if this node is closer than the best found so far
+        if (best is None or distance < best[1]) and optode.oxygenation == node.oxygenation:
+            best = (node, distance)
+            if verbose: print(f"New best found: {best[0].ch_name} - distance {best[1]}")
+
         # Search nearest branch
-        best = self.nearest_neighbor(optode, max_distance, near_branch, depth + 1, best)
+        best = self.nearest_neighbor(optode, max_distance, near_branch, depth + 1, best, verbose)
 
         # Check if far branch needs to be explored
-        if abs(target_point[axis] - point[axis]) < best[1]:
-            best = self.nearest_neighbor(optode, max_distance, far_branch, depth + 1, best)
+        if best is None or abs(target_point[axis] - point[axis]) < best[1]:
+            
+            best = self.nearest_neighbor(optode, max_distance, far_branch, depth + 1, best, verbose)
 
         if best and best[1] <= max_distance:
             return best  # return the node only
         else:
-            return self.root.right, 0.0  # fallback to canonical HRF
+            if verbose: print(f"No node found, returning canonical HRF")
+            return self.root.right, float("inf")  # fallback to canonical HRF
 
     def radius_search(self, optode, radius, node = None, depth=0, results=None):
         """
@@ -334,26 +351,38 @@ class tree:
             json.dump(hrfs, file, indent=4)
         return
 
-    def gather(self, node):
+    def gather(self, node, oxygenation = None):
         print(f"Gathering node... {node}")
         hrfs = {}
+        collect = False
+
         if node.left:
-            hrfs |= self.gather(node.left)
+            hrfs |= self.gather(node.left, oxygenation)
         if node.right:
-            hrfs |= self.gather(node.right)
-        hrfs |= {
-            f"{'-'.join(node.ch_name.split(' '))}-{node.doi}": {
-                "hrf_mean": np.asarray(node.trace).tolist(),
-                "hrf_std": np.asarray(node.trace_std).tolist(),
-                "location": [
-                    node.x,
-                    node.y,
-                    node.z
-                ],
-                "oxygenation":node.oxygenation,
-                "sfreq": node.sfreq,
-                "context": node.context
-            }
+            hrfs |= self.gather(node.right, oxygenation)
+        if node.ch_name[:9] != "canonical": 
+            # Determine if node is requested to be saved
+            if oxygenation == None:
+                collect = True
+            elif oxygenation == node.oxygenation:
+                collect = True
+
+            if collect: # Add HRF if collectable
+                hrfs |= {
+                f"{'-'.join(node.ch_name.split(' '))}-{node.doi}": {
+                    "hrf_mean": np.asarray(node.trace).tolist(),
+                    "hrf_std": np.asarray(node.trace_std).tolist(),
+                    "location": [
+                        node.x,
+                        node.y,
+                        node.z
+                    ],
+                    "oxygenation":node.oxygenation,
+                    "sfreq": node.sfreq,
+                    "context": node.context,
+                    "estimates": node.estimates,
+                    "locations": node.locations
+                }
         }
         return hrfs
     
@@ -367,6 +396,37 @@ class tree:
             self.traverse(node.right)
 
         print(f"Node {node.ch_name}")
+
+    def split(self, hbo_filename, hbr_filename):
+        """
+        Split the tree into oxygenated and deoxygenated HRFs
+
+        Arguments:
+            hbo_filename (str) - filename to save the HbO files
+            hbr_filename (str) - filename to save the HbR files
+        """
+        hbo_hrfs = self.gather(self.root, oxygenation = True)
+        with open(hbo_filename, "w") as file:
+            json.dump(hbo_hrfs, file, indent=4)
+
+        hbr_hrfs = self.gather(self.root, oxygenation = False)
+        with open(hbr_filename, "w") as file:
+            json.dump(hbr_hrfs, file, indent=4)
+
+    def merge(self, tree, node = None):
+        if node is None:
+            node = tree.root
+
+        self.insert(node)
+
+        if node.left:
+            self.merge(tree, node.left)
+        
+        if node.right:
+            self.merge(tree, node.right)
+
+        tree.delete(node)
+        
 
     def delete(self, hrf):
         """
@@ -418,7 +478,7 @@ class tree:
         return min([node, left_min, right_min], key=lambda n: getattr(n, ["x", "y", "z"][axis]) if n else float('inf'))
 
 class HRF:
-    def __init__(self, doi, ch_name, duration, sfreq, trace, trace_std = None, location = None, estimates = [], **kwargs):
+    def __init__(self, doi, ch_name, duration, sfreq, trace, trace_std = None, location = None, estimates = [], locations = [], context = [], **kwargs):
         """
         Object for storing all information apart of an estimated HRF from an fNIRS optode
 
@@ -454,30 +514,33 @@ class HRF:
         self.trace = np.asarray(trace, dtype=np.float64)
         self.trace_std = np.asarray(trace_std, dtype=np.float64)
 
-        if isinstance(location, list): # Grab location
+        if location is not None: # Grab location
             self.x = location[0]
             self.y = location[1]
             self.z = location[2]
         else:
-            # If no location pass in, set to a random number between 0 and 1 to prevent a long tail
+            print(f"WARNING: No location passed in, using random locations for HRF")
             self.x = -1 + random.random() 
             self.y = -1 + random.random()
             self.z = -1 + random.random()
 
         # Set HRF default context
-        self.context = {
-            'method': 'global',
-            'doi': doi,
-            'study': None,
-            'task': None,
-            'conditions': None,
-            'stimulus': None,
-            'intensity': None,
-            'duration': duration,
-            'protocol': None,
-            'age_range': None,
-            'demographics': None
-        }
+        if context:
+            self.context = context
+        else:
+            self.context = {
+                'method': 'toeplitz',
+                'doi': doi,
+                'study': None,
+                'task': None,
+                'conditions': None,
+                'stimulus': None,
+                'intensity': None,
+                'duration': duration,
+                'protocol': None,
+                'age_range': None,
+                'demographics': None
+            }
         unexpected = set(kwargs) - set(self.context)
         if unexpected:
             raise ValueError(f"Unexpected contexts cannot be added: {unexpected}\n\nMake sure the contexts your searching for are within the available contexts: {','.join(self.context.keys())}")
@@ -487,6 +550,7 @@ class HRF:
         self.right = None
 
         self.estimates = estimates
+        self.locations = locations
 
         self.hrf_processes = [self.spline_interp]
         self.process_names = ['spline_interpolate']
@@ -514,6 +578,15 @@ class HRF:
                 self.plot(title, filename, show)
         self.built = True
 
+    def update_centroid(self):
+        # Format locations as a numpy array
+        numpy_locations = np.array(self.locations)
+
+        # Calculate centroid
+        centroid = numpy_locations.mean(axis = 0)
+        
+        # Update class variables
+        self.x, self.y, self.z = centroid[0], centroid[1], centroid[2]
 
     def spline_interp(self):
         """
