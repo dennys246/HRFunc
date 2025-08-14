@@ -7,7 +7,7 @@ from itertools import compress
 from glob import glob
 
 
-def localize_hrfs(nirx_obj, max_distance = 0.01, **kwargs):
+def localize_hrfs(nirx_obj, max_distance = 0.01, verbose = False, **kwargs):
     """
     Locate local HRF's for the nirx object and return a montage with found HRF's
 
@@ -16,10 +16,10 @@ def localize_hrfs(nirx_obj, max_distance = 0.01, **kwargs):
     """
     # Build a montage
     _montage = montage(nirx_obj, **kwargs)
-    _montage.localize_hrfs(max_distance)
+    _montage.localize_hrfs(max_distance, verbose = verbose)
     return _montage
 
-def load_montage(json_filename, **kwargs):
+def load_montage(json_filename, rich = False, **kwargs):
     """ Load montage with the given json filename """
     # Read in json
     with open(json_filename, 'r') as file:
@@ -49,6 +49,10 @@ def load_montage(json_filename, **kwargs):
         if ch_name == 'canonical':
             continue
 
+        if rich == False:
+            channel['estimates'] = []
+            channel['locations'] = []
+
         # create an empty HRF object
         estimated_hrf = HRF(
             doi,
@@ -57,7 +61,9 @@ def load_montage(json_filename, **kwargs):
             channel['sfreq'],
             np.asarray(channel['hrf_mean'], dtype=np.float64),
             np.asarray(channel['hrf_std'], dtype=np.float64),
-            channel['location']
+            channel['location'],
+            channel['estimates'],
+            channel['locations']
         )
 
         # Insert hrf into tree and attach pointer to channel
@@ -141,7 +147,7 @@ class montage(tree):
     def __repr__(self):
         return f" - Montage object - \nNumber of channels: {len(self.channels)}\n Sampling frequency: {self.sfreq}\nHbO channels (count of {len(self.hbo_channels)}): {self.hbo_channels}\n HbR channels (count of {len(self.hbr_channels)}): {self.hbr_channels}\n - Contexts - \n{'\n'.join([f'{key} - {value} - {self.context_weights[key]}' for key, value in self.context.items()])}\n"
 
-    def localize_hrfs(self, max_distance = 0.0001):
+    def localize_hrfs(self, max_distance = 0.01, verbose = False):
         """
         Tries to find local HRFs to each of the fNIRS optodes using the tree structure
         functionality to quickly find nearby HRF's. If it can't it will default to a
@@ -153,21 +159,23 @@ class montage(tree):
 
         canonical_hbo = nilearn.glm.first_level.glover_hrf(tr = 1/self.sfreq, oversampling = 1, time_length = float(self.context['duration']))
         canonical_hbr = [-point for point in canonical_hbo]
-        canonical_std = [0 for datum in canonical_hbr]
+        canonical_std = [0 for _ in canonical_hbr]
 
         for ch_name, optode in self.channels.items(): # Iterate through channels apart of nirx data
+            if verbose: print(f"SEARCHING FOR NODES CLOSE TO OPTODE {optode.ch_name}")
             if _is_oxygenated(ch_name):
-                hrf, distance = self.hbo_tree.nearest_neighbor(optode, max_distance) # Search in space for similar HRF
+                hrf, distance = self.hbo_tree.nearest_neighbor(optode, max_distance, verbose = verbose) # Search in space for similar HRF
             else:
-                hrf, distance = self.hbr_tree.nearest_neighbor(optode, max_distance)
+                hrf, distance = self.hbr_tree.nearest_neighbor(optode, max_distance, verbose = verbose)
 
-            print(f"HRF: {hrf.ch_name}\nDistance: {distance}")
             if hrf: # If found
+                if verbose: print(f"HRF: {hrf.ch_name}\nDistance: {distance}")
+
                 optode.trace = hrf.trace # Add mean and std to montage for channel
                 optode.trace_std = hrf.trace_std
 
             else: # If hrf not found locally
-                print(f"Local HRF with given context couldn't be found for channel {ch_name}, using canonical")
+                if verbose: print(f"Local HRF couldn't be found for channel {ch_name}, using canonical")
 
                 if _is_oxygenated(ch_name): # If found
                     optode.trace = canonical_hbo # Add mean and std to montage for channel
@@ -226,7 +234,7 @@ class montage(tree):
 
         if events.shape[0] > scan_len:
             events = events[:scan_len]
-            print(f"Warning: Shortening events for {nirx_obj}")
+            print(f"WARNING: Shortening events for {nirx_obj}")
         elif events.shape[0] != scan_len:
             raise ValueError(f"ERROR: Expected events to be of length {scan_len} but got length {events.shape[0]}...")
     
@@ -259,7 +267,11 @@ class montage(tree):
             hrf_estimate = hrf_estimate[start:end]
 
             # Append estimate to channel estimates
-            self.channels[standardize_name(channel['ch_name'])].estimates.append(hrf_estimate)
+            optode = self.channels[standardize_name(channel['ch_name'])]
+            optode.estimates.append(list(hrf_estimate))
+
+            # Calculate new centroid for optode given locations used for estimate
+            optode.locations.append(list(channel['loc'][:3]))
 
 
     def estimate_activity(self, nirx_obj, _lambda = 1e-4, hrf_model = 'toeplitz', preprocess = True):
@@ -308,7 +320,7 @@ class montage(tree):
                 print("Linear algebra error:", e)
                 deconvolved_signal = scipy.linalg.pinv(lhs) @ rhs
 
-            # Denormalize neural signal estimate
+            # Denormalize neural signal estimate - EXCLUDING TO KEEP IN A.U.
             #deconvolved_signal = deconvolved_signal * std + mean
 
             return deconvolved_signal # Return recovered neural signal
@@ -351,13 +363,20 @@ class montage(tree):
         hbo_estimates = []
 
         for channel in self.channels.keys():
+            # Grab channel optode attached to montage
             optode = self.channels[channel]
+
+            # Calculate average HRF estimate and standard deviation
             optode.trace = np.mean(optode.estimates, axis = 0)
             optode.trace_std = np.std(optode.estimates, axis = 0)
-            if plot_dir:
+            
+            # Update centroid attached to optode with average location
+            optode.update_centroid()
+
+            if plot_dir: # Plot if requested
                 optode.plot(plot_dir)
             
-            if optode.oxygenation:
+            if optode.oxygenation: # Append data
                 hbo_estimates.append(optode.trace)
             else:
                 hbr_estimates.append(optode.trace)
@@ -369,6 +388,7 @@ class montage(tree):
             global_std = np.std(type_estimates, axis = 0)
 
             # Create a global HRF variable
+            global_location = [360 + random.random(), 360 + random.random(), 360 + random.random()]
             global_hrf = HRF(
                 doi = self.context['doi'],
                 ch_name = ("global_hbo" if oxygenation else "global_hbr"),
@@ -376,15 +396,15 @@ class montage(tree):
                 sfreq = self.sfreq,
                 trace = global_mean,
                 trace_std = global_std,
-                location = [360 + random.random(), 360 + random.random(), 360 + random.random()]
+                location = global_location,
+                estimates = [list(global_mean)],
+                locations = [list(global_location)]
             )
             #Insert global hrf into tree and attach pointer to channels dict
             if oxygenation:
                 self.channels['global_hbo'] = self.insert(global_hrf)
             else:
                 self.channels['global_hbr'] = self.insert(global_hrf)
-        
-        print(f"Optode trace: {optode.trace}")
 
     def correlate_hrf(self, plot_filename = "montage_correlation.png"):
         """
@@ -498,6 +518,7 @@ class montage(tree):
         self.configured = True
 
 
+
     def save(self, filename = 'montage_hrfs.json'):
         """
         Save the hrf montage
@@ -511,7 +532,7 @@ class montage(tree):
             json.dump(hrfs, file, indent=4)
         return
     
-    def _merge_montages(self, nirx_obj):
+    def _merge_montages(self, nirx_obj, verbose = False):
         """
         Function to merge a NIRX object montage with the HRFunc montage.
         This function should only be used when initializing an empty
@@ -543,23 +564,26 @@ class montage(tree):
                     self.context['doi'],
                     ch_name, 
                     self.context['duration'], 
-                    self.sfreq, 
+                    self.sfreq,
                     [], 
                     [], 
                     location,
+                    [],
+                    [],
                     []
                 )
 
                 # Check if an HRF in this area already exists 
                 # NOTE: This is necessary to localize nodes with slight
                 # channel name differences in the same location
-                
-                best_node, distance = self.nearest_neighbor(empty_hrf, max_distance = 1e-9)
+                print(f"Searching for {ch_name}")
+                best_node, distance = self.nearest_neighbor(empty_hrf, max_distance = 1e-9, verbose = verbose)
                 if best_node and best_node.ch_name[:9] != 'canonical': # If previously defined channel hrf found
-                    print(f"Local HRF found in the channel {best_node}\n merging with optode {ch_name}")
+                    print(f"Local HRF found in the channel {best_node.ch_name}\n merging with optode {ch_name}")
                     self.channels[ch_name] = best_node # Attach node to channel
                 else: # If new channel
                     # create an empty HRF object
+                    print(f"No matching HRF found, inserting new HRF")
                     self.channels[ch_name] = self.insert(empty_hrf) # Insert empty hrf into montage tree
 
     def _merge_trees(self, filename = 'tree_hrfs.json'):
