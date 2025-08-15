@@ -15,9 +15,28 @@ class tree:
         Arguments:
             - hrf_filename (str) - Filepath to json file containing HRF estimates
             - context arguments - Any context item you'd like to include in the HRF search
-
+            
         Functions:
             - compare() - Filter the HRF file for contexts of interest
+            - insert() - Insert a new HRF node into the tree
+            - nearest_neighbor() - Find the nearest neighbor to a target point in the 3D k-d tree
+            - radius_search() - Find all HRFs within a certain radius of a target point in the 3D k-d tree
+            - gather() - Gather all HRFs in the tree and return them as a dictionary
+            - save() - Save the HRFs in the tree to a json file
+            - split_save() - Split the tree into oxygenated and deoxygenated HRFs and save the outputs
+            - traverse() - In-order traversal of the tree for printing purposes
+            - merge() - Merge another tree into this one
+            - delete() - Delete a node from the 3D k-d tree based on spatial position
+            - filter() - Filter on experimental contexts
+            - branch() - Branch the tree on a specific context to reduce search space
+
+        Attributes:
+            - root (HRF object) - The root node of the tree
+            - hrf_filename (str) - The filename of the HRF json to load into the tree
+            - context (dict) - The context to filter on when inserting new HRFs into the tree
+            - context_weights (dict) - Weights to attach to each context during similarity comparison
+            - hasher (hrhash object) - A hash table for quickly finding HRFs based on context
+            - branched (bool) - Whether the tree has been branched on a specific context
         """
         # Find hrfunc install library
         self.lib_dir = os.path.dirname(hrfunc.__file__)
@@ -60,7 +79,11 @@ class tree:
         Arguments:
             hrf_filename (str) - Filename of the HRF json to load into the tree
             sim_threshold (float) - Threshold to allow or exclude HRF's based on context, defaults to 0.0 or no threshold
+            oxygenated (bool) - If True, load only oxygenated HRFs, if False load only deoxygenated HRFs, if None load all HRFs
             context_weights (dict) - Weight to attach to each context during similarity comparison
+
+        Returns:
+            None
         """
 
         with open(hrf_filename, 'r') as json_file:
@@ -114,18 +137,27 @@ class tree:
                 self.hasher.add(context, node)
 
     def insert(self, hrf, depth = 0, node = None):
-        """Insert a new node into the 3D k-d tree based on spatial position."""
+        """Insert a new node into the 3D k-d tree based on spatial position.
+        
+        Arguments:
+            hrf (HRF) - The HRF node to insert
+            depth (int) - Current depth in the tree
+            node (HRF) - Internal argument for passing the node to insert into
+
+        Returns:
+            node (HRF) - The inserted HRF node
+        """
 
         if self.root is None:
             print(f"Setting root... {hrf.ch_name}")
             self.root = hrf
             
-            canonical_hrf = nilearn.glm.first_level.glover_hrf(tr = 0.128, oversampling = 1, time_length = 30.0)
+            canonical_hrf = list(nilearn.glm.first_level.glover_hrf(tr = 0.128, oversampling = 1, time_length = 30.0))
 
             if self.root.oxygenation:
                 ch_name = 'canonical-hbo'
             else:
-                canonical_hrf = [-point for point in canonical_hrf]
+                canonical_hrf = np.array([-point for point in canonical_hrf])
                 ch_name = 'canonical-hbr'
 
             self.root.right = HRF(
@@ -143,7 +175,6 @@ class tree:
 
         if node is None:
             node = self.root
-
 
         axis = depth % 3  # Cycle through x, y, z
 
@@ -176,6 +207,14 @@ class tree:
     def filter(self, similarity_threshold = 0.95, node = None, **kwargs):
         """
         Filter on experimental contexts
+
+        Arguments:
+            similarity_threshold (float) - Threshold to allow or exclude HRF's based on context, defaults to 0.95
+            node (HRF object) - Internal argument for passing the node to filter
+            **kwargs - Any context keyword value pair to filter on (i.e. doi, age, etc)
+
+        Returns:
+            None
         """
         if node is None: # Set up filtering
             if self.root is None: # If nothing loaded yet
@@ -202,6 +241,14 @@ class tree:
     def compare_context(self, first_context, second_context):
         """
         Compare two contexts to see how similar they are
+
+        Arguments:
+            first_context (dict) - Context to compare against
+            second_context (dict) - Context to compare
+            context_weights (dict) - Weights to attach to each context during similarity comparison
+        
+        Returns:
+            float - Similarity score between 0.0 and 1.0 (1.0 being identical contexts)
         """
         context_similarity = []
         for key, values in first_context.items():
@@ -229,6 +276,9 @@ class tree:
 
         Arguments:
             **kwargs - Any context keyword value pair to branch on (i.e. doi, age, etc)
+        
+        Returns:
+            branch (tree object) - A new tree object filtered on the requested context
         """
         if kwargs:
             self.context = {**self.context, **kwargs} # Update context
@@ -254,6 +304,7 @@ class tree:
             node (obj) - Internal argument for passing the node to search
             depth (int) - Current dimensional orientation of the k-d tree
             best (tuple) - Best node found
+        
         Returns:
             best (tuple) - The best node and distance found so far
         """
@@ -319,6 +370,9 @@ class tree:
             radius (float) - Maximum euclidian distance of radius 
             depth (int) - Current depths of the search (range 0 - 2)
             results (list) - Nodes found to be within a range passed through resursions
+
+        Returns:
+            results (list) - List of tuples of HRF nodes and their distances within the radius
         """
         if node is None:
             return results or []
@@ -344,14 +398,17 @@ class tree:
 
         return results
 
-    def save(self, filename = 'tree_hrfs.json'):
-        hrfs = self.gather(self.root)
-        # Save to a JSON file
-        with open(filename, "w") as file:
-            json.dump(hrfs, file, indent=4)
-        return
-
     def gather(self, node, oxygenation = None):
+        """
+        Gather all HRFs in the tree and return them as a dictionary
+        Arguments:
+            node (HRF object) - Node to start gathering from
+            oxygenation (bool) - If True, gather only oxygenated HRFs, if False
+            gather only deoxygenated HRFs, if None gather all HRFs
+
+        Returns:
+            hrfs (dict) - Dictionary of all HRFs in the tree
+        """
         print(f"Gathering node... {node}")
         hrfs = {}
         collect = False
@@ -385,21 +442,18 @@ class tree:
                 }
         }
         return hrfs
-    
-    def traverse(self, node = None):
-        if node is None:
-            node = self.root
 
-        if node.left:
-            self.traverse(node.left)
-        if node.right:
-            self.traverse(node.right)
+    def save(self, filename = 'tree_hrfs.json'):
+        hrfs = self.gather(self.root)
+        # Save to a JSON file
+        with open(filename, "w") as file:
+            json.dump(hrfs, file, indent=4)
+        return
 
-        print(f"Node {node.ch_name}")
-
-    def split(self, hbo_filename, hbr_filename):
+    def split_save(self, hbo_filename, hbr_filename):
         """
         Split the tree into oxygenated and deoxygenated HRFs
+        and save the outputs
 
         Arguments:
             hbo_filename (str) - filename to save the HbO files
@@ -413,7 +467,31 @@ class tree:
         with open(hbr_filename, "w") as file:
             json.dump(hbr_hrfs, file, indent=4)
 
+    def traverse(self, node = None):
+        """
+        In-order traversal of the tree for printing purposes
+        
+        Arguments:
+            node (HRF object) - Node to start traversal from
+        """
+        if node is None:
+            node = self.root
+
+        if node.left:
+            self.traverse(node.left)
+        if node.right:
+            self.traverse(node.right)
+
+        print(f"Node {node.ch_name}")
+
     def merge(self, tree, node = None):
+        """
+        Merge another tree into this one
+        
+        Arguments:
+            tree (tree object) - Tree to merge into this one
+            node (HRF object) - Node to start merging from 
+        """
         if node is None:
             node = tree.root
 
@@ -425,9 +503,6 @@ class tree:
         if node.right:
             self.merge(tree, node.right)
 
-        tree.delete(node)
-        
-
     def delete(self, hrf):
         """
         Delete a node from the 3D k-d tree based on spatial position.
@@ -438,6 +513,16 @@ class tree:
         self.root = self._delete_recursive(self.root, hrf, 0)
 
     def _delete_recursive(self, node, hrf, depth):
+        """
+        Recursive helper function to delete a node from the k-d tree.
+        Arguments:
+            node (HRF) - Current node in the recursion
+            hrf (HRF) - The HRF node to delete
+            depth (int) - Current depth in the tree
+        
+        Returns:
+            node (HRF) - Updated node after deletion
+        """
         if node is None:
             return None
 
@@ -464,6 +549,16 @@ class tree:
         return node
 
     def _find_min(self, node, axis, depth):
+        """
+        Find the node with the minimum value in a given dimension.
+        Arguments:
+            axis (int) - Dimension to find the minimum in (0 for x, 1
+            for y, 2 for z)
+            depth (int) - Current depth in the tree
+        
+        Returns:
+            node (HRF) - Node with the minimum value in the specified dimension
+        """
         if node is None:
             return None
 
@@ -559,7 +654,11 @@ class HRF:
         self.built = False
 
     def __repr__(self):
-        """String representation of the HRF object."""
+        """String representation of the HRF object.
+        
+        Returns:
+            str: A string summarizing the HRF object.
+        """
         return f"HRF: {self.doi} - {self.ch_name} \nSampling frequency: {self.sfreq}\nLocation: [{self.x}, {self.y}, {self.z}]\nTrace: {self.trace}\nTrace standrad deviation: {self.trace_std}"
 
     def build(self, new_sfreq, plot = False, show = False):
@@ -579,6 +678,9 @@ class HRF:
         self.built = True
 
     def update_centroid(self):
+        """
+        Update the centroid of the HRF based on the locations provided
+        """
         # Format locations as a numpy array
         numpy_locations = np.array(self.locations)
 
@@ -591,6 +693,9 @@ class HRF:
     def spline_interp(self):
         """
         Use spline interpolation to resample the HRF to a new size that fits the new target length
+        
+        Returns:
+            trace (list of floats) - The resampled HRF trace
         """
         # Original list
         hrf_indices = np.linspace(0, len(self.trace) - 1, len(self.trace))
@@ -634,6 +739,9 @@ class HRF:
 
         Function attributes:
             std_seed (float) - Standard deviation seed between -3 and 3 to resample from the HRF trace deviation
+
+        Returns:
+            resampled_trace (list of floats) - A new resampled HRF trace
         """
         if self.trace_std == None:
             raise ValueError(f"HRF does not have a trace deviation attached to it")
