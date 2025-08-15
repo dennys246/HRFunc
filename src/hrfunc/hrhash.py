@@ -56,33 +56,99 @@ class hasher:
 		return int.from_bytes(hashlib.sha3_512(self.encode(key)).digest(), 'little') % self.capacity
 
 	def blake2(self, key, subhash = 's'):
+		"""
+		BLAKE2 hash function, faster than MD5, SHA-1, SHA-
+		
+		Arguments:
+			key (str) - Key to hash
+			subhash (str) - 's' for blake2s, 'b'
+		"""
 		if subhash == 's':
 			return int.from_bytes(hashlib.blake2s(self.encode(key)).digest(), 'little') % self.capacity
 		if subhash == 'b':
 			return int.from_bytes(hashlib.blake2b(self.encode(key)).digest(), 'little') % self.capacity
 
 	def division_hash(self, key):
+		"""
+		Division hash function
+		
+		Arguments:
+			key (str) - Key to hash
+
+		Returns:
+			int - Hash value
+		"""
 		return sum(self.encode(key)) % self.capacity
 
 	def multiplication_hash(self, key):
+		"""
+		Multiplication hash function
+		
+		Arguments:
+			key (str) - Key to hash
+
+		Returns:
+			int - Hash value
+		"""
 		return math.floor(self.capacity*((sum(self.encode(key))*self.constant) % 1))
 
 	def encode(self, key):
+		"""
+		Encode a key into bytes for hashing
+		
+		Arguments:
+			key (str) - Key to encode
+
+		Returns
+			bytes - Encoded key
+		"""
 		return bytes(str(key), 'utf-8')
 
 	# ------------ Hash Table Collision Probes -------------- #
 
 	def linear_probe(self, key, hashkey, a = 5, b = 1): # Probing function used for linear hashing
+		"""
+		Linear probe function
+
+		Arguments:
+			key (str) - Key to hash
+			hashkey (int) - Initial hashkey to rehash
+			a (int) - Linear coefficient
+			b (int) - Constant coefficient
+
+		Returns:
+			int - New hashkey
+		"""
 		self.collision_count += 1
 		self.probe_count += 1
 		return (a * hashkey + b) % self.capacity
 
 	def quad_probe(self, key, hashkey): # Probing function used for quadratic probing
+		"""
+		Quadratic probe function
+
+		Arguments:
+			key (str) - Key to hash
+			hashkey (int) - Initial hashkey to rehash
+		
+		Returns:
+			int - New hashkey
+		"""
 		self.collision_count += 1
 		self.probe_count += 1
 		return (hashkey + (self.probe_count**2)) % self.capacity
 
 	def double_probe(self, key, hashkey):
+		"""
+		Double hashing probe function
+		
+		Arguments:
+			key (str) - Key to hash
+			hashkey (int) - Initial hashkey to rehash
+
+		Returns:
+			int - New hashkey
+		"""
 		self.collision_count += 1
 		self.probe_count += 1
 		hashkey = self.linear_probe(key, hashkey, False) + self.probe_count*self.quad_probe(key, hashkey, False)
@@ -91,6 +157,14 @@ class hasher:
 	# ------------- Core Hash Table Functions ------------- #
 
 	def fill(self, data = None, replace = True, empty = False):
+		"""
+		Fill the hash table with data, replacing any existing data if replace is True
+		
+		Arguments:
+			data (list) - List of keys to add to the hash table
+			replace (bool) - If True, replace existing data in the hash table
+			empty (bool) - If True, initialize an empty hash table without adding data
+		"""
 		if self.size != 0 and replace == True: # If data has already been added to the table, reset param/variables
 			self.size = 0
 			self.capacity = 2
@@ -108,6 +182,16 @@ class hasher:
 			print('Empty universal hash table initialized')
 
 	def add(self, key, pointer):
+		"""
+		Add a new key to the hash table with associated pointer
+		
+		Arguments:
+			key (str) - Key to add to the hash table
+			pointer (any) - Pointer to associate with the key
+
+		Returns:
+			None
+		"""
 		fill = float(self.size/self.capacity)
 		if self.min_fill > fill or fill > self.max_fill:
 			self.resize()
@@ -126,6 +210,14 @@ class hasher:
 		self.probe_count = 0 # Reset
 
 	def search(self, key):
+		"""
+		Search for a key in the hash table and return its associated pointer
+		Arguments:
+			key (str) - Key to search for in the hash table
+			
+		Returns:
+			pointer (any) - Pointer associated with the key, or False if not found
+		"""
 		hashkey = self.hasher(key)
 		while self.table[hashkey] is not None:
 			if self.table[hashkey] == key:
