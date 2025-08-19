@@ -15,11 +15,13 @@ HRFunc is a Python library for estimating hemodynamic response functions and neu
 ---
 
 ## Features
-- ✅ HRF deconvolution for fNIRS
+- ✅ HRF and neural activity estimation for fNIRS
+- ✅ Estimation through Toeplitz deconvolution with Tikhonov Reg.
 - ✅ Easy-to-use API compatible with MNE
 - ✅ Fast computations with NumPy + SciPy
 - ✅ Supports group-level aggregation
 - ✅ Community database of HRFs called the HRtree
+- ✅ Neural activity estimation for block task and resting state scans
 
 ---
 
@@ -33,53 +35,62 @@ pip install hrfunc
 
 ---
 
-## **HRfunc Quickstart ##
+## HRfunc Quickstart ##
 
 You can estimate neural activity directly in your fNIRS data by creating a hrfunc.montage() object with one of your scan's loaded in through MNE. 
 
-## HRfunc Usage Example **
+## HRfunc Usage Example ##
 
 ```python
 # ---- 1. Import MNE and HRfunc ---- #
-import mne
+import mne # Maybe csv or json too depending on how you store events
 import hrfunc as hrf
 
-# ---- 2. Prepare Your Data ---- #
+# ---- 2. Prepare Your fNIRS Data ---- #
 
-# Define all the filepaths to your fNIRS data - could be .snirf, .fif, or nirx formats
-scan_filepaths = ['path/to/scan_1.snirf', 'path/to/another/scan_2.snirf']
+# - Create a List of All of Your Subject Filepaths -
+scan_paths = ['path/to/sub-1.snirf', 
+    'path/to/another/sub_2.snirf',
+    'path/to/yet/another/sub_3.snirf']
 
-# Python hack use glob to grab em' all
+# (Optional hack) use glob to grab them all! 
 from glob import glob
-scan_filepaths = glob("path/**/scan_*.snirf") # Use *, **, or ? (wildcards) to grab files by patterns
+# Use *, **, or ? (wildcards) to define file patterns and grab them all
+scan_paths = glob("path/**/sub*.snirf") 
 
-#  - Load Raw fNIRS data through MNE or MNE_NIRS -
+#  - Load Raw fNIRS Data through MNE -
 scans = []
-for filepath in scan_filepaths:
-    scans.append(mne.io.read_raw_snirf(filepath))
+for path in scan_paths:
+    # Load through you're datatypes mne.io call
+    scans.append(mne.io.read_raw_snirf(path)) # .snirf format
+    #scans.append(mne.io.read_raw_fif(path)) # .fif format
+    #scans.append(mne.io.read_raw_nirx(path)) # NIRX format
 
-# - Load you're events into a list -
+# ---- 3. Prepare Your Events ---- #
+
 # In this example we're using events stored in a text file
 events = []
 with open("task_events.txt", "r") as file:
     for line in file.readlines():
         events.append(int(line.split('/n')[0]))
 
-# ---- 3. Initialize an HRF montage ---- #
+# Events should be at the most as long as the fNIRS scan
+
+# ---- 4. Initialize an HRF montage ---- #
 
 montage = hrf.montage(scan)
 
-# ---- 4. Estimate Subject Level HRFs ---- #
+# ---- 5. Estimate Subject Level HRFs ---- #
 
 for scan in scans:
     montage.estimate_hrfs(scan, duration = 30.0)
 
-# ---- 5. Generate a Subject-Pool HRF Distribution ---- #
+# ---- 6. Generate a Subject-Pool HRF Distribution ---- #
 
 montage.generate_distribution()
 montage.save("study_HRFs.json")
 
-# ---- 6. Estimate Neural Activity ----- # 
+# ---- 7. Estimate Neural Activity ----- # 
 
 for scan in scans:
 
@@ -87,7 +98,7 @@ for scan in scans:
     montage.estimate_activity(scan)
 
     # Save the scan
-    scan.save(f"deconvolved_{scan.filename}")
+    scan.save(f"deconv_{scan.filename}")
 
 ```
 
