@@ -42,11 +42,12 @@ You can estimate neural activity directly in your fNIRS data by creating a hrfun
 ## HRfunc Usage Example ##
 
 ```python
-# ---- 1. Import MNE and HRfunc ---- #
+# - - - - 1. Import MNE and HRfunc - - - - #
 import mne
 import hrfunc as hrf
 
-# ---- 2. Prepare Your fNIRS Data ---- #
+# - - - - 2. Prepare Your fNIRS Data - - - - #
+# Load in your raw fNIRS data through the MNE library
 
 # - Create a List of All of Your Subject Filepaths -
 scan_paths = ['path/to/sub-1.snirf', 
@@ -66,46 +67,64 @@ for path in scan_paths:
     #scans.append(mne.io.read_raw_fif(path)) # .fif format
     #scans.append(mne.io.read_raw_nirx(path)) # NIRX format
 
-# ---- 3. Prepare Your Events ---- #
-
+# - - - - 3. Prepare Your Events - - - - #
 # Create a list of 0's and 1's representing when events occur
-events = []
+# within your fNIRS data. 
+
+events = [] # In this example, we're loading events in a text file
 with open("task_events.txt", "r") as file:
     for line in file.readlines():
         events.append(int(line.split('/n')[0]))
 
-# Check events are at most as long as you're scans
+# Check events are at most as long as your scans
 event_count = len(events)
 for scan in scans:
     if scan.n_times > event_count:
         return f"ERROR: Events are shorter than scan {scan.filename}"
         
-# ---- 4. Initialize an HRF montage ---- #
+# - - - - 4. Initialize an HRF montage - - - - #
+# Pass in one of your scans into the hrf.montage() to intialize
+# an HRF estimation node for each of your montages optodes
 
 montage = hrf.montage(scan)
 
-# ---- 5. Estimate Subject Level HRFs ---- #
+# - - - - 5. Estimate Subject Level HRFs - - - - #
+# Pass each of your scans and their corresponding events
+# into the estimate_hrfs() function to estimate subject level 
+# channel-wise estimates.
 
 for scan in scans:
     montage.estimate_hrfs(scan, events, duration = 30.0)
 
-# ---- 6. Generate a Subject-Pool HRF Distribution ---- #
+# - - - - 6. Generate a Subject-Pool HRF Distribution - - - - #
+# Generate channel-wise HRF estimates across the subject pool
 
 montage.generate_distribution()
 montage.save("study_HRFs.json")
 
-# ---- 7. Estimate Neural Activity ----- # 
+# - - - - 7. Estimate Neural Activity - - - - # 
+# Use the subject-pool wide HRF estimates to estimate
+# channel wise neural activity for each subject
 
 for scan in scans:
-    # Estimate neural activity and replace fNIRS scan data with
+    # Estimate neural activity and replace in-place of the MNE object
     montage.estimate_activity(scan)
 
     # Save the scan
     scan.save(f"neural_activity_{scan.filename}")
 
 ```
+## HRtree Usage Example ##
+
+```python
+
+
+
+```
 
 ---
+
+
 
 ## **Documentation**
 For more comprehensive documentation on the tool, visit www.hrfunc.org
