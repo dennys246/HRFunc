@@ -43,7 +43,7 @@ You can estimate neural activity directly in your fNIRS data by creating a hrfun
 
 ```python
 # ---- 1. Import MNE and HRfunc ---- #
-import mne # Maybe csv or json too depending on how you store events
+import mne
 import hrfunc as hrf
 
 # ---- 2. Prepare Your fNIRS Data ---- #
@@ -68,14 +68,18 @@ for path in scan_paths:
 
 # ---- 3. Prepare Your Events ---- #
 
-# In this example we're using events stored in a text file
+# Create a list of 0's and 1's representing when events occur
 events = []
 with open("task_events.txt", "r") as file:
     for line in file.readlines():
         events.append(int(line.split('/n')[0]))
 
-# Events should be at the most as long as the fNIRS scan
-
+# Check events are at most as long as you're scans
+event_count = len(events)
+for scan in scans:
+    if scan.n_times > event_count:
+        return f"ERROR: Events are shorter than scan {scan.filename}"
+        
 # ---- 4. Initialize an HRF montage ---- #
 
 montage = hrf.montage(scan)
@@ -83,7 +87,7 @@ montage = hrf.montage(scan)
 # ---- 5. Estimate Subject Level HRFs ---- #
 
 for scan in scans:
-    montage.estimate_hrfs(scan, duration = 30.0)
+    montage.estimate_hrfs(scan, events, duration = 30.0)
 
 # ---- 6. Generate a Subject-Pool HRF Distribution ---- #
 
@@ -93,12 +97,11 @@ montage.save("study_HRFs.json")
 # ---- 7. Estimate Neural Activity ----- # 
 
 for scan in scans:
-
-    # Data replaced in-place
+    # Estimate neural activity and replace fNIRS scan data with
     montage.estimate_activity(scan)
 
     # Save the scan
-    scan.save(f"deconv_{scan.filename}")
+    scan.save(f"neural_activity_{scan.filename}")
 
 ```
 
