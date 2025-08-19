@@ -38,7 +38,7 @@ If you need to install Python, check out this great guide for installing it on y
 
 ---
 
-## HRfunc Quickstart ##
+## Quickstart ##
 
 You can estimate channel-wise hemodynamic response functions and neural activity directly within your subjects fNIRS data through the hrfunc library. The hrfunc.montage() object orchestrates these estimations through 5 steps: 
 
@@ -51,7 +51,7 @@ You can estimate channel-wise hemodynamic response functions and neural activity
 ## 1. Preparing Data for HRfunc ##
 
 HRfunc leverages the MNE Python libraries standard fNIRS scan objects
-to estimate HRFs and neural activity from. To prepare you're data, simply
+to estimate HRFs and neural activity. To prepare you're data, simply
 load each raw fNIRS scan through MNE and create an event impulse timeseries
 representing when events occured in the scan.
 
@@ -178,14 +178,14 @@ for scan in raw_scans:
 
 ---
 
-## **Documentation**
+## Documentation ##
 For more comprehensive documentation on the tool, visit www.hrfunc.org
 
-## Contributing
+## Contributing ##
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## License
+## License ##
 Distributed under the BSD-3 License. See [LICENSE](LICENSE) for details.
 
-## Citation
+## Citation ##
 If you use `hrfunc` in your research, please cite:
