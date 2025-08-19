@@ -27,59 +27,70 @@ HRFunc is a Python library for estimating hemodynamic response functions and neu
 
 ## Installation
 
-You can easily install hrfunc via pip, as long as you have python version 3.8 or higher.
+You can easily install hrfunc via pip, as long as you have Python version 3.8 or higher.
 
 ```bash
 pip install hrfunc
 ```
 
+If you need to install Python, check out this great guide for installing it on your operating system
+-> https://realpython.com/installing-python/
+
 ---
 
 ## HRfunc Quickstart ##
 
-You can estimate channel-wise hemodynamic response functions and neural activity directly within your subjects fNIRS data through the hrfunc library. The hrfunc.montage() object orchestrates these estimations through three simple steps: 
+You can estimate channel-wise hemodynamic response functions and neural activity directly within your subjects fNIRS data through the hrfunc library. The hrfunc.montage() object orchestrates these estimations through 5 steps: 
 
 1. Prepare your fNIRS and event data
 2. Initialize an HRfunc montage
-3. Estimate subject channel-wise HRFs
+3. Estimate subject-level HRFs
 4. Calculate a subject-pool wide HRF distribution
 5. Estimate neural activity in each subjects scans
 
-## 1. Preparing Your Data ##
+## 1. Preparing Data for HRfunc ##
 
 HRfunc leverages the MNE Python libraries standard fNIRS scan objects
-to estimate HRFs and neural activity. To prepare you're data by simply
-loading each fNIRS scan through MNE and creating a event impulse timeseries
-representing when events occured in your
+to estimate HRFs and neural activity from. To prepare you're data, simply
+load each raw fNIRS scan through MNE and create an event impulse timeseries
+representing when events occured in the scan.
 
 ```python
-import mne
-# - - - -  Prepare Your fNIRS Data - - - - #
+
+# - - - -  1. Prepare Your fNIRS Data - - - - #
 # Load in your raw fNIRS data through the MNE library
-# and load into a list for easy access
+# and append to a list of scans for easy access and iteration
+
+# NOTE: This is just an example of how you can load your fNIRS
+# data and events, in the end all you need is fNIRS data loaded
+# through MNE and a list of 0's and 1's representing when events
+# occured during your scan.
+
+import mne
 
 # - Create a List of All of Your Subject Filepaths
+
 scan_paths = ['path/to/sub-1.snirf', 
     'path/to/another/sub_2.snirf',
     'path/to/yet/another/sub_3.snirf']
 
 # (Optional hack) use glob to grab them all! 
+
 from glob import glob
 # Use *, **, or ? (wildcards) to define ambiguous file patterns
-# and grab all your files in one line
-scan_paths = glob("path/**/sub*.snirf") 
+scan_paths = glob("path/**/sub*.snirf") # and grab all your files in one pass
 
 #  - Load Raw fNIRS Data through MNE -
-scans = []
+
+raw_scans = []
 for path in scan_paths: # Load through you're datatypes mne.io read call
-    scans.append(mne.io.read_raw_snirf(path)) # .snirf format
+    raw_scans.append(mne.io.read_raw_snirf(path)) # All MNE fNIRS formats will work
 
 
 # - - - -  Prepare Your Events - - - - #
 # Load/create a list of 0's and 1's representing when events occur
-# in your fNIRS data.
+# in your fNIRS data. This list must be at most the same length
 
- # In this example, we're loading events in a text file
 with open("task_events.txt", "r") as file:
     events = [int(line.split('/n')[0] for line in file.readlines()]
 
@@ -87,7 +98,8 @@ with open("task_events.txt", "r") as file:
 
 ## HRfunc Usage Example ##
 
-Once you're data is loaded, you 
+Once you're data is loaded, you can start to estimate HRFs
+and neural activity through HRfunc!
 
 ```python
 
@@ -105,7 +117,7 @@ montage = hrf.montage(scan)
 # into the estimate_hrfs() function to estimate subject level 
 # channel-wise estimates.
 
-for scan in scans:
+for scan in raw_scans:
     montage.estimate_hrfs(scan, events, duration = 30.0)
 
 
@@ -133,15 +145,13 @@ WARNING: The HRtree is currently very limited in the HRF's available and
 you may need to estimate your own HRF's or rely on a canonical HRF for
 estimating neural activity
 
-HRfunc can only estimate HRFs and neural activity from fNIRS data
-with events occuring during the scan. In these situations you could
-skip straight to estimating neural activity and rely on the in-built
-canonical HRF.
+HRfunc can only estimate HRFs from fNIRS data with events occuring during
+the scan. In these situations you could skip straight to estimating neural
+activity and rely on a canonical HRF.
 
 Alternatively you could search the HRtree for experimentally related
 HRF's! HRfunc's hybrid tree-hash table data structure has a number of
-useful functions for searching for useful HRF's.
-
+useful functions to search for useful HRF's
 
 ```python
 
@@ -155,19 +165,18 @@ montage = hrf.localize_hrfs(scan, max_distance = 0.001, task = 'flanker', age = 
 montage = montage.branch(demographic = ["black", "women"])
 
 # - - - - Further filter the montage by percent similarity - - - - #
-# Filter for specifically HRF's that meet a similarity threshold
+# Filter for specifically HRF's that meet a similarity threshold (95% in this case)
 montage.filter(similarity_threshold = 0.95)
 
 # - - - - Estimate neuiral activity using found HRFs - - - - #
 # NOTE: Relies on canonical HRF for a given optode if no 
 # HRF was found for the given optode/experimental context
-montage.estimate_acivity(scan)
+for scan in raw_scans:
+    montage.estimate_acivity(scan)
 
 ```
 
 ---
-
-
 
 ## **Documentation**
 For more comprehensive documentation on the tool, visit www.hrfunc.org
