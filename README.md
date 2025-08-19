@@ -46,6 +46,7 @@ You can estimate neural activity directly in your fNIRS data by creating a hrfun
 import mne
 import hrfunc as hrf
 
+
 # - - - - 2. Prepare Your fNIRS Data - - - - #
 # Load in your raw fNIRS data through the MNE library
 
@@ -61,32 +62,24 @@ scan_paths = glob("path/**/sub*.snirf")
 
 #  - Load Raw fNIRS Data through MNE -
 scans = []
-for path in scan_paths:
-    # Load through you're datatypes mne.io call
+for path in scan_paths: # Load through you're datatypes mne.io call
     scans.append(mne.io.read_raw_snirf(path)) # .snirf format
-    #scans.append(mne.io.read_raw_fif(path)) # .fif format
-    #scans.append(mne.io.read_raw_nirx(path)) # NIRX format
+
 
 # - - - - 3. Prepare Your Events - - - - #
-# Create a list of 0's and 1's representing when events occur
-# within your fNIRS data. 
+# Load/create a list of 0's and 1's representing when events occur
 
-events = [] # In this example, we're loading events in a text file
+# In this example, we're loading events in a text file
 with open("task_events.txt", "r") as file:
-    for line in file.readlines():
-        events.append(int(line.split('/n')[0]))
+    events = [int(line.split('/n')[0] for line in file.readlines()]
 
-# Check events are at most as long as your scans
-event_count = len(events)
-for scan in scans:
-    if scan.n_times > event_count:
-        return f"ERROR: Events are shorter than scan {scan.filename}"
         
 # - - - - 4. Initialize an HRF montage - - - - #
 # Pass in one of your scans into the hrf.montage() to intialize
 # an HRF estimation node for each of your montages optodes
 
 montage = hrf.montage(scan)
+
 
 # - - - - 5. Estimate Subject Level HRFs - - - - #
 # Pass each of your scans and their corresponding events
@@ -96,11 +89,13 @@ montage = hrf.montage(scan)
 for scan in scans:
     montage.estimate_hrfs(scan, events, duration = 30.0)
 
+
 # - - - - 6. Generate a Subject-Pool HRF Distribution - - - - #
 # Generate channel-wise HRF estimates across the subject pool
 
 montage.generate_distribution()
 montage.save("study_HRFs.json")
+
 
 # - - - - 7. Estimate Neural Activity - - - - # 
 # Use the subject-pool wide HRF estimates to estimate
