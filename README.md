@@ -143,6 +143,10 @@ for scan in scans:
     scan.save(f"neural_activity_{scan.filename}")
 
 ```
+
+After estimating HRF's and publishing a paper detailing how your dataset was collecting you can submit you're estimated HRFs to be added to the HRtree for the wider neuroimaging community to use in their own work. For guides on uploading neural activity, visit [HRfunc.org/hrf_upload](https://www.hrfunc.org/hrf_upload)
+
+
 ## HRtree Usage Example ##
 WARNING: The HRtree is currently very limited in the HRF's available and
 you may need to estimate your own HRF's or rely on a canonical HRF for
@@ -182,7 +186,7 @@ for scan in raw_scans:
 ---
 
 ## Documentation ##
-For more comprehensive documentation on the tool, visit www.hrfunc.org
+For more comprehensive documentation on the tool, visit www.hrfunc.org.
 
 ## Contributing ##
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
