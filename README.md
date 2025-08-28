@@ -48,7 +48,7 @@ You can estimate channel-wise hemodynamic response functions and neural activity
 4. Calculate a subject-pool wide HRF distribution
 5. Estimate neural activity in each subjects scans
 
-[![Watch a demo of the tool here!](https://i.vimeocdn.com/video/placeholder.jpg)](https://vimeo.com/1112126924)
+Watch a demo of the tool here: https://vimeo.com/1112126924
 
 
 ## 1. Preparing Data for HRfunc ##
