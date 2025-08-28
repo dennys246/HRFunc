@@ -158,20 +158,20 @@ useful functions to search for useful HRF's
 
 ```python
 
-# - - - - Localize HRFs with your context of interest - - - - #
+# - - - - Localize HRFs with your Context of Interest - - - - #
 import hrfunc as hrf
 
 # Localize any HRF's within range that contain task and age requested
 montage = hrf.localize_hrfs(scan, max_distance = 0.001, task = 'flanker', age = [5, 6, 7])
 
-# - - - - Filter again for another experimental context - - - - #
+# - - - - Filter Again for Another Experimental Context - - - - #
 montage = montage.branch(demographic = ["black", "women"])
 
-# - - - - Further filter the montage by percent similarity - - - - #
+# - - - - Further Filter the Montage by Percent Similarity - - - - #
 # Filter for specifically HRF's that meet a similarity threshold (95% in this case)
 montage.filter(similarity_threshold = 0.95)
 
-# - - - - Estimate neuiral activity using found HRFs - - - - #
+# - - - - Estimate Neural Activity using Found HRFs - - - - #
 # NOTE: Relies on canonical HRF for a given optode if no 
 # HRF was found for the given optode/experimental context
 for scan in raw_scans:
