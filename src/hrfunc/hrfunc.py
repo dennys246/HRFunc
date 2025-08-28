@@ -218,7 +218,7 @@ class montage(tree):
                     optode.trace_std = canonical_std
                     optode.context['method'] = 'canonical'
 
-    def estimate_hrf(self, nirx_obj, events, duration = 30.0, _lambda = 1e-3, edge_expansion = 0.15, preprocess = True):
+    def estimate_hrf(self, nirx_obj, events, duration = 30.0, lmbda = 1e-3, edge_expansion = 0.15, preprocess = True):
         """
         Estimate an HRF subject wise given a nirx object and event impulse series using toeplitz 
         deconvolution with regularization.
@@ -227,7 +227,7 @@ class montage(tree):
             nirx_obj (mne raw object) - fNIRS scan file loaded in through mne
             events (list) - Event impulse series indicating event occurences during fNIRS scan
             duration (float) - Duration in seconds of the HRF to estimate
-            _lambda (float) - Regularization parameter to apply during deconvolution
+            lmbda (float) - Regularization parameter to apply during deconvolution
             edge_expansion (float) - Fraction of the duration to expand the events and duration by to account for toeplitz edge artifacts
             preprocess (bool) - If True, preprocess the fNIRS data before estimating the HRF
         
@@ -290,7 +290,7 @@ class montage(tree):
             Y = (fnirs_signal - mean) / std
 
             # Define regularized least squares equation
-            lhs = X.T @ X + _lambda * np.eye(X.shape[1])
+            lhs = X.T @ X + lmbda * np.eye(X.shape[1])
             rhs = X.T @ Y
 
             try: # Try estimating with standard least squares
@@ -315,14 +315,14 @@ class montage(tree):
             optode.locations.append(list(channel['loc'][:3]))
 
 
-    def estimate_activity(self, nirx_obj, _lambda = 1e-4, hrf_model = 'toeplitz', preprocess = True):
+    def estimate_activity(self, nirx_obj, lmbda = 1e-4, hrf_model = 'toeplitz', preprocess = True):
         """
         Deconvlve a fNIRS scan using estimated HRF's localized to optodes location
         to gain a neural activity estimate
 
         Arguments:
             nirx_obj (mne raw object) - fNIRS scan loaded through mne
-            _lambda (float) - Regularization parameter to apply during deconvolution
+            lmbda (float) - Regularization parameter to apply during deconvolution
             hrf_model (str) - HRF model to use during deconvolution, either 'toeplitz' for localized HRF's or 'canonical' for a standard canonical HRF
             preprocess (bool) - If True, preprocess the fNIRS data before estimating the neural activity
         
@@ -358,7 +358,7 @@ class montage(tree):
             A = np.asarray(A, dtype=float)
 
             # Solve the inverse problem with regularization
-            lhs = A.T @ A + float(_lambda) * np.eye(A.shape[1])
+            lhs = A.T @ A + float(lmbda) * np.eye(A.shape[1])
             rhs = A.T @ Y
             try: # Try using standard linear least squared to solve
                 deconvolved_signal, *_ = np.linalg.lstsq(lhs, rhs, rcond=None)
