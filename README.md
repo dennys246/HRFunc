@@ -1,5 +1,5 @@
 # HRFunc
-HRFunc is a Python library for estimating hemodynamic response functions and neural activity from hemoglobin concentration in functional near infrared spectroscopy (fNIRS), through modeling hemodynamic response functions through the brain recorded from fNIRS signals and deconvolving neural activity. Toeplitz deconvolution with Tikhonov regularization is employed for HRF and neural activity estimation. 
+HRFunc is a Python library for estimating hemodynamic response functions and neural activity from hemoglobin concentration in functional near infrared spectroscopy (fNIRS), through modeling hemodynamic response functions through the brain recorded from fNIRS signals and deconvolving neural activity. Toeplitz deconvolution with Tikhonov regularization is employed for HRF and neural activity estimation. For more guidance on using the HRfunc tool, visit www.hrfunc.org for in-depth guides and demo videos.
 
 ---
 
@@ -47,6 +47,9 @@ You can estimate channel-wise hemodynamic response functions and neural activity
 3. Estimate subject-level HRFs
 4. Calculate a subject-pool wide HRF distribution
 5. Estimate neural activity in each subjects scans
+
+[![Watch a demo of the tool here!](https://i.vimeocdn.com/video/placeholder.jpg)](https://vimeo.com/1112126924)
+
 
 ## 1. Preparing Data for HRfunc ##
 
