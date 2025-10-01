@@ -1,4 +1,4 @@
-# Contributing to your-tool
+# Contributing to HRfunc
 
 First off, thanks for taking the time to contribute! 🎉  
 This document outlines the process and guidelines for contributing to **HRfunc**.
