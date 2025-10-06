@@ -1,8 +1,9 @@
-import scipy.linalg, json, mne, random, re, os, nilearn
+import scipy.linalg, json, mne, random, re, os, nilearn, time
 import hrfunc
 import numpy as np
 import matplotlib.pyplot as plt
 from .hrtree import tree, HRF
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from itertools import compress
 from glob import glob
 
@@ -218,6 +219,30 @@ class montage(tree):
                     optode.trace_std = canonical_std
                     optode.context['method'] = 'canonical'
 
+
+    def solve_lstsq(self, lhs, rhs, cond_thresh = None):
+        # Compute condition number
+        if cond_thresh:
+            start = time.time()
+            cond_number = np.linalg.cond(lhs)
+            end = time.time()
+            print(f"np.linalg.cond elapsed time: {end - start:.6f} seconds")
+        
+        if cond_thresh == None or cond_number < cond_thresh:
+            # Stable enough to use least squares with pseudoinverse
+            start = time.time()
+            estimate, *_ = np.linalg.lstsq(lhs, rhs, rcond=None)
+            end = time.time()
+            print(f"np.linalg.lstsq elapsed time: {end - start:.6f} seconds")
+        else:
+            # Same least squares but with smoothing
+            start = time.time()
+            estimate = scipy.linalg.pinv(lhs) @ rhs
+            end = time.time()
+            print(f"scipy.linalg.pinv elapsed time: {end - start:.6f} seconds")
+        
+        return estimate
+
     def estimate_hrf(self, nirx_obj, events, duration = 30.0, lmbda = 1e-3, edge_expansion = 0.15, preprocess = True):
         """
         Estimate an HRF subject wise given a nirx object and event impulse series using toeplitz 
@@ -278,7 +303,7 @@ class montage(tree):
             print(f"WARNING: Shortening events for {nirx_obj}")
         elif events.shape[0] != scan_len:
             raise ValueError(f"ERROR: Expected events to be of length {scan_len} but got length {events.shape[0]}...")
-    
+
         # Build Toeplitz matrix
         X = scipy.linalg.toeplitz(events, np.zeros(hrf_len))
         for fnirs_signal, channel in zip(data[:], nirx_obj.info['chs']) : # For each channel
@@ -293,10 +318,7 @@ class montage(tree):
             lhs = X.T @ X + lmbda * np.eye(X.shape[1])
             rhs = X.T @ Y
 
-            try: # Try estimating with standard least squares
-                hrf_estimate, *_ = np.linalg.lstsq(lhs, rhs, rcond = None)
-            except np.linalg.LinAlgError: # If that fails, try applying the same with smoothing
-                hrf_estimate = scipy.linalg.pinv(lhs) @ rhs
+            hrf_estimate = self.solve_lstsq(lhs, rhs)
 
             # Denormalize HRF estimate
             #hrf_estimate = hrf_estimate * np.max(np.abs(fnirs_signal))
@@ -315,7 +337,7 @@ class montage(tree):
             optode.locations.append(list(channel['loc'][:3]))
 
 
-    def estimate_activity(self, nirx_obj, lmbda = 1e-4, hrf_model = 'toeplitz', preprocess = True):
+    def estimate_activity(self, nirx_obj, lmbda = 1e-4, hrf_model = 'toeplitz', preprocess = True, cond_thresh = None, timeout = 1500):
         """
         Deconvlve a fNIRS scan using estimated HRF's localized to optodes location
         to gain a neural activity estimate
@@ -329,6 +351,10 @@ class montage(tree):
         Returns:
             None
         """
+
+        # Check montage still needs to be configured
+        if self.configured is False:
+            self.configure(nirx_obj)
             
         nirx_obj.load_data()
         if preprocess:
@@ -336,7 +362,6 @@ class montage(tree):
 
         # Define hrf deconvolve function to pass nirx object
         def deconvolution(nirx):
-            original_len = len(nirx)
 
             # Normalize input z-score
             mean = np.mean(nirx)
@@ -360,12 +385,24 @@ class montage(tree):
             # Solve the inverse problem with regularization
             lhs = A.T @ A + float(lmbda) * np.eye(A.shape[1])
             rhs = A.T @ Y
-            try: # Try using standard linear least squared to solve
-                deconvolved_signal, *_ = np.linalg.lstsq(lhs, rhs, rcond=None)
-            except np.linalg.LinAlgError as e: # If failed try to run pinv with smoothing
-                print("Linear algebra error:", e)
-                deconvolved_signal = scipy.linalg.pinv(lhs) @ rhs
+            
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self.solve_lstsq, lhs, rhs, cond_thresh)
+                try:
+                    deconvolved_signal = future.result(timeout)
+                    success = True
 
+                except TimeoutError:
+                    print("lstsq failed to converge and estimate neural activity, dropping channel")
+                    deconvolved_signal = nirx
+                    success = False
+            
+            """
+            start = time.time()
+            deconvolved_signal = self.solve_lstsq(lhs, rhs)
+            end = time.time()
+            print(f"Elapsed time: {end - start:.6f} seconds")
+            """
             # Denormalize neural signal estimate - EXCLUDING TO KEEP IN A.U.
             #deconvolved_signal = deconvolved_signal * std + mean
 
@@ -373,17 +410,18 @@ class montage(tree):
 
         # Apply deconvolution and return the nirx object
         for ch_name, hrf in self.channels.items():
+            success = None
+
             if 'global' in ch_name: continue # Skip if global hrf estimate
             
             # If canonical HRF requested
-            if hrf_model == 'canonical':
-                print(f"WARNING: Using canonical HRF for {nirx_obj}")
+            if hrf_model == 'canonical' or len(hrf.trace) == 0:
+                print(f"WARNING: Using canonical HRF for channel {ch_name} in {nirx_obj}")
                 estimate_hrf = hrf # Temporarily replace HRF
                 if _is_oxygenated(ch_name): # with oxygenated canonical
                     hrf = self.hbo_tree.root.right
                 else: # with deoxygenated canonical
                     hrf = self.hbr_tree.root.right
-
 
             # Figure out which channel to apply to
             for nirx_channel in nirx_obj.info['chs']:
@@ -393,7 +431,12 @@ class montage(tree):
                 
             print(f"Deconvolving channel {ch_name}...") # Apply deconvolution
             nirx_obj.apply_function(deconvolution, picks = [nirx_channel['ch_name']]) # Apply deconvolution for channel
-        
+
+            # Remove channel is neural activity estimation failed to converge
+            if success == False:
+                nirx_obj.drop_channels([nirx_channel['ch_name']])
+
+            # Replace the canonical HRF estimate temporarily used with the HRF estimate
             if hrf_model == 'canonical':
                 hrf = estimate_hrf # Replace the original HRF
 
