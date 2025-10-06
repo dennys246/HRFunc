@@ -1,4 +1,4 @@
-import mne, os, math
+import mne, os, math, csv
 import numpy as np
 from scipy.signal import welch
 from mne_nirs.preprocessing import peak_power
@@ -8,8 +8,10 @@ from scipy.stats import skew, kurtosis
 
 
 class lens:
-    # This object is primarily used to calculate summary statistics of the passed in and
-    # preprocessed NIRX objects. This can be used to compare your output to published results
+    """
+    This object is primarily used to calculate summary statistics of the passed in and
+    preprocessed NIRX objects. This can be used to compare your output to published results
+    """
     def __init__(self, working_directory = None):
         
         # Set working directory is not passed in
@@ -32,15 +34,15 @@ class lens:
 
     def compare_subject(self, subject_id, raw_nirx, preproc_nirx, deconv_nirx, events, channel = 0, length = 500):
         print(f"Comparing subject {subject_id}")
+        if preproc_nirx is None:
+            print(f"No data passed in...")
+            return
+        
         self.channels = preproc_nirx.ch_names
 
         # Plot the preprocessed nirx with the deconvolved with event overlays
         self.plot_nirx(subject_id, preproc_nirx, deconv_nirx, events, channel, length)
-
-        # Grab raw NIRX quality metrics scalp coupling index and peakpower
-        #self.metrics['SCI'] = np.concatenate((self.metrics['SCI'], self.calc_sci(subject_id, raw_nirx, 'raw')), axis = 0)
-        #self.calc_pp(subject_id, raw_nirx, 'raw')
-
+        
         meters = [self.calc_skewness_and_kurtosis, self.calc_snr]
         for meter in meters: # Iterate through other metrcis comparing preprocessed and deconvolved data
             response = meter(subject_id, preproc_nirx, 'Preprocessed')
@@ -188,30 +190,33 @@ class lens:
         plt.close()
         return sci
 
-    def calc_snr(self, subject_id, nirx, state):
+    def calc_snr(self, subject_id, nirx, state, 
+                 signal_band = (0.03, 0.1), 
+                 noise_bands = [(0.0, 0.01), (0.1, 0.5)]):
+        
         # Load data
         nirx.load_data()
         data = nirx.get_data()
-
-        # Filter the raw data to obtain the signal and noise components
-        # Define the signal band (i.e., hemodynamic response function band)
-        signal_band = (0.01, 0.2)
-        # Define the noise band (outside of the hemodynamic response)
-        noise_band = (0.2, 1.0) 
-
+    
         # Extract the signal in the desired band
         preproc_signal = nirx.copy().filter(signal_band[0], signal_band[1], fir_design='firwin')
 
         # Extract the noise in the out-of-band frequency range
-        preproc_noise = nirx.copy().filter(noise_band[0], noise_band[1], fir_design='firwin')
+        preproc_noise_slow = nirx.copy().filter(noise_bands[0][0], noise_bands[0][1], fir_design='firwin')
+        preproc_noise_fast = nirx.copy().filter(noise_bands[1][0], noise_bands[1][1], fir_design='firwin')
+
 
         # Calculate the Power Spectral Density (PSD) for signal and noise using compute_psd()
         psd_signal = preproc_signal.compute_psd(fmin = signal_band[0], fmax = signal_band[1])
-        psd_noise = preproc_noise.compute_psd(fmin = noise_band[0], fmax = noise_band[1])
+        psd_noise_slow = preproc_noise_fast.compute_psd(fmin = noise_bands[0][0], fmax = noise_bands[0][1])
+        psd_noise_fast = preproc_noise_slow.compute_psd(fmin = noise_bands[1][0], fmax = noise_bands[1][1])
 
         # Extract the power for each component
         signal_power = psd_signal.get_data().mean(axis = -1)  # Average power across frequencies for signal
-        noise_power = psd_noise.get_data().mean(axis = -1)    # Average power across frequencies for noise
+        
+        noise_power_slow = psd_noise_slow.get_data().mean(axis = -1)    # Average power across frequencies for noise
+        noise_power_fast = psd_noise_fast.get_data().mean(axis = -1) 
+        noise_power = (noise_power_slow + noise_power_fast) / 2
 
         # Calculate SNR
         snr = signal_power / noise_power
@@ -283,3 +288,75 @@ class lens:
         plt.savefig(f'{self.working_directory}/plots/{state}_hr_presence.jpeg')
         plt.close()
     
+    def save(self, output_dir):
+        
+        for state in self.metrics.keys():
+            # skip signal-to-noise
+            if state == "SCI":
+                continue
+
+            print(f"Assessing {state} state")
+
+            # Save SNR - Subject level
+            content = [["Subject", "SNR"]]
+            for subject in self.metrics[state]["snr"].keys():
+                content.append([subject, self.metrics[state]['snr'][subject]])
+            
+            with open(f"{output_dir}/{state}_snr.csv", "w") as csvfile:
+                csvwriter = csv.writer(csvfile)
+                csvwriter.writerows(content)
+                
+            # Save Kurtosis
+            header = ["subject"]
+            content = []
+
+            # Iterate through each subject
+            for subject in self.metrics[state]["kurtosis"].keys():
+
+                # Iterate through each channel
+                channel_kurtosis = []
+                for channel in self.metrics[state]["kurtosis"][subject].keys():
+                    if channel not in header:
+                        header.append(channel)
+
+                    channel_kurtosis.append(self.metrics[state]["kurtosis"][subject][channel])
+                
+                # Add into to content
+                channel_kurtosis = [subject] + channel_kurtosis
+                content.append(channel_kurtosis)
+                    
+            # Add header
+            content = [header] + content
+
+            # Save as a csv
+            with open(f"{output_dir}/{state}_kurtosis.csv", "w") as csvfile:
+                csvwriter = csv.writer(csvfile)
+                csvwriter.writerows(content)
+
+            # Save Skew - Channel-level
+            header = ["subject"]
+            content = []
+
+            # Iterate through each subject
+            for subject in self.metrics[state]["skewness"].keys():
+
+                # Iterate through each channel
+                channel_skew = []
+                for channel in self.metrics[state]["skewness"][subject].keys():
+                    if channel not in header:
+                        print(f"New Channel {channel} - {subject}")
+                        header.append(channel)
+
+                    channel_skew.append(self.metrics[state]["skewness"][subject][channel])
+                
+                # Add into to content
+                channel_skew = [subject] + channel_skew
+                content.append(channel_skew)
+                    
+            # Add header
+            content = [header] + content
+
+            # Save as a csv
+            with open(f"{output_dir}/{state}_skewness.csv", "w") as csvfile:
+                csvwriter = csv.writer(csvfile)
+                csvwriter.writerows(content)
