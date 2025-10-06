@@ -47,6 +47,6 @@ for filetype_load, filetype in zip([loader.load_nirx, loader.load_snirf, loader.
     # Check that all channels were found
     for ch_name in montage.channels.keys():
         if montage.channels[ch_name].context['method'] != 'canonical':
-            RuntimeError(f"ERROR: Sham localization found an HRF, sham localization failed to fail and rely on canonical")
+            RuntimeError(f"ERROR: Sham localization found an HRF, sham localization failed to fail and rely on canonical HRF")
 
     del montage
