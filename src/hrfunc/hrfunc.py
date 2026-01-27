@@ -190,7 +190,7 @@ class montage(tree):
             None
         """
 
-        canonical_hbo = nilearn.glm.first_level.glover_hrf(tr = 1/self.sfreq, oversampling = 1, time_length = float(self.context['duration']))
+        canonical_hbo = nilearn.glm.first_level.glover_hrf(t_r = 1/self.sfreq, oversampling = 1, time_length = float(self.context['duration']))
         canonical_hbr = np.array([-point for point in canonical_hbo])
         canonical_std = [0 for _ in canonical_hbr]
 
@@ -625,8 +625,6 @@ class montage(tree):
         self._merge_montages(nirx_obj) # Add empty HRF nodes to the tree for each HRF
 
         self.configured = True
-
-
 
     def save(self, filename = 'montage_hrfs.json'):
         """

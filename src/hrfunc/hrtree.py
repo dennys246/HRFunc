@@ -152,7 +152,7 @@ class tree:
             print(f"Setting root... {hrf.ch_name}")
             self.root = hrf
             
-            canonical_hrf = list(nilearn.glm.first_level.glover_hrf(tr = 0.128, oversampling = 1, time_length = 30.0))
+            canonical_hrf = list(nilearn.glm.first_level.glover_hrf(t_r = 0.128, oversampling = 1, time_length = 30.0))
 
             if self.root.oxygenation:
                 ch_name = 'canonical-hbo'
@@ -748,13 +748,14 @@ class HRF:
         # Resample trace
         return [mean + (std_seed * std) for mean, std in zip(self.trace, self.trace_std)]
 
-    def plot(self, plot_dir, show_legend = True):
+    def plot(self, plot_path = None, show_legend = True, show = True):
         """
         Function to plot the current HRF in seconds.
 
         Parameters:
-            plot_dir (str): Path to save plots for each HRF stage
+            plot_path (str, optional): Path to save the plot. If provided, saves the figure.
             show_legend (bool): Whether to show the HRF legend
+            show (bool): Whether to display the figure (default True)
         """
         hrf_mean = self.trace
         hrf_std = self.trace_std
@@ -769,11 +770,6 @@ class HRF:
         plt.title(f'Estimated HRF for {self.ch_name} with Standard Deviation')
         plt.grid(True)
 
-        # Auto-scale y-axis ticks nicely
-        y_min = round(min(hrf_mean - hrf_std), 1) - 0.1
-        y_max = round(max(hrf_mean + hrf_std), 1) + 0.1
-        plt.yticks(np.arange(y_min, y_max, 0.1))
-
         # Cleaner x-axis ticks based on time
         plt.xticks(np.arange(0, max(time) + 0.3, 2))  # e.g., every 2 seconds
 
@@ -781,5 +777,10 @@ class HRF:
             plt.legend()
 
         plt.tight_layout()
-        plt.savefig(f"{plot_dir}/{self.ch_name}_hrf_estimate.png")
+
+        if plot_path is not None:
+            plt.savefig(plot_path)
+
+        if show:
+            plt.show()
             
