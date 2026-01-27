@@ -294,6 +294,8 @@ class montage(tree):
         data = nirx_obj.get_data() # Grab data
         if preprocess:
             nirx_obj = preprocess_fnirs(nirx_obj, deconvolution = True)
+            if nirx_obj is None:
+                return  # Skip subject if all channels are bad
 
         hrf_len = int(round(self.sfreq * duration, 0))  # Calculate HRF length
         scan_len = data.shape[1] # Grab single channel signal length
