@@ -235,7 +235,7 @@ class tree:
 
         # Check if the hrf matches the context
         context_similarity = self.compare_context(self.context, node.context, self.context_weights)
-        if context_similarity > similarity_threshold: # If not similar enough to requested context
+        if context_similarity < similarity_threshold: # If not similar enough to requested context
             self.delete(node) # Exclude derived HRF
 
     def compare_context(self, first_context, second_context):
@@ -276,21 +276,28 @@ class tree:
 
         Arguments:
             **kwargs - Any context keyword value pair to branch on (i.e. doi, age, etc)
-        
+
         Returns:
             branch (tree object) - A new tree object filtered on the requested context
         """
         if kwargs:
             self.context = {**self.context, **kwargs} # Update context
 
-        branch = tree('hrf_branch.json')
+        branch = tree()
 
         for key, values in self.context.items(): # Iterate through all context items
+            if values is None:
+                continue
             for value in values: # Iterate through each item in a context area
                 # Hash on the value and iterate through the tree pointers
                 context_references = self.hasher.search(value)
                 for node in context_references:
-                    branch.channels[node.ch_name] = branch.insert(node) # Insert node pointer into branch
+                    # Create a deep copy of the HRF node to preserve all data
+                    node_copy = node.copy()
+                    branch.insert(node_copy)
+                    # Add context to hasher
+                    for context in branch.context:
+                        branch.hasher.add(context, node_copy)
         self.branched = True
         return branch
 
@@ -655,11 +662,30 @@ class HRF:
 
     def __repr__(self):
         """String representation of the HRF object.
-        
+
         Returns:
             str: A string summarizing the HRF object.
         """
         return f"HRF: {self.doi} - {self.ch_name} \nSampling frequency: {self.sfreq}\nLocation: [{self.x}, {self.y}, {self.z}]\nTrace: {self.trace}\nTrace standrad deviation: {self.trace_std}"
+
+    def copy(self):
+        """Create a deep copy of this HRF object.
+
+        Returns:
+            HRF: A new HRF object with copies of all data including trace_std.
+        """
+        return HRF(
+            doi=self.doi,
+            ch_name=self.ch_name,
+            duration=float(self.context.get('duration', 30.0)),
+            sfreq=self.sfreq,
+            trace=np.copy(self.trace) if isinstance(self.trace, np.ndarray) else list(self.trace) if self.trace is not None else [],
+            trace_std=np.copy(self.trace_std) if isinstance(self.trace_std, np.ndarray) else list(self.trace_std) if self.trace_std is not None else None,
+            location=[self.x, self.y, self.z],
+            estimates=[list(e) for e in self.estimates] if self.estimates else [],
+            locations=[list(loc) for loc in self.locations] if self.locations else [],
+            context=dict(self.context) if self.context else {}
+        )
 
     def build(self, new_sfreq, plot = False, show = False):
         """ Run through the processes requested for generating an hrf """

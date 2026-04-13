@@ -151,7 +151,7 @@ class hasher:
 		"""
 		self.collision_count += 1
 		self.probe_count += 1
-		hashkey = self.linear_probe(key, hashkey, False) + self.probe_count*self.quad_probe(key, hashkey, False)
+		hashkey = self.linear_probe(key, hashkey) + self.probe_count * self.quad_probe(key, hashkey)
 		return hashkey % self.capacity
 
 	# ------------- Core Hash Table Functions ------------- #
