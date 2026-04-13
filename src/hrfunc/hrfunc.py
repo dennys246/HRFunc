@@ -96,12 +96,8 @@ def load_montage(json_filename, rich = False, **kwargs):
             for context in montage.context:
                 montage.hbr_tree.hasher.add(context, montage.channels[ch_name])
     
-    montage.sfreq = sfreq # Sampling frequency            
+    montage.sfreq = sfreq # Sampling frequency
 
-    # Load the HRtree's
-    montage.hbo_tree = tree(f"{montage.lib_dir}/hrfs/hbo_hrfs.json", **kwargs)
-    montage.hbr_tree = tree(f"{montage.lib_dir}/hrfs/hbr_hrfs.json", **kwargs)
-    
     montage.configured = True
 
     return montage
@@ -291,12 +287,13 @@ class montage(tree):
         # Update new time HRF estimation duration to account for edge expansion
         duration *= (1 + 2 * edge_expansion)
 
-        nirx_obj.load_data() # Load nirx object
-        data = nirx_obj.get_data() # Grab data
         if preprocess:
-            nirx_obj = preprocess_fnirs(nirx_obj, deconvolution = True)
+            nirx_obj = preprocess_fnirs(nirx_obj, deconvolution=True)
             if nirx_obj is None:
                 return  # Skip subject if all channels are bad
+
+        nirx_obj.load_data()      # Load nirx object (after preprocessing so data reflects preproc output)
+        data = nirx_obj.get_data() # Grab data
 
         hrf_len = int(round(self.sfreq * duration, 0))  # Calculate HRF length
         scan_len = data.shape[1] # Grab single channel signal length
@@ -361,7 +358,9 @@ class montage(tree):
             
         nirx_obj.load_data()
         if preprocess:
-            preprocess_fnirs(nirx_obj, deconvolution = True)
+            nirx_obj = preprocess_fnirs(nirx_obj, deconvolution=True)
+            if nirx_obj is None:
+                return None  # Skip subject if all channels are bad
 
         # Define hrf deconvolve function to pass nirx object
         def deconvolution(nirx):
@@ -442,6 +441,8 @@ class montage(tree):
             # Replace the canonical HRF estimate temporarily used with the HRF estimate
             if hrf_model == 'canonical':
                 hrf = estimate_hrf # Replace the original HRF
+
+        return nirx_obj
 
     def generate_distribution(self, plot_dir = None):
         """
@@ -784,7 +785,9 @@ def preprocess_fnirs(scan, deconvolution = False):
         return
 
     if len(raw_od.info['bads']) > 0:
-        print("Bad channels in subject", raw_od.info['subject_info']['his_id'], ":", raw_od.info['bads'])
+        subject_info = raw_od.info.get('subject_info')
+        subject_id = subject_info['his_id'] if subject_info else 'unknown'
+        print("Bad channels in subject", subject_id, ":", raw_od.info['bads'])
 
     # Interpolate bad channels
     raw_od.interpolate_bads(reset_bads=False)
@@ -876,3 +879,5 @@ def _is_oxygenated(ch_name):
             return True
         else:
             raise LookupError(f"Wavelength found, but failed to evaluate oxygenation status of channel {ch_name}")
+    else:
+        raise ValueError(f"Could not determine oxygenation for channel {ch_name}: no hb suffix or recognized wavelength pattern")

@@ -238,7 +238,7 @@ class tree:
         if context_similarity < similarity_threshold: # If not similar enough to requested context
             self.delete(node) # Exclude derived HRF
 
-    def compare_context(self, first_context, second_context):
+    def compare_context(self, first_context, second_context, context_weights=None):
         """
         Compare two contexts to see how similar they are
 
@@ -246,28 +246,29 @@ class tree:
             first_context (dict) - Context to compare against
             second_context (dict) - Context to compare
             context_weights (dict) - Weights to attach to each context during similarity comparison
-        
+
         Returns:
             float - Similarity score between 0.0 and 1.0 (1.0 being identical contexts)
         """
+        weights = context_weights if context_weights is not None else self.context_weights
         context_similarity = []
         for key, values in first_context.items():
             # If context not mentioned in first context
-            if values == None: # Exclude context in similarity comparison
-                continue 
+            if values is None: # Exclude context in similarity comparison
+                continue
 
             same = 0 # Create a context specific similarity value
             for value in values:
                 if value in second_context[key]:
-                    if self.context_weights: # If a context weight provided
-                        same += 1 * self.context_weights[key] # Weight similarity score
-                    else: # add 
+                    if weights: # If a context weight provided
+                        same += 1 * weights[key] # Weight similarity score
+                    else:
                         same += 1
 
-            # Calculate context-specific similarity and append
-            context_similarity.append(same/len(first_context)) 
-        
-        return sum(context_similarity) / len(context_similarity) # Average similarity and return
+            # Calculate context-specific similarity and append (ND-002: use len(values) not len(first_context))
+            context_similarity.append(same / len(values) if len(values) > 0 else 0.0)
+
+        return sum(context_similarity) / len(context_similarity) if len(context_similarity) > 0 else 0.0
 
     def branch(self, **kwargs):
         """

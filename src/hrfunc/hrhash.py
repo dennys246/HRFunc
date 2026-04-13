@@ -32,6 +32,7 @@ class hasher:
 		self.capacity = 2
 
 		self.collision_count = 0
+		self.probe_count = 0
 
 		self.constant = random.uniform(0, 1)
 
@@ -39,10 +40,12 @@ class hasher:
 		self.prober = lambda key, hashkey : self.linear_probe(key, hashkey) # Lambda function for switching between hashed for testing probes
 
 		self.table = [None]*self.capacity # Declare hash table
-		self.contexts = [[]]*self.capacity
+		self.contexts = [[] for _ in range(self.capacity)]
 
 	def __repr__(self): # Class callback for assessing current capactiy/fill/collision rate
-		return f"HashTable with {self.capacity} capacity {(self.size/self.capacity)*100}% full - {(self.collision_count/self.size)*100}% Collision Rate"
+		fill_pct = (self.size / self.capacity) * 100
+		collision_pct = (self.collision_count / self.size) * 100 if self.size > 0 else 0.0
+		return f"HashTable with {self.capacity} capacity {fill_pct:.1f}% full - {collision_pct:.1f}% Collision Rate"
 
 	# ------------- Hash Table Hash Functions --------------- #
 	# Obsolete Hash Functions: MD5, SHA-1, SHA-2 (Not obsolete yet but a matter of time)
@@ -171,7 +174,7 @@ class hasher:
 			self.collision_count = 0
 
 			self.table = [None]*self.capacity
-			self.contexts = [[]]*self.capacity
+			self.contexts = [[] for _ in range(self.capacity)]
 
 		self.data = data
 		if self.data != None:
@@ -214,15 +217,20 @@ class hasher:
 		Search for a key in the hash table and return its associated pointer
 		Arguments:
 			key (str) - Key to search for in the hash table
-			
+
 		Returns:
 			pointer (any) - Pointer associated with the key, or False if not found
 		"""
 		hashkey = self.hasher(key)
+		steps = 0
 		while self.table[hashkey] is not None:
 			if self.table[hashkey] == key:
+				self.probe_count = 0
 				return self.contexts[hashkey]
 			hashkey = self.prober(key, hashkey)
+			steps += 1
+			if steps >= self.capacity:  # Full cycle — key not present
+				break
 		self.probe_count = 0 # Reset the quadratic multiplier probe for the next call
 		return False
 
@@ -249,7 +257,7 @@ class hasher:
 			self.capacity <<= 1
 			print(f"Table exceeding maximum fill, increasing capacity to {self.capacity}")
 		new_table = [None]*self.capacity
-		new_hrf_filenames = [[]]*self.capacity
+		new_hrf_filenames = [[] for _ in range(self.capacity)]
 		for ind in range(old_capacity):
 			if self.table[ind] and self.table[ind] != '!tombstone!':
 				position = self.hasher(self.table[ind])
