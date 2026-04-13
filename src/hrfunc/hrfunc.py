@@ -1,4 +1,4 @@
-import scipy.linalg, json, mne, random, re, os, nilearn, time
+import scipy.linalg, scipy.stats, json, mne, random, re, os, nilearn, time
 import hrfunc
 import numpy as np
 import matplotlib.pyplot as plt
@@ -174,7 +174,8 @@ class montage(tree):
         Returns:
             str - String representation of the montage object
         """
-        return f" - Montage object - \nNumber of channels: {len(self.channels)}\n Sampling frequency: {self.sfreq}\nHbO channels (count of {len(self.hbo_channels)}): {self.hbo_channels}\n HbR channels (count of {len(self.hbr_channels)}): {self.hbr_channels}\n - Contexts - \n{'\n'.join([f'{key} - {value} - {self.context_weights[key]}' for key, value in self.context.items()])}\n"
+        context_str = '\n'.join([f'{key} - {value} - {self.context_weights[key]}' for key, value in self.context.items()])
+        return f" - Montage object - \nNumber of channels: {len(self.channels)}\n Sampling frequency: {self.sfreq}\nHbO channels (count of {len(self.hbo_channels)}): {self.hbo_channels}\n HbR channels (count of {len(self.hbr_channels)}): {self.hbr_channels}\n - Contexts - \n{context_str}\n"
 
     def localize_hrfs(self, max_distance = 0.01, verbose = False):
         """
@@ -260,12 +261,12 @@ class montage(tree):
             None
         """
         if isinstance(duration, float) is False and isinstance(duration, int) is False:
-            return ValueError(f"ERROR: Duration passed in must be a float or integer, duration passed in is of type {type(duration)}")
-        
+            raise ValueError(f"ERROR: Duration passed in must be a float or integer, duration passed in is of type {type(duration)}")
+
         if isinstance(duration, int): duration = float(duration)
-        
+
         if isinstance(events, list) is False:
-            return ValueError(f"ERROR: Events passed in must be of type list, object of type {type(events)} was passed in...")
+            raise ValueError(f"ERROR: Events passed in must be of type list, object of type {type(events)} was passed in...")
 
         # Check montage still needs to be configured
         if self.configured is False:
@@ -617,7 +618,7 @@ class montage(tree):
         
         Returns:
             None"""
-        print(f"Configureding HRfunc montage...")
+        print(f"Configuring HRfunc montage...")
         self.sfreq = nirx_obj.info['sfreq'] # Sampling frequency            
 
         self.hbo_channels = [standardize_name(ch) for ch in nirx_obj.ch_names if _is_oxygenated(ch) == True]
@@ -718,6 +719,37 @@ class montage(tree):
         with open(filename, "w") as file:
             json.dump(hrfs, file, indent=4)
         return
+
+    def branch(self, **kwargs):
+        """
+        Branch the montage on a specific context, creating a new montage
+        with deep copies of all HRF data including trace_std.
+
+        Arguments:
+            **kwargs - Any context keyword value pair to branch on (i.e. doi, age, etc)
+
+        Returns:
+            branch (montage object) - A new montage object filtered on the requested context
+        """
+        if kwargs:
+            self.context = {**self.context, **kwargs}
+
+        # Create a new empty montage
+        branch = montage()
+        branch.sfreq = self.sfreq if hasattr(self, 'sfreq') else None
+        branch.hbo_channels = list(self.hbo_channels) if hasattr(self, 'hbo_channels') else []
+        branch.hbr_channels = list(self.hbr_channels) if hasattr(self, 'hbr_channels') else []
+        branch.context = dict(self.context)
+        branch.context_weights = dict(self.context_weights)
+        branch.configured = self.configured
+
+        # Deep copy channels with all data including trace_std
+        for ch_name, node in self.channels.items():
+            node_copy = node.copy()
+            branch.channels[ch_name] = branch.insert(node_copy)
+
+        self.branched = True
+        return branch
 
 def preprocess_fnirs(scan, deconvolution = False):
     """
@@ -836,11 +868,11 @@ def _is_oxygenated(ch_name):
     elif ch_name[-1] == '0':
         try:
             wavelength = int(ch_name[-3:])
-            if wavelength >= 760 and wavelength <= 780:
-                return False
-            elif wavelength >= 830 and wavelength <= 850:
-                return True
-            else:
-                LookupError(f"Wavelength found, but failed to evaluate oxygenation status of channel {ch_name}")
-        except:
-            LookupError(f"Failed to evaluate oxygenation status of channel {ch_name}")
+        except (ValueError, TypeError):
+            raise LookupError(f"Failed to evaluate oxygenation status of channel {ch_name}")
+        if wavelength >= 760 and wavelength <= 780:
+            return False
+        elif wavelength >= 830 and wavelength <= 850:
+            return True
+        else:
+            raise LookupError(f"Wavelength found, but failed to evaluate oxygenation status of channel {ch_name}")
