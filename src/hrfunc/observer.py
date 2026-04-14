@@ -12,10 +12,27 @@ class lens:
     This object is primarily used to calculate summary statistics of the passed in and
     preprocessed NIRX objects. This can be used to compare your output to published results
     """
-    def __init__(self, working_directory = None):
-        
+    def __init__(self, working_directory = None, sfreq = 7.81):
+        """
+        Arguments:
+            working_directory (str) - Directory to save plots / CSVs to.
+                Defaults to the current working directory.
+            sfreq (float) - Sampling frequency used by calc_snr when no
+                subject has been compared yet. Once compare_subject has
+                been called, self.sfreq is overwritten with the actual
+                preproc_nirx.info['sfreq'] so the fallback is only used
+                for the rare direct-calc-snr case.
+        """
         # Set working directory is not passed in
         self.working_directory = working_directory or os.getcwd()
+
+        # 3.9: self.sfreq was previously read by calc_snr without ever
+        # being initialized anywhere in the class, raising AttributeError
+        # on any direct SNR call before compare_subject. Initialize with
+        # a sensible default (~7.81 Hz is the HRFunc library default used
+        # for bundled HRFs) and allow override via the constructor.
+        self.sfreq = sfreq
+        self.channels = []
 
         self.metrics = {
             'Preprocessed': {
@@ -26,9 +43,9 @@ class lens:
             'Deconvolved': {
                 'kurtosis': {},
                 'skewness': {},
-                'snr': {}                
+                'snr': {}
                 },
-            'SCI': []  
+            'SCI': []
         }
 
 
@@ -37,8 +54,11 @@ class lens:
         if preproc_nirx is None:
             print(f"No data passed in...")
             return
-        
+
         self.channels = preproc_nirx.ch_names
+        # Track the scan's actual sample rate so calc_snr uses it
+        # instead of the constructor default.
+        self.sfreq = preproc_nirx.info['sfreq']
 
         # Plot the preprocessed nirx with the deconvolved with event overlays
         self.plot_nirx(subject_id, preproc_nirx, deconv_nirx, events, channel, length)
@@ -190,14 +210,29 @@ class lens:
         plt.close()
         return sci
 
-    def calc_snr(self, subject_id, nirx, state, 
-                 signal_band = (0.03, 0.1), 
-                 noise_bands = [(0.0, 0.01), (0.1, 0.5)]):
-        
+    def calc_snr(self, subject_id, nirx, state,
+                 signal_band = (0.03, 0.1),
+                 noise_bands = None):
+        """
+        Compute SNR as signal_band power / average(out-of-band power).
+
+        Bug fixes found in the lint sweep:
+        - noise_bands was a mutable default list — replaced with None
+          sentinel and materialized inside the function.
+        - The PSD calls used the wrong filtered signal: preproc_noise_fast
+          paired with noise_bands[0] (slow band), and preproc_noise_slow
+          paired with noise_bands[1] (fast band). The filters had zeroed
+          out all power in the "wrong" band, so psd_noise_slow and
+          psd_noise_fast were both near zero, making the computed SNR
+          effectively infinite. Re-wired so each band reads power from
+          the signal filtered to that band.
+        """
+        if noise_bands is None:
+            noise_bands = [(0.0, 0.01), (0.1, 0.5)]
+
         # Load data
         nirx.load_data()
-        data = nirx.get_data()
-    
+
         # Extract the signal in the desired band
         preproc_signal = nirx.copy().filter(signal_band[0], signal_band[1], fir_design='firwin')
 
@@ -208,8 +243,8 @@ class lens:
 
         # Calculate the Power Spectral Density (PSD) for signal and noise using compute_psd()
         psd_signal = preproc_signal.compute_psd(fmin = signal_band[0], fmax = signal_band[1])
-        psd_noise_slow = preproc_noise_fast.compute_psd(fmin = noise_bands[0][0], fmax = noise_bands[0][1])
-        psd_noise_fast = preproc_noise_slow.compute_psd(fmin = noise_bands[1][0], fmax = noise_bands[1][1])
+        psd_noise_slow = preproc_noise_slow.compute_psd(fmin = noise_bands[0][0], fmax = noise_bands[0][1])
+        psd_noise_fast = preproc_noise_fast.compute_psd(fmin = noise_bands[1][0], fmax = noise_bands[1][1])
 
         # Extract the power for each component
         signal_power = psd_signal.get_data().mean(axis = -1)  # Average power across frequencies for signal

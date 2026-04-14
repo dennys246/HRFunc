@@ -98,7 +98,7 @@ class tree:
             self.load_hrfs(self.hrf_filename)
             print(f"Tree initialized with HRFs from {hrf_filename}")
         else:
-            print(f"Tree intiialized without HRFs loaded...")
+            print(f"Tree initialized without HRFs loaded...")
 
     def get_canonical_hrf(self, oxygenation, sfreq, duration):
         """
