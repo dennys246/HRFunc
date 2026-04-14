@@ -187,12 +187,6 @@ class TestIsOxygenated:
 # These tests are xfail and will flip to pass once dependencies are resolved.
 
 class TestFilterInversion:
-    @pytest.mark.xfail(
-        reason="Depends on KI-010 (compare_context signature, phase1c) "
-               "and KI-009 (delete() AttributeError, phase3). "
-               "The > to < fix is correct; full path unblocked in phase1c+phase3.",
-        strict=False,
-    )
     def test_filter_removes_low_similarity_nodes(self, monkeypatch):
         """Nodes with similarity BELOW threshold should be deleted."""
         from hrfunc.hrtree import tree, HRF
