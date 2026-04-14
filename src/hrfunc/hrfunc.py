@@ -1,8 +1,8 @@
 import scipy.linalg, scipy.stats, json, mne, random, re, os, nilearn, time
-import hrfunc
 import numpy as np
 import matplotlib.pyplot as plt
 from .hrtree import tree, HRF
+from ._utils import standardize_name, _is_oxygenated, _LIB_DIR
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from itertools import compress
 from glob import glob
@@ -43,7 +43,7 @@ def load_montage(json_filename, rich = False, **kwargs):
         json_contents = json.load(file)
 
     # Initialize an empty montage object
-    montage = hrfunc.montage(**kwargs)
+    _montage = montage(**kwargs)
 
     # Grab info from json contents
     first_hrf = json_contents[list(json_contents.keys())[0]]
@@ -53,8 +53,8 @@ def load_montage(json_filename, rich = False, **kwargs):
     ch_names = ['-'.join(key.split('-')[:-1]) for key in json_contents.keys()]
 
     # Assess which channels are oxygenated and deoxygenated
-    montage.hbo_channels = [ch for ch in ch_names if _is_oxygenated(ch) == True]
-    montage.hbr_channels = [ch for ch in ch_names if _is_oxygenated(ch) == False]
+    _montage.hbo_channels = [ch for ch in ch_names if _is_oxygenated(ch) == True]
+    _montage.hbr_channels = [ch for ch in ch_names if _is_oxygenated(ch) == False]
 
     # Update montage with saved info
     for key, channel in json_contents.items():
@@ -86,21 +86,21 @@ def load_montage(json_filename, rich = False, **kwargs):
         # Insert hrf into tree and attach pointer to channel
         oxygenation = _is_oxygenated(ch_name)
         if oxygenation:
-            montage.channels[ch_name] = montage.hbo_tree.insert(estimated_hrf)
+            _montage.channels[ch_name] = _montage.hbo_tree.insert(estimated_hrf)
             # Add context to tree
-            for context in montage.context:
-                montage.hbo_tree.hasher.add(context, montage.channels[ch_name])
+            for context in _montage.context:
+                _montage.hbo_tree.hasher.add(context, _montage.channels[ch_name])
         elif oxygenation == False:
-            montage.channels[ch_name] = montage.hbr_tree.insert(estimated_hrf)
+            _montage.channels[ch_name] = _montage.hbr_tree.insert(estimated_hrf)
             # Add context to tree
-            for context in montage.context:
-                montage.hbr_tree.hasher.add(context, montage.channels[ch_name])
-    
-    montage.sfreq = sfreq # Sampling frequency
+            for context in _montage.context:
+                _montage.hbr_tree.hasher.add(context, _montage.channels[ch_name])
 
-    montage.configured = True
+    _montage.sfreq = sfreq # Sampling frequency
 
-    return montage
+    _montage.configured = True
+
+    return _montage
 
 class montage(tree):
     """
@@ -130,7 +130,7 @@ class montage(tree):
         self.root = None # Set an empty root
 
         # Save runtime parameters to object
-        self.lib_dir = os.path.dirname(hrfunc.__file__)
+        self.lib_dir = _LIB_DIR
 
         # Set data context
         self.context = {
@@ -834,50 +834,3 @@ def polynomial_detrend(raw, order = 1):
         raw_detrended._data[idx] = y_detrended
 
     return raw_detrended
- 
-def standardize_name(ch_name):
-    """
-    Standardize channel names to a common format for processing
-    
-    Arguments:
-        ch_name (str) - Original channel name
-        
-    Returns:
-        ch_name (str) - Standardized channel name"""
-    ch_name = re.sub(r'[_\-\s]+', '_', ch_name.lower())
-    oxygenation = _is_oxygenated(ch_name)
-    if oxygenation:
-        ch_name = ch_name[:-3] + 'hbo'
-    else:
-        ch_name = ch_name[:-3] + 'hbr'
-    return ch_name
-
-def _is_oxygenated(ch_name):
-    """ Check in whether the channel is HbR or HbO 
-    
-    Arguments:
-        ch_name (str) - Channel name to check
-    
-    Returns:
-        bool - True if oxygenated, False if deoxygenated"""
-    if ch_name[-2] == 'b':
-        split = ch_name.split('hb')
-        if split[1][0] == 'o': # If oxygenated channel
-            return True
-        elif split[1][0] == 'r': # If deoxygenated channel
-            return False
-        else:
-            raise ValueError(f"Channel {ch_name} oxygenation status could not be determines, ensure each channel has appropriate naming scheme with HbO/HbR included")
-    elif ch_name[-1] == '0':
-        try:
-            wavelength = int(ch_name[-3:])
-        except (ValueError, TypeError):
-            raise LookupError(f"Failed to evaluate oxygenation status of channel {ch_name}")
-        if wavelength >= 760 and wavelength <= 780:
-            return False
-        elif wavelength >= 830 and wavelength <= 850:
-            return True
-        else:
-            raise LookupError(f"Wavelength found, but failed to evaluate oxygenation status of channel {ch_name}")
-    else:
-        raise ValueError(f"Could not determine oxygenation for channel {ch_name}: no hb suffix or recognized wavelength pattern")

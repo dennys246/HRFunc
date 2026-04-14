@@ -1,5 +1,6 @@
 import json, random, math, re, nilearn, scipy, os
-from . import hrhash, hrfunc
+from . import hrhash
+from ._utils import standardize_name, _is_oxygenated, _LIB_DIR
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
@@ -39,7 +40,7 @@ class tree:
             - branched (bool) - Whether the tree has been branched on a specific context
         """
         # Find hrfunc install library
-        self.lib_dir = os.path.dirname(hrfunc.__file__)
+        self.lib_dir = _LIB_DIR
 
         self.hrf_filename = hrf_filename
 
@@ -98,7 +99,7 @@ class tree:
 
 
             # Skip if oxygenation/deoxygenation filtering requested
-            oxygenation = hrfunc._is_oxygenated(ch_name)
+            oxygenation = _is_oxygenated(ch_name)
             if oxygenated == False and oxygenation:
                 continue
             if oxygenated and oxygenation == False:
@@ -606,8 +607,8 @@ class HRF:
         self.doi = doi
 
         # Clean and add channel name
-        self.ch_name = hrfunc.standardize_name(ch_name)
-        self.oxygenation = hrfunc._is_oxygenated(self.ch_name)
+        self.ch_name = standardize_name(ch_name)
+        self.oxygenation = _is_oxygenated(self.ch_name)
 
         # Attach passed into info to class 
         self.sfreq = sfreq
