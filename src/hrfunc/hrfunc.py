@@ -337,7 +337,7 @@ class montage(tree):
             optode.locations.append(list(channel['loc'][:3]))
 
 
-    def estimate_activity(self, nirx_obj, lmbda = 1e-4, hrf_model = 'toeplitz', preprocess = True, cond_thresh = None, timeout = 1500):
+    def estimate_activity(self, nirx_obj, lmbda = 1e-4, hrf_model = 'toeplitz', preprocess = True, cond_thresh = None, timeout = 30):
         """
         Deconvlve a fNIRS scan using estimated HRF's localized to optodes location
         to gain a neural activity estimate
@@ -347,23 +347,35 @@ class montage(tree):
             lmbda (float) - Regularization parameter to apply during deconvolution
             hrf_model (str) - HRF model to use during deconvolution, either 'toeplitz' for localized HRF's or 'canonical' for a standard canonical HRF
             preprocess (bool) - If True, preprocess the fNIRS data before estimating the neural activity
-        
+            cond_thresh (float or None) - Condition number threshold for falling back to pinv in solve_lstsq
+            timeout (float) - Seconds to wait for a single channel's lstsq solve before dropping that channel.
+                Default 30 is a generous ceiling — realistic fNIRS inputs solve in tens of milliseconds,
+                so this fires only on genuinely pathological matrices. Can be tightened once empirical
+                solve-time data is collected from real runs.
+
         Returns:
-            None
+            nirx_obj (mne raw object) - Raw with deconvolved neural activity, or None if skipped
         """
 
         # Check montage still needs to be configured
         if self.configured is False:
             self.configure(nirx_obj)
-            
+
         nirx_obj.load_data()
         if preprocess:
             nirx_obj = preprocess_fnirs(nirx_obj, deconvolution=True)
             if nirx_obj is None:
                 return None  # Skip subject if all channels are bad
 
+        # success is declared at estimate_activity scope so the nested deconvolution
+        # closure can write to it via `nonlocal` — otherwise success=True/False inside
+        # the closure would create a closure-local and the outer drop-channel check
+        # would always read None (ND-003).
+        success = None
+
         # Define hrf deconvolve function to pass nirx object
         def deconvolution(nirx):
+            nonlocal success
 
             # Normalize input z-score
             mean = np.mean(nirx)
@@ -387,35 +399,25 @@ class montage(tree):
             # Solve the inverse problem with regularization
             lhs = A.T @ A + float(lmbda) * np.eye(A.shape[1])
             rhs = A.T @ Y
-            
+
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(self.solve_lstsq, lhs, rhs, cond_thresh)
                 try:
                     deconvolved_signal = future.result(timeout)
                     success = True
-
                 except TimeoutError:
-                    print("lstsq failed to converge and estimate neural activity, dropping channel")
+                    print(f"lstsq exceeded {timeout}s timeout, dropping channel")
                     deconvolved_signal = nirx
                     success = False
-            
-            """
-            start = time.time()
-            deconvolved_signal = self.solve_lstsq(lhs, rhs)
-            end = time.time()
-            print(f"Elapsed time: {end - start:.6f} seconds")
-            """
-            # Denormalize neural signal estimate - EXCLUDING TO KEEP IN A.U.
-            #deconvolved_signal = deconvolved_signal * std + mean
 
             return deconvolved_signal # Return recovered neural signal
 
         # Apply deconvolution and return the nirx object
         for ch_name, hrf in self.channels.items():
-            success = None
+            success = None  # reset per channel so stale state can't leak from prior iteration
 
             if 'global' in ch_name: continue # Skip if global hrf estimate
-            
+
             # If canonical HRF requested
             if hrf_model == 'canonical' or len(hrf.trace) == 0:
                 print(f"WARNING: Using canonical HRF for channel {ch_name} in {nirx_obj}")
@@ -430,12 +432,12 @@ class montage(tree):
                 standard_ch_name = standardize_name(nirx_channel['ch_name'])
                 if ch_name == standard_ch_name:
                     break
-                
+
             print(f"Deconvolving channel {ch_name}...") # Apply deconvolution
             nirx_obj.apply_function(deconvolution, picks = [nirx_channel['ch_name']]) # Apply deconvolution for channel
 
-            # Remove channel is neural activity estimation failed to converge
-            if success == False:
+            # Remove channel if neural activity estimation failed to converge
+            if success is False:
                 nirx_obj.drop_channels([nirx_channel['ch_name']])
 
             # Replace the canonical HRF estimate temporarily used with the HRF estimate
