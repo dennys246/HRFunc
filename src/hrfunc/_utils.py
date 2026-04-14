@@ -59,11 +59,32 @@ def _is_oxygenated(ch_name):
         bool - True if oxygenated, False if deoxygenated
 
     Raises:
-        ValueError - If channel name has no recognizable oxygenation pattern
+        TypeError - If ch_name is not a string
+        ValueError - If ch_name is too short or has no recognizable
+            oxygenation pattern
         LookupError - If wavelength digits are present but out of range
     """
+    if not isinstance(ch_name, str):
+        raise TypeError(
+            f"_is_oxygenated expected a str, got {type(ch_name).__name__}"
+        )
+    if len(ch_name) < 3:
+        raise ValueError(
+            f"Channel name {ch_name!r} is too short to determine oxygenation; "
+            "expected at least 3 characters carrying an oxygenation suffix "
+            "(e.g. 'hbo', 'hbr', or wavelength digits)"
+        )
     if ch_name[-2] == 'b':
+        # The [-2] == 'b' check alone is not enough — e.g. 'abc' passes it
+        # but has no 'hb' substring, so split('hb') returns a single element
+        # and the old split[1][0] access IndexErrored. Require both that
+        # 'hb' is actually present and that at least one character follows it.
         split = ch_name.split('hb')
+        if len(split) < 2 or len(split[1]) == 0:
+            raise ValueError(
+                f"Channel {ch_name!r} has no recognizable 'hb' oxygenation "
+                "suffix; expected 'hbo' or 'hbr'"
+            )
         if split[1][0] == 'o':
             return True
         elif split[1][0] == 'r':
