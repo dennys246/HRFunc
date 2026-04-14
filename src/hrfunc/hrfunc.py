@@ -797,7 +797,7 @@ def preprocess_fnirs(scan, deconvolution = False):
 
     # If running deconvolution, polynomial detrend to remove pysiological without cutting into the frequency spectrum
     if deconvolution:
-        od = polynomial_detrend(od, order=1)
+        od = polynomial_detrend(od, order=3)
 
     # haemoglobin conversion using Beer Lambert Law 
     haemo = mne.preprocessing.nirs.beer_lambert_law(od.copy(), ppf=0.1)
