@@ -197,12 +197,18 @@ class TestHasherReprEmpty:
 # ---------------------------------------------------------------------------
 
 class TestHasherSearchNoCycle:
-    def test_search_missing_key_returns_false(self):
-        """search() must return False for a key that was never added — not loop forever."""
+    # Note: the return-type contract for hasher.search was changed in
+    # fix/hasher-branch-correctness (H4 + 3.3). Before that branch, search
+    # returned False on miss and a scalar pointer on hit. After, it returns
+    # [] on miss and a list of pointers on hit. These tests were updated
+    # to the list-based contract but still exercise the no-cycle invariant
+    # this class was originally written for.
+    def test_search_missing_key_returns_empty_list(self):
+        """search() must return an empty list for a key that was never added — not loop forever."""
         from hrfunc.hrhash import hasher
         h = hasher({})
         result = h.search('nonexistent_key')
-        assert result is False
+        assert result == []
 
     def test_search_exits_within_capacity_steps(self):
         """Probe loop must terminate in at most capacity iterations."""
@@ -213,15 +219,15 @@ class TestHasherSearchNoCycle:
             h.add(f'key_{i}', f'ptr_{i}')
         # Search for something that definitely isn't there
         result = h.search('definitely_not_a_key_xyz_999')
-        assert result is False
+        assert result == []
 
     def test_search_finds_existing_key(self):
-        """search() still returns the correct pointer for an inserted key."""
+        """search() returns the list of pointers for an inserted key."""
         from hrfunc.hrhash import hasher
         h = hasher({})
         h.add('mykey', 'mypointer')
         result = h.search('mykey')
-        assert result == 'mypointer'
+        assert result == ['mypointer']
 
 
 # ---------------------------------------------------------------------------

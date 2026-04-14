@@ -1,7 +1,7 @@
 import scipy.linalg, scipy.stats, json, mne, random, re, os, nilearn, time
 import numpy as np
 import matplotlib.pyplot as plt
-from .hrtree import tree, HRF
+from .hrtree import tree, HRF, _flatten_context_value
 from ._utils import standardize_name, _is_oxygenated, _LIB_DIR
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from itertools import compress
@@ -128,18 +128,26 @@ def load_montage(json_filename, rich = False, **kwargs):
                 channel['locations']
             )
 
-            # Insert hrf into tree and attach pointer to channel
+            # Insert hrf into tree and attach pointer to channel. Populate
+            # the tree's hasher keyed by the channel's own context VALUES
+            # (NE-002 fix — pre-fix populated by context dict KEYS, which
+            # tree.branch never searches for).
             oxygenation = _is_oxygenated(ch_name)
             if oxygenation:
                 _montage.channels[ch_name] = _montage.hbo_tree.insert(estimated_hrf)
-                # Add context to tree
-                for context in _montage.context:
-                    _montage.hbo_tree.hasher.add(context, _montage.channels[ch_name])
+                target_tree = _montage.hbo_tree
             elif oxygenation == False:
                 _montage.channels[ch_name] = _montage.hbr_tree.insert(estimated_hrf)
-                # Add context to tree
-                for context in _montage.context:
-                    _montage.hbr_tree.hasher.add(context, _montage.channels[ch_name])
+                target_tree = _montage.hbr_tree
+            else:
+                target_tree = None
+
+            if target_tree is not None:
+                channel_context = channel.get('context', {})
+                if isinstance(channel_context, dict):
+                    for ctx_value in channel_context.values():
+                        for hashable in _flatten_context_value(ctx_value):
+                            target_tree.hasher.add(hashable, _montage.channels[ch_name])
         except Exception as exc:
             raise ValueError(
                 f"load_montage: failed to load entry {key!r}: {exc}"

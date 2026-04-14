@@ -159,35 +159,12 @@ class hasher:
 
 	# ------------- Core Hash Table Functions ------------- #
 
-	def fill(self, data = None, replace = True, empty = False):
-		"""
-		Fill the hash table with data, replacing any existing data if replace is True
-		
-		Arguments:
-			data (list) - List of keys to add to the hash table
-			replace (bool) - If True, replace existing data in the hash table
-			empty (bool) - If True, initialize an empty hash table without adding data
-		"""
-		if self.size != 0 and replace == True: # If data has already been added to the table, reset param/variables
-			self.size = 0
-			self.capacity = 2
-			self.collision_count = 0
-
-			self.table = [None]*self.capacity
-			self.contexts = [[] for _ in range(self.capacity)]
-
-		self.data = data
-		if self.data != None:
-			for datum in self.data:
-				self.add(datum)
-			self.__repr__()
-		else:
-			print('Empty universal hash table initialized')
-
 	def add(self, key, pointer):
 		"""
-		Add a new key to the hash table with associated pointer
-		
+		Add a pointer under the given key. Multiple pointers may share a
+		key — subsequent adds append to the slot's pointer list. Duplicate
+		(key, pointer) pairs are deduplicated by identity.
+
 		Arguments:
 			key (str) - Key to add to the hash table
 			pointer (any) - Pointer to associate with the key
@@ -200,39 +177,46 @@ class hasher:
 			self.resize()
 		hashkey = self.hasher(key)
 		while self.table[hashkey] is not None:
-			if self.table[hashkey] == key: # If the key already exists in the table
-				return# Return
+			if self.table[hashkey] == key: # Key already present — append if new
+				if not any(existing is pointer for existing in self.contexts[hashkey]):
+					self.contexts[hashkey].append(pointer)
+				self.probe_count = 0
+				return
 			if self.table[hashkey] == '!tombstone!': # If a tombstone was found
 				break # Replace tombstone
 			hashkey = self.prober(key, hashkey)
 
 		self.table[hashkey] = key # insert the new key into the found hash
-		self.contexts[hashkey] = pointer # Add node pointer
+		self.contexts[hashkey] = [pointer] # Start a fresh pointer list for this key
 
 		self.size += 1 # Increment size
 		self.probe_count = 0 # Reset
 
 	def search(self, key):
 		"""
-		Search for a key in the hash table and return its associated pointer
+		Search for a key in the hash table and return the list of pointers
+		associated with it.
+
 		Arguments:
 			key (str) - Key to search for in the hash table
 
 		Returns:
-			pointer (any) - Pointer associated with the key, or False if not found
+			list - Pointers associated with the key. Empty list on miss.
+			A shallow copy is returned so callers can safely iterate and
+			mutate their own copy without affecting the hasher's state.
 		"""
 		hashkey = self.hasher(key)
 		steps = 0
 		while self.table[hashkey] is not None:
 			if self.table[hashkey] == key:
 				self.probe_count = 0
-				return self.contexts[hashkey]
+				return list(self.contexts[hashkey])
 			hashkey = self.prober(key, hashkey)
 			steps += 1
 			if steps >= self.capacity:  # Full cycle — key not present
 				break
 		self.probe_count = 0 # Reset the quadratic multiplier probe for the next call
-		return False
+		return []
 
 	def remove(self, key):
 		hashkey = self.hasher(key)
@@ -268,9 +252,3 @@ class hasher:
 		self.table = new_table
 		self.contexts = new_hrf_filenames
 
-	def double_check(self):
-		found = 0
-		for datum in self.data:
-			if self.search(datum) == True:
-				found += 1
-		print(f"Double check found {(found/self.size)*100}% of data added")
