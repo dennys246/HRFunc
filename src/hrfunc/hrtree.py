@@ -418,6 +418,12 @@ class tree:
         Returns:
             hrfs (dict) - Dictionary of all HRFs in the tree
         """
+        # Issue 3.8: empty-tree guard. Callers (notably tree.filter after
+        # deleting the last node) pass node=None to indicate an empty tree
+        # rooted at self.root. Return an empty dict instead of AttributeError
+        # on node.left access.
+        if node is None:
+            return {}
         print(f"Gathering node... {node}")
         hrfs = {}
         collect = False
@@ -524,13 +530,21 @@ class tree:
     def _delete_recursive(self, node, hrf, depth):
         """
         Recursive helper function to delete a node from the k-d tree.
+
+        Uses the standard kd-tree delete algorithm: if the node-to-delete has
+        a right subtree, find the axis-minimum node in it, copy that node's
+        payload into the current node, then recursively delete the minimum
+        from the right subtree. If it only has a left subtree, do the same
+        against the left subtree and then move the subtree to the right
+        (preserving the `right >= node` kd-tree invariant).
+
         Arguments:
             node (HRF) - Current node in the recursion
-            hrf (HRF) - The HRF node to delete
+            hrf (HRF) - The HRF node to delete (matched on x, y, z)
             depth (int) - Current depth in the tree
-        
+
         Returns:
-            node (HRF) - Updated node after deletion
+            node (HRF) - Updated node after deletion, or None if removed
         """
         if node is None:
             return None
@@ -540,15 +554,18 @@ class tree:
         if node.x == hrf.x and node.y == hrf.y and node.z == hrf.z:
             if node.right:
                 min_node = self._find_min(node.right, axis, depth + 1)
-                node.x, node.y, node.z, node.hrf_data = min_node.x, min_node.y, min_node.z, min_node.hrf_data
-                node.right = self._delete_recursive(node.right, min_node.x, min_node.y, min_node.z, depth + 1)
+                self._copy_payload(min_node, node)
+                node.right = self._delete_recursive(node.right, min_node, depth + 1)
             elif node.left:
                 min_node = self._find_min(node.left, axis, depth + 1)
-                node.x, node.y, node.z, node.hrf_data = min_node.x, min_node.y, min_node.z, min_node.hrf_data
-                node.right = self._delete_recursive(node.left, min_node.x, min_node.y, min_node.z, depth + 1)
+                self._copy_payload(min_node, node)
+                # Standard kd-tree trick: recurse into left, then promote the
+                # mutated subtree to the right side so the `right >= node`
+                # invariant on this axis still holds.
+                node.right = self._delete_recursive(node.left, min_node, depth + 1)
                 node.left = None
             else:
-                return None  # No children case
+                return None  # Leaf case — remove from parent
 
         elif (axis == 0 and hrf.x < node.x) or (axis == 1 and hrf.y < node.y) or (axis == 2 and hrf.z < node.z):
             node.left = self._delete_recursive(node.left, hrf, depth + 1)
@@ -556,6 +573,43 @@ class tree:
             node.right = self._delete_recursive(node.right, hrf, depth + 1)
 
         return node
+
+    def _copy_payload(self, src, dst):
+        """
+        Copy all HRF payload fields from src into dst, leaving dst's
+        left/right child pointers untouched. Used by the kd-tree delete
+        algorithm to "move" a replacement node into a deleted node's slot
+        without disturbing the surrounding tree structure.
+
+        Notes on what is and isn't copied:
+        - trace / trace_std are np.copy'd to avoid sharing the underlying
+          numpy array with src (aliasing would let in-place mutations on
+          one node silently affect the other).
+        - context / estimates / locations are shallow-copied for the same
+          reason (they're mutable dict / list containers).
+        - `built` IS copied so a future `.build()` call on dst doesn't
+          re-process an already-processed trace.
+        - `hrf_processes` / `process_names` / `process_options` are NOT
+          copied. hrf_processes contains **bound methods** whose `self`
+          points to src (e.g. `src.spline_interp`); copying them into dst
+          would cause dst.build() to execute methods in src's context,
+          which is cross-reference corruption. dst keeps its own default
+          process configuration from HRF.__init__.
+        """
+        dst.x = src.x
+        dst.y = src.y
+        dst.z = src.z
+        dst.doi = src.doi
+        dst.ch_name = src.ch_name
+        dst.oxygenation = src.oxygenation
+        dst.sfreq = src.sfreq
+        dst.length = src.length
+        dst.trace = np.copy(src.trace) if isinstance(src.trace, np.ndarray) else src.trace
+        dst.trace_std = np.copy(src.trace_std) if isinstance(src.trace_std, np.ndarray) else src.trace_std
+        dst.context = dict(src.context) if isinstance(src.context, dict) else src.context
+        dst.estimates = list(src.estimates) if src.estimates is not None else []
+        dst.locations = list(src.locations) if src.locations is not None else []
+        dst.built = src.built
 
     def _find_min(self, node, axis, depth):
         """

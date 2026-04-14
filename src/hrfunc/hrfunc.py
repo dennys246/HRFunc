@@ -733,7 +733,14 @@ class montage(tree):
 
     def configure(self, nirx_obj, **kwargs):
         """
-        Configure the montage object to a nirx object
+        Configure the montage object to a nirx object.
+
+        M6: commit-on-success pattern. Any failure during configure
+        (channel-name error, _merge_montages exception, etc.) rolls the
+        montage back to its pre-call state, including undoing any
+        freshly-inserted tree nodes via `tree.delete`. This pairs with
+        the KI-009 fix in this branch — the rollback relies on a
+        working `_delete_recursive`.
 
         Arguments:
             nirx_obj (mne raw object) - fNIRS scan file loaded in through
@@ -742,13 +749,84 @@ class montage(tree):
         Returns:
             None"""
         print(f"Configuring HRfunc montage...")
-        self.sfreq = nirx_obj.info['sfreq'] # Sampling frequency
 
-        self.hbo_channels = [standardize_name(ch) for ch in nirx_obj.ch_names if _is_oxygenated(ch) == True]
-        self.hbr_channels = [standardize_name(ch) for ch in nirx_obj.ch_names if _is_oxygenated(ch) == False]
+        _SENTINEL = object()
+        prev_sfreq = getattr(self, 'sfreq', _SENTINEL)
+        prev_hbo_channels = getattr(self, 'hbo_channels', _SENTINEL)
+        prev_hbr_channels = getattr(self, 'hbr_channels', _SENTINEL)
+        prev_channels = dict(self.channels)
+        prev_configured = self.configured
+        prev_root = self.root
+        # Use identity, not value, to recognize nodes that already belonged
+        # to the montage's tree before this call. _merge_montages can either
+        # reuse existing nodes (via nearest_neighbor match) or insert new
+        # ones; only the inserted ones need to be rolled back via delete.
+        prev_node_ids = {id(node) for node in prev_channels.values()}
 
-        # Merge nirx object into montage
-        self._merge_montages(nirx_obj) # Add empty HRF nodes to the tree for each HRF
+        # Compute the new channel lists locally first so a standardize_name
+        # / _is_oxygenated failure raises before we mutate self.
+        try:
+            new_sfreq = nirx_obj.info['sfreq']
+            new_hbo_channels = [
+                standardize_name(ch) for ch in nirx_obj.ch_names
+                if _is_oxygenated(ch) == True
+            ]
+            new_hbr_channels = [
+                standardize_name(ch) for ch in nirx_obj.ch_names
+                if _is_oxygenated(ch) == False
+            ]
+        except Exception:
+            # self is untouched — nothing to roll back
+            raise
+
+        # Commit the easy state, then run _merge_montages under a rollback
+        # guard. _merge_montages reads self.sfreq and writes self.channels /
+        # self.root, so it must see the new state in place.
+        self.sfreq = new_sfreq
+        self.hbo_channels = new_hbo_channels
+        self.hbr_channels = new_hbr_channels
+        try:
+            self._merge_montages(nirx_obj) # Add empty HRF nodes to the tree for each HRF
+        except Exception:
+            if prev_root is None:
+                # First-time configure. Any tree state originated from this
+                # failed call — drop the whole tree in one move rather than
+                # deleting node-by-node (which would expose the canonical
+                # sentinel auto-inserted by tree.insert at line 164).
+                self.root = None
+            else:
+                # Re-configure. Undo only the newly-inserted nodes via
+                # tree.delete so existing pre-call state survives. The
+                # kd-tree delete-by-copy may shuffle payload among nodes
+                # in the process, but channel-level mappings remain
+                # consistent with the pre-call snapshot after we restore
+                # self.channels below.
+                newly_added = set(self.channels.keys()) - set(prev_channels.keys())
+                for ch_name in newly_added:
+                    node = self.channels.get(ch_name)
+                    if node is None or id(node) in prev_node_ids:
+                        continue  # reused existing node — don't delete it
+                    try:
+                        self.delete(node)
+                    except Exception:
+                        pass  # best-effort cleanup; fail-quiet in rollback path
+
+            # Restore scalar / list / dict state
+            self.channels = prev_channels
+            if prev_sfreq is _SENTINEL:
+                del self.sfreq
+            else:
+                self.sfreq = prev_sfreq
+            if prev_hbo_channels is _SENTINEL:
+                del self.hbo_channels
+            else:
+                self.hbo_channels = prev_hbo_channels
+            if prev_hbr_channels is _SENTINEL:
+                del self.hbr_channels
+            else:
+                self.hbr_channels = prev_hbr_channels
+            self.configured = prev_configured
+            raise
 
         self.configured = True
 

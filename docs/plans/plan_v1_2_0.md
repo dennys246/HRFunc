@@ -141,7 +141,8 @@ Each branch stacks on the previous. Each gets its own targeted test file and the
 |---|---|---|
 | KI-009 / H2 | `src/hrfunc/hrtree.py` `_delete_recursive` | Current signature takes `(node, hrf, depth)` but recursive calls pass `(node.right, min_node.x, min_node.y, min_node.z, depth+1)` — 5 positional args to a 3-arg function. Rewrite to pass the HRF consistently. Also replace any reference to `node.hrf_data` with the correct attribute. |
 | 3.6 | `src/hrfunc/hrtree.py` `tree.delete` | Ensure top-level `delete(hrf)` passes an HRF object to `_delete_recursive`, not coordinates. Verify `left → right` assignment is not swapped. |
-| M6 | `src/hrfunc/hrfunc.py` `montage.configure` | Only commit `self.sfreq`, `self.hbo_channels`, `self.hbr_channels`, `self.channels`, `self.root` AFTER successful `_merge_montages()`. On failure, roll back scalar/list attributes AND undo the partial tree inserts via the now-working `tree.delete`. (Deferred here from `fix/state-lifecycle` because proper tree rollback requires a working `tree.delete`.) |
+| 3.8 (pulled from `fix/tree-edge-cases`) | `src/hrfunc/hrtree.py` `tree.gather` | Add `if node is None: return {}` guard. Required to unblock the xfailed filter remove-path test — after deletion the tree can become empty and `gather(None)` must not crash. Moved from `fix/tree-edge-cases` to satisfy this branch's exit criterion. |
+| M6 | `src/hrfunc/hrfunc.py` `montage.configure` | Only commit `self.sfreq`, `self.hbo_channels`, `self.hbr_channels`, `self.channels`, `self.root` AFTER successful `_merge_montages()`. On failure, roll back scalar/list attributes AND undo the partial tree inserts via the now-working `tree.delete`. First-time configure fast-pathed to `self.root = None` (avoids exposing the canonical sentinel that `tree.insert` auto-creates). (Deferred here from `fix/state-lifecycle` because proper tree rollback requires a working `tree.delete`.) |
 | xfail cleanup | `tests/test_phase1a.py::TestFilterInversion::test_filter_removes_low_similarity_nodes` | Remove the `@pytest.mark.xfail` decorator once delete works. The test should pass cleanly. |
 
 **Tests:** `tests/test_tree_delete_filter.py` — insert several HRFs, delete by position, verify tree structure preserved for remaining nodes. Verify filter() remove-path works end-to-end. Add re-configure rollback test that inserts some channels before raising and verifies `self.root` / `self.channels` / scalar attrs all snap back.
@@ -253,7 +254,7 @@ Each branch stacks on the previous. Each gets its own targeted test file and the
 |---|---|---|
 | NE-006 | `src/hrfunc/hrtree.py` `tree.merge` | Currently inserts original node references, so `left`/`right` pointers are shared between trees. Rewrite to insert `node.copy()` (HRF already has a `copy()` method). |
 | NE-007 | `src/hrfunc/hrtree.py` `tree.nearest_neighbor` | Fallback path `return self.root.right, float("inf")` crashes when `self.root is None`. Add early return `if self.root is None: return None, float("inf")`. Update callers to handle None. |
-| 3.8 | `src/hrfunc/hrtree.py` `tree.gather` | Add `if node is None: return {}` at top of method. Currently crashes accessing `node.left`. |
+| ~~3.8~~ | *(already landed in `fix/tree-delete-filter`)* | The `tree.gather` None guard was pulled into `fix/tree-delete-filter` to unblock its xfail exit criterion. |
 
 **Tests:** `tests/test_tree_edge_cases.py` — empty tree nearest_neighbor, gather(None), merge two disjoint trees and then mutate one to verify the other is unaffected.
 
