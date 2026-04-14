@@ -59,19 +59,18 @@ def _collect_nodes(node, acc=None):
 # ---------------------------------------------------------------------------
 
 class TestDeleteLeaf:
-    def test_delete_single_user_node_leaves_canonical(self):
-        """Inserting one user HRF places root=user, root.right=canonical.
-        Deleting the user node should promote the canonical into the root
-        slot (payload copy) — it's the only remaining node."""
+    def test_delete_single_user_node_empties_tree(self):
+        """After fix/canonical-hrf-sfreq (S4), tree.insert no longer
+        creates a canonical sentinel sibling at root.right. Inserting one
+        user HRF sets root=user with no children. Deleting that node
+        empties the tree (self.root = None)."""
         from hrfunc.hrtree import tree
         t = tree()
         user = _hrf('ch1', 0.0, 0.0, 0.0)
         t.insert(user)
+        assert t.root is user
         t.delete(user)
-        # Root should now carry canonical's payload (it gets copied up
-        # because the only remaining child is root.right = canonical).
-        assert t.root is not None
-        assert t.root.ch_name.startswith('canonical')
+        assert t.root is None
 
     def test_delete_leaf_node(self):
         """Insert three well-separated HRFs, delete one of the leaves,

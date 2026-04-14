@@ -260,34 +260,36 @@ class montage(tree):
             None
         """
 
-        canonical_hbo = nilearn.glm.first_level.glover_hrf(t_r = 1/self.sfreq, oversampling = 1, time_length = float(self.context['duration']))
-        canonical_hbr = np.array([-point for point in canonical_hbo])
-        canonical_std = [0 for _ in canonical_hbr]
+        # S4: fetch canonicals from the unified helper instead of
+        # inlining a second Glover HRF generation path here. The helper
+        # generates at the correct sample rate for the scan and caches
+        # the result so repeated calls within a localize pass are cheap.
+        canonical_duration = float(self.context['duration'])
 
         for ch_name, optode in self.channels.items(): # Iterate through channels apart of nirx data
             if verbose: print(f"Searching for nodes close to optode {optode.ch_name}")
-            if _is_oxygenated(ch_name):
+            oxygenation = _is_oxygenated(ch_name)
+            if oxygenation:
                 hrf, distance = self.hbo_tree.nearest_neighbor(optode, max_distance, verbose = verbose) # Search in space for similar HRF
             else:
                 hrf, distance = self.hbr_tree.nearest_neighbor(optode, max_distance, verbose = verbose)
 
-            if hrf: # If found
+            if hrf is not None: # If found (nearest_neighbor now returns None on miss, S4)
                 if verbose: print(f"HRF {hrf.ch_name} found at {distance} distance")
 
                 optode.trace = hrf.trace # Add mean and std to montage for channel
                 optode.trace_std = hrf.trace_std
 
-            else: # If hrf not found locally
+            else: # If no local HRF within max_distance, fall back to canonical
                 if verbose: print(f"Local HRF couldn't be found for channel {ch_name}, using canonical")
 
-                if _is_oxygenated(ch_name): # If found
-                    optode.trace = canonical_hbo # Add mean and std to montage for channel
-                    optode.trace_std = canonical_std
-                    optode.context['method'] = 'canonical'
-                else: # If global HRF not found
-                    optode.trace = canonical_hbr
-                    optode.trace_std = canonical_std
-                    optode.context['method'] = 'canonical'
+                target_tree = self.hbo_tree if oxygenation else self.hbr_tree
+                canonical_node = target_tree.get_canonical_hrf(
+                    oxygenation, self.sfreq, canonical_duration
+                )
+                optode.trace = canonical_node.trace
+                optode.trace_std = canonical_node.trace_std
+                optode.context['method'] = 'canonical'
 
 
     def solve_lstsq(self, lhs, rhs, cond_thresh = None):
@@ -534,10 +536,19 @@ class montage(tree):
             if hrf_model == 'canonical' or trace_invalid:
                 print(f"WARNING: Using canonical HRF for channel {ch_name} in {nirx_obj}")
                 estimate_hrf = hrf # Temporarily replace HRF
-                if _is_oxygenated(ch_name): # with oxygenated canonical
-                    hrf = self.hbo_tree.root.right
-                else: # with deoxygenated canonical
-                    hrf = self.hbr_tree.root.right
+                # S4: fetch a canonical generated at the scan's own sfreq
+                # (and the montage's duration context) rather than the
+                # old hardcoded root.right sentinel which was locked to
+                # 7.81 Hz / 30 s regardless of the calling scan.
+                canonical_duration = float(self.context.get('duration', 30.0))
+                if _is_oxygenated(ch_name):
+                    hrf = self.hbo_tree.get_canonical_hrf(
+                        True, self.sfreq, canonical_duration
+                    )
+                else:
+                    hrf = self.hbr_tree.get_canonical_hrf(
+                        False, self.sfreq, canonical_duration
+                    )
 
             # Figure out which channel to apply to
             for nirx_channel in nirx_obj.info['chs']:
@@ -899,18 +910,27 @@ class montage(tree):
                     []
                 )
 
-                # Check if an HRF in this area already exists 
+                # Check if an HRF in this area already exists
                 # NOTE: This is necessary to localize nodes with slight
                 # channel name differences in the same location
                 print(f"Searching for {ch_name}")
                 best_node, distance = self.nearest_neighbor(empty_hrf, max_distance = 1e-9, verbose = verbose)
-                if best_node and best_node.ch_name[:9] != 'canonical': # If previously defined channel hrf found
+                # S4: nearest_neighbor returns (None, inf) on miss now
+                # that the canonical sentinel is gone. Check None
+                # explicitly so the intent is obvious.
+                if best_node is None:
+                    print(f"No matching HRF found, inserting new HRF")
+                    self.channels[ch_name] = self.insert(empty_hrf)
+                elif best_node.ch_name[:9] != 'canonical':
                     print(f"Local HRF found in the channel {best_node.ch_name}, merging with optode {ch_name}")
                     self.channels[ch_name] = best_node # Attach node to channel
-                else: # If new channel
-                    # create an empty HRF object
-                    print(f"No matching HRF found, inserting new HRF")
-                    self.channels[ch_name] = self.insert(empty_hrf) # Insert empty hrf into montage tree
+                else:
+                    # Matched an entry whose ch_name still starts with
+                    # 'canonical' (e.g. a legacy JSON that stored a
+                    # canonical record). Treat as no match and insert
+                    # a fresh empty HRF.
+                    print(f"Only canonical match found, inserting new HRF")
+                    self.channels[ch_name] = self.insert(empty_hrf)
 
     def _merge_trees(self, filename = 'tree_hrfs.json'):
         """

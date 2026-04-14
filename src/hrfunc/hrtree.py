@@ -90,11 +90,83 @@ class tree:
 
         self.hasher = hrhash.hasher(self.context)
 
+        # S4: lazy canonical HRF cache, keyed on (oxygenation, sfreq,
+        # duration). Populated on demand by get_canonical_hrf.
+        self._canonical_cache = {}
+
         if self.hrf_filename and os.path.exists(self.hrf_filename):
             self.load_hrfs(self.hrf_filename)
             print(f"Tree initialized with HRFs from {hrf_filename}")
         else:
             print(f"Tree intiialized without HRFs loaded...")
+
+    def get_canonical_hrf(self, oxygenation, sfreq, duration):
+        """
+        Lazily generate and cache a canonical Glover HRF matching the
+        calling scan's sample rate and duration (S4).
+
+        Pre-S4 the canonical was eagerly constructed at t_r=0.128
+        (~7.81 Hz, 30 s) during the first tree.insert, which meant every
+        canonical kernel used downstream was locked to that one sample
+        rate regardless of the actual scan. For scans at 5 Hz or 10 Hz
+        the kernel length didn't match and downstream deconvolution
+        math silently produced wrong results.
+
+        Arguments:
+            oxygenation (bool) - True for HbO (positive Glover HRF),
+                False for HbR (negated).
+            sfreq (float) - Sampling frequency the canonical should be
+                generated at. Glover's t_r is 1/sfreq.
+            duration (float) - Kernel duration in seconds. Kernel length
+                comes out to approximately sfreq * duration samples.
+
+        Returns:
+            HRF - A cached HRF node at sentinel location
+                [359.0, 359.0, 359.0] with context['method']='canonical'.
+                Safe to insert into a kd-tree if needed; the sentinel
+                location is far outside realistic MNE meter-scale head
+                coordinates so it won't collide with real optodes.
+
+        Thread-safety:
+            The cache is a plain dict without locking. This is safe for
+            the current call pattern — get_canonical_hrf is only invoked
+            from the outer channel loop in montage.estimate_activity and
+            montage.localize_hrfs, never from inside the per-channel
+            ThreadPoolExecutor closure. If a future caller parallelizes
+            montages on the same tree instance, wrap the cache access in
+            a threading.Lock. The worst-case failure today is a double-
+            generate, not corruption — generated kernels are pure
+            functions of the key.
+        """
+        key = (bool(oxygenation), float(sfreq), float(duration))
+        cached = self._canonical_cache.get(key)
+        if cached is not None:
+            return cached
+
+        canonical_trace = list(nilearn.glm.first_level.glover_hrf(
+            t_r = 1.0 / float(sfreq),
+            oversampling = 1,
+            time_length = float(duration),
+        ))
+        if not oxygenation:
+            canonical_trace = [-point for point in canonical_trace]
+
+        ch_name = 'canonical_hbo' if oxygenation else 'canonical_hbr'
+
+        node = HRF(
+            'canonical',
+            ch_name,
+            float(duration),
+            float(sfreq),
+            np.asarray(canonical_trace, dtype=np.float64),
+            trace_std = np.zeros(len(canonical_trace), dtype=np.float64),
+            location = [359.0, 359.0, 359.0],
+            estimates = [],
+            locations = [],
+        )
+        node.context['method'] = 'canonical'
+        self._canonical_cache[key] = node
+        return node
 
     def load_hrfs(self, hrf_filename, similarity_threshold = 0.0, oxygenated = None, rich = False):
         """
@@ -182,29 +254,15 @@ class tree:
         if self.root is None:
             print(f"Setting root... {hrf.ch_name}")
             self.root = hrf
-            
-            canonical_hrf = list(nilearn.glm.first_level.glover_hrf(t_r = 0.128, oversampling = 1, time_length = 30.0))
-
-            if self.root.oxygenation:
-                ch_name = 'canonical-hbo'
-            else:
-                canonical_hrf = np.array([-point for point in canonical_hrf])
-                ch_name = 'canonical-hbr'
-
-            self.root.right = HRF(
-                'canonical',
-                ch_name,
-                30.0,
-                7.81,
-                canonical_hrf,
-                location = [359.0, 359.0, 359.0],
-                estimates = [canonical_hrf],
-                locations = [[359.0, 359.0, 390.0]]
-            )
-            # NE-001: label the canonical sentinel, NOT the user-inserted
-            # root. Pre-fix this line clobbered the first real HRF's
-            # context method with 'canonical'.
-            self.root.right.context['method'] = 'canonical'
+            # S4: canonical HRFs are now generated on demand via
+            # tree.get_canonical_hrf(oxygenation, sfreq, duration) so
+            # they match the calling scan's sample rate. Pre-fix this
+            # branch eagerly constructed a canonical at t_r=0.128
+            # (7.81 Hz) and stashed it at self.root.right, which made
+            # downstream callers rely on the sentinel being present and
+            # locked every canonical kernel to a single sample rate
+            # regardless of the scan. Removed entirely — the tree is
+            # now a pure kd-tree of user HRFs.
             return self.root
 
         if node is None:
@@ -477,8 +535,11 @@ class tree:
         if best and best[1] <= max_distance:
             return best  # return the node only
         else:
-            if verbose: print(f"No node found, returning canonical HRF")
-            return self.root.right, float("inf")  # fallback to canonical HRF
+            # S4: no canonical sentinel lives in the tree anymore. Callers
+            # that want a canonical fallback should call get_canonical_hrf
+            # with their own sfreq/duration and handle None explicitly.
+            if verbose: print(f"No node within {max_distance} of {optode.ch_name}")
+            return None, float("inf")
 
     def radius_search(self, optode, radius, node = None, depth=0, results=None):
         """
