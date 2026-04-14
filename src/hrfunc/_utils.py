@@ -24,7 +24,21 @@ def standardize_name(ch_name):
 
     Returns:
         ch_name (str) - Standardized channel name
+
+    Raises:
+        TypeError - If ch_name is not a string
+        ValueError - If ch_name is too short to carry an oxygenation suffix
     """
+    if not isinstance(ch_name, str):
+        raise TypeError(
+            f"standardize_name expected a str, got {type(ch_name).__name__}"
+        )
+    if len(ch_name) < 3:
+        raise ValueError(
+            f"Channel name {ch_name!r} is too short to standardize; "
+            "expected at least 3 characters carrying an oxygenation suffix "
+            "(e.g. 'hbo', 'hbr', or wavelength digits)"
+        )
     ch_name = re.sub(r'[_\-\s]+', '_', ch_name.lower())
     oxygenation = _is_oxygenated(ch_name)
     if oxygenation:

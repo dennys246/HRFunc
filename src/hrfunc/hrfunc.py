@@ -42,11 +42,23 @@ def load_montage(json_filename, rich = False, **kwargs):
     with open(json_filename, 'r') as file:
         json_contents = json.load(file)
 
+    if not isinstance(json_contents, dict) or len(json_contents) == 0:
+        raise ValueError(
+            f"load_montage: {json_filename!r} must contain a non-empty JSON "
+            "object keyed by '<ch_name>-<doi>'"
+        )
+
     # Initialize an empty montage object
     _montage = montage(**kwargs)
 
     # Grab info from json contents
-    first_hrf = json_contents[list(json_contents.keys())[0]]
+    first_key = next(iter(json_contents))
+    first_hrf = json_contents[first_key]
+    if not isinstance(first_hrf, dict) or 'sfreq' not in first_hrf:
+        raise ValueError(
+            f"load_montage: first entry {first_key!r} is missing required "
+            "field 'sfreq'"
+        )
     sfreq = first_hrf['sfreq']
 
     # Assess channel names
@@ -57,6 +69,7 @@ def load_montage(json_filename, rich = False, **kwargs):
     _montage.hbr_channels = [ch for ch in ch_names if _is_oxygenated(ch) == False]
 
     # Update montage with saved info
+    required_top = ('hrf_mean', 'hrf_std', 'sfreq', 'location', 'context')
     for key, channel in json_contents.items():
         key_split = key.split('-')
         doi = key_split.pop()
@@ -66,9 +79,37 @@ def load_montage(json_filename, rich = False, **kwargs):
         if ch_name == 'canonical':
             continue
 
+        if not isinstance(channel, dict):
+            raise ValueError(
+                f"load_montage: entry {key!r} must be a JSON object, "
+                f"got {type(channel).__name__}"
+            )
+        for field in required_top:
+            if field not in channel:
+                raise ValueError(
+                    f"load_montage: entry {key!r} is missing required field "
+                    f"{field!r}"
+                )
+        if not isinstance(channel['context'], dict):
+            raise ValueError(
+                f"load_montage: entry {key!r} has non-object 'context' field"
+            )
+        if 'duration' not in channel['context']:
+            raise ValueError(
+                f"load_montage: entry {key!r} is missing required field "
+                "'context.duration'"
+            )
+
         if rich == False:
             channel['estimates'] = []
             channel['locations'] = []
+        else:
+            for field in ('estimates', 'locations'):
+                if field not in channel:
+                    raise ValueError(
+                        f"load_montage: entry {key!r} is missing required "
+                        f"field {field!r} (rich=True)"
+                    )
 
         # create an empty HRF object
         estimated_hrf = HRF(
@@ -261,8 +302,17 @@ class montage(tree):
 
         if isinstance(duration, int): duration = float(duration)
 
+        if duration <= 0:
+            raise ValueError(f"ERROR: duration must be > 0, got {duration}")
+
         if isinstance(events, list) is False:
             raise ValueError(f"ERROR: Events passed in must be of type list, object of type {type(events)} was passed in...")
+
+        if len(events) == 0:
+            raise ValueError("ERROR: events list must not be empty")
+
+        if lmbda <= 0:
+            raise ValueError(f"ERROR: lmbda must be > 0 for Tikhonov regularization, got {lmbda}")
 
         # Check montage still needs to be configured
         if self.configured is False:
@@ -357,6 +407,9 @@ class montage(tree):
             nirx_obj (mne raw object) - Raw with deconvolved neural activity, or None if skipped
         """
 
+        if lmbda <= 0:
+            raise ValueError(f"ERROR: lmbda must be > 0 for Tikhonov regularization, got {lmbda}")
+
         # Check montage still needs to be configured
         if self.configured is False:
             self.configure(nirx_obj)
@@ -418,8 +471,22 @@ class montage(tree):
 
             if 'global' in ch_name: continue # Skip if global hrf estimate
 
-            # If canonical HRF requested
-            if hrf_model == 'canonical' or len(hrf.trace) == 0:
+            # Detect degenerate HRF traces that would produce NaN (zero-length,
+            # missing, or all-zeros) so we fall back to canonical instead of
+            # silently dividing by zero in the deconvolution closure (H1).
+            trace_invalid = (
+                hrf.trace is None
+                or len(hrf.trace) == 0
+                or np.max(np.abs(hrf.trace)) == 0
+            )
+            if trace_invalid and hrf_model != 'canonical':
+                print(
+                    f"WARNING: HRF trace for channel {ch_name} is empty or all-zero; "
+                    "falling back to canonical HRF"
+                )
+
+            # If canonical HRF requested (or forced by a degenerate trace)
+            if hrf_model == 'canonical' or trace_invalid:
                 print(f"WARNING: Using canonical HRF for channel {ch_name} in {nirx_obj}")
                 estimate_hrf = hrf # Temporarily replace HRF
                 if _is_oxygenated(ch_name): # with oxygenated canonical
