@@ -4,6 +4,7 @@ from ._utils import standardize_name, _is_oxygenated, _LIB_DIR
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
+from scipy.ndimage import gaussian_filter1d
 from collections import deque
 from nilearn.glm.first_level import spm_hrf
 
@@ -200,7 +201,10 @@ class tree:
                 estimates = [canonical_hrf],
                 locations = [[359.0, 359.0, 390.0]]
             )
-            self.root.context['method'] = 'canonical'
+            # NE-001: label the canonical sentinel, NOT the user-inserted
+            # root. Pre-fix this line clobbered the first real HRF's
+            # context method with 'canonical'.
+            self.root.right.context['method'] = 'canonical'
             return self.root
 
         if node is None:
@@ -211,12 +215,20 @@ class tree:
         h_val = (hrf.x, hrf.y, hrf.z)[axis]
         n_val = (node.x, node.y, node.z)[axis]
 
-        # Handle duplicates by jittering location
+        # Handle duplicates by jittering location.
+        # 3.5: the pre-fix loop `for val in (hrf.x, hrf.y, hrf.z): val += 1e-10`
+        # mutated the loop variable, not the HRF's coordinates, so the
+        # jitter never took effect. Assign directly instead.
         if h_val == n_val and hrf.x == node.x and hrf.y == node.y and hrf.z == node.z:
-            for val in (hrf.x, hrf.y, hrf.z):
-                if node.oxygenation == hrf.oxygenation:
-                    print(f"WARNING: Jittering location for {hrf.ch_name}, same location as the following node.../n{node.ch_name}")
-                    val += 1e-10 # Jitter location while staying above 64-precision double threshold
+            if node.oxygenation == hrf.oxygenation:
+                print(f"WARNING: Jittering location for {hrf.ch_name}, same location as the following node...\n{node.ch_name}")
+                hrf.x += 1e-10
+                hrf.y += 1e-10
+                hrf.z += 1e-10
+                # Refresh the axis comparison value for this pass so the
+                # jittered coordinate actually informs the left/right
+                # decision below.
+                h_val = (hrf.x, hrf.y, hrf.z)[axis]
             
         # If the current node is less than the new node
         if h_val < n_val: 
@@ -735,7 +747,7 @@ class tree:
         return min([node, left_min, right_min], key=lambda n: getattr(n, ["x", "y", "z"][axis]) if n else float('inf'))
 
 class HRF:
-    def __init__(self, doi, ch_name, duration, sfreq, trace, trace_std = None, location = None, estimates = [], locations = [], context = [], **kwargs):
+    def __init__(self, doi, ch_name, duration, sfreq, trace, trace_std = None, location = None, estimates = None, locations = None, context = None, **kwargs):
         """
         Object for storing all information apart of an estimated HRF from an fNIRS optode
 
@@ -781,9 +793,14 @@ class HRF:
             self.y = -1 + random.random()
             self.z = -1 + random.random()
 
-        # Set HRF default context
+        # 3.7: mutable default args (estimates=[], locations=[], context=[])
+        # replaced with None sentinels and materialized inside the function
+        # so two HRF instances don't silently share the same list/dict.
         if context:
-            self.context = context
+            # NOTE: pre-fix accepted a list default `context=[]`. Keep
+            # truthiness check so an empty-but-non-None value still falls
+            # back to the default template.
+            self.context = dict(context) if isinstance(context, dict) else {}
         else:
             self.context = {
                 'method': 'toeplitz',
@@ -806,12 +823,16 @@ class HRF:
         self.left = None
         self.right = None
 
-        self.estimates = estimates
-        self.locations = locations
+        self.estimates = list(estimates) if estimates is not None else []
+        self.locations = list(locations) if locations is not None else []
 
+        # NE-003: process_options must be the same length as hrf_processes
+        # and process_names so the zip in build() produces one iteration
+        # per configured step. Pre-fix this was `[]`, making zip zero-
+        # iterate and build() silently do nothing.
         self.hrf_processes = [self.spline_interp]
         self.process_names = ['spline_interpolate']
-        self.process_options = []
+        self.process_options = [None]
 
         self.built = False
 
@@ -845,16 +866,19 @@ class HRF:
     def build(self, new_sfreq, plot = False, show = False):
         """ Run through the processes requested for generating an hrf """
         self.target_length = new_sfreq * float(self.context['duration'])
+        # 3.10: derive hrf_type from oxygenation instead of reading
+        # self.type, which was never set anywhere and would AttributeError.
+        hrf_type = "hbo" if self.oxygenation else "hbr"
         for process, process_name, process_option in zip(self.hrf_processes, self.process_names, self.process_options):
-            
+
             if process_option == None:
                 self.trace = process(self.trace)
             else:
                 self.trace = process(self.trace, process_option)
-            
+
             if plot: # Plot the processing step results
                 title = f"HRF - {process_name}"
-                filename = f"plots/{'-'.join(process_name.split(' ')).lower()}_{self.type}_hrf_results.png"
+                filename = f"plots/{'-'.join(process_name.split(' ')).lower()}_{hrf_type}_hrf_results.png"
                 self.plot(title, filename, show)
         self.built = True
 
@@ -871,21 +895,30 @@ class HRF:
         # Update class variables
         self.x, self.y, self.z = centroid[0], centroid[1], centroid[2]
 
-    def spline_interp(self):
+    def spline_interp(self, trace = None):
         """
-        Use spline interpolation to resample the HRF to a new size that fits the new target length
-        
+        Use spline interpolation to resample the HRF to a new size that fits
+        self.target_length. Accepts an optional trace argument so it can be
+        used as a pipeline step in build() (which calls
+        `self.trace = process(self.trace)` on each configured process).
+
+        Arguments:
+            trace (array-like) - Source trace to resample. Defaults to
+                self.trace if omitted.
+
         Returns:
-            trace (list of floats) - The resampled HRF trace
+            resampled_trace (np.ndarray) - Trace resampled to target_length
         """
+        if trace is None:
+            trace = self.trace
         # Original list
-        hrf_indices = np.linspace(0, len(self.trace) - 1, len(self.trace))
+        hrf_indices = np.linspace(0, len(trace) - 1, len(trace))
 
         # Create a spline interpolation function
-        spline = interp1d(hrf_indices, self.trace, kind='cubic')
-        new_indices = np.linspace(0, len(self.trace) - 1, int(self.target_length))
+        spline = interp1d(hrf_indices, trace, kind='cubic')
+        new_indices = np.linspace(0, len(trace) - 1, int(self.target_length))
 
-        # Compressed list
+        # Resampled list
         return spline(new_indices)
 
     def smooth(self, a):
@@ -896,7 +929,9 @@ class HRF:
             a (float) - Sigma value used in gaussian filter to dictate how much the HRF is smoothed
         """
         print(f'Smoothing HRF trace with Gaussian filter (sigma = {a})...')
-        self.trace = self.gaussian_filter1d(self.trace, a)
+        # NE-004: pre-fix called self.gaussian_filter1d which was never
+        # imported or defined. Use the module-level scipy import.
+        self.trace = gaussian_filter1d(self.trace, a)
 
         
     def normalize(self):
