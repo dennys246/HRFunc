@@ -32,7 +32,30 @@
 
 ## Completed Branches (2026-04-13 → 2026-04-14)
 
-These are pushed to origin and pending merge to main:
+Most of the v1.2.0 chain has shipped. The merge state below is current as of
+2026-04-14. Each branch has its own `tests/test_*.py` file; the full gate
+stands at **213 passed, 0 xfailed** across the merged + in-flight stack
+(the `fix/tree-edge-cases` full gate; later branches extend from the same
+base).
+
+**Merged to main (7 branches):**
+- `fix/critical-bugs-phase1a`
+- `fix/critical-bugs-phase1bc`
+- `refactor/circular-imports-phase2`
+- `fix/estimate-activity-threading`
+- `fix/input-validation`
+- `fix/state-lifecycle`
+- `fix/oxygenation-guard`
+- `fix/tree-delete-filter`
+
+**Pushed to origin, pending merge (4 branches stacked on each other in this order):**
+- `fix/hasher-branch-correctness`
+- `fix/tree-hrf-correctness`
+- `fix/canonical-hrf-sfreq`
+- `fix/tree-edge-cases`
+- `fix/observer-and-typos`
+
+Only `experiment/ppf-validation` and `release/1.2.0` remain unstarted.
 
 ### `fix/critical-bugs-phase1a` ✅
 - **1.1** f-string syntax error in `montage.__repr__` (extracted `context_str` variable)
@@ -72,7 +95,76 @@ These are pushed to origin and pending merge to main:
 - Cleanup: `success == False` → `success is False`; TimeoutError print message now includes timeout value
 - **Tests:** `tests/test_threading.py` (9 passed)
 
-**Full suite after all four merged branches:** 66 passed, 1 xfailed (unblocked later by `fix/tree-delete-filter`)
+### `fix/input-validation` ✅
+- **M1** `standardize_name` guard on short/non-str input
+- **M2a** `estimate_hrf` validates `duration > 0`, `lmbda > 0`, non-empty `events`
+- **M2b** `estimate_activity` validates `lmbda > 0`
+- **M3** `load_montage` per-entry schema validation (top-level guard + per-entry try/except)
+- **H1** `estimate_activity` detects zero-trace HRFs and falls back to canonical with warning
+- **Tests:** `tests/test_input_validation.py` (24 passed)
+
+### `fix/state-lifecycle` ✅
+- **H3** `montage.__repr__` safe on unconfigured instances (getattr fallback)
+- **M4** `estimate_activity` snapshot-iterates `self.channels` and pops orphaned entries after drop; deconvolution closure now catches general `Exception`, not just `TimeoutError`
+- **M5** `load_montage` per-entry try/except wraps with entry-key context and `__cause__` chaining
+- M6 was originally in this branch but was **moved to `fix/tree-delete-filter`** after the parallel review caught that proper tree rollback needs a working `tree.delete`
+- **Tests:** `tests/test_state_lifecycle.py` (13 passed)
+
+### `fix/oxygenation-guard` ✅ (mini-branch)
+- `_utils._is_oxygenated` entry guards (type + length) — M1 coverage at the sibling helper
+- `_is_oxygenated` 'b' branch structure guard — 3+ char strings like `'abc'`, `'abb'` that pass the length guard but have no `'hb'` substring now raise `ValueError` instead of `IndexError`
+- **Tests:** `tests/test_oxygenation_guard.py` (18 passed)
+
+### `fix/tree-delete-filter` ✅
+- **KI-009 / H2** `tree._delete_recursive` rewritten with proper 3-arg recursive signature and new `_copy_payload` helper that copies all HRF payload fields except `left`/`right`, with `np.copy` on trace/trace_std and dict/list copies for context/estimates/locations. Skips `hrf_processes`/`process_names`/`process_options` because they contain bound methods pointing at src.
+- **3.8** `tree.gather(None)` returns `{}` (pulled in from `fix/tree-edge-cases` to unblock xfail)
+- **xfail cleanup** `test_filter_removes_low_similarity_nodes` flipped from xfailed to a normal pass
+- **M6** `montage.configure` commit-on-success with tree rollback. Snapshots scalar/list/dict state plus identity-indexed set of pre-call node references. First-time configure fast-pathed to `self.root = None`; re-configure uses `tree.delete` on newly-inserted nodes.
+- **Tests:** `tests/test_tree_delete_filter.py` (19 passed)
+
+### `fix/hasher-branch-correctness` ⏳ (pushed, pending merge)
+- **3.3 + H4** `hasher.add` appends pointers to slot list with identity dedup; `hasher.search` returns `list[pointer]` (empty on miss). `fill` / `double_check` dead code deleted.
+- **NE-002** `load_hrfs` and `load_montage` now populate the hasher keyed by channel context VALUES, not dict KEYS. New `_flatten_context_value` helper handles scalar vs list values.
+- **3.1** `compare_context` auto-wraps scalar values, handles missing keys in second_context
+- **3.2** `tree.branch` AND-on-kwargs / OR-within-kwarg semantics, empty kwargs returns empty branch, sub-tree hasher populated by copied node values
+- Cleanup: historical no-op `self.branch()` inside `filter()` replaced with direct `self.branched = True`
+- **Tests:** `tests/test_hasher_branch.py` (23 passed)
+
+### `fix/tree-hrf-correctness` ⏳ (pushed, pending merge)
+- **NE-001** `tree.insert` labels the canonical sentinel, not the first user HRF
+- **3.5** jitter branch mutates `hrf.x/y/z` directly and refreshes `h_val`
+- **NE-003** `HRF.process_options = [None]`; `spline_interp` accepts optional `trace` arg so `build()` pipeline works
+- **NE-004** `HRF.smooth` uses module-level `scipy.ndimage.gaussian_filter1d`
+- **3.7** mutable default args → None sentinels + per-instance materialization
+- **3.10** `HRF.build` derives `hrf_type` from `self.oxygenation`
+- **Tests:** `tests/test_tree_hrf.py` (14 passed)
+
+### `fix/canonical-hrf-sfreq` ⏳ (pushed, pending merge)
+- **S4** `tree.get_canonical_hrf(oxygenation, sfreq, duration)` lazy generator with per-`(ox, sfreq, duration)` cache
+- `tree.insert` no longer creates a canonical sentinel at `root.right`
+- `nearest_neighbor` returns `(None, inf)` on miss instead of `(root.right, inf)`
+- `estimate_activity` canonical branch, `localize_hrfs`, and `_merge_montages` all updated to use the helper and handle `None`
+- Scientific reviewer flagged `oversampling=1` as aliasing; **declined** — Glover HRF energy is <0.3 Hz, Nyquist at fNIRS rates is far above. Documented as v2.0.0 validation item.
+- **Tests:** `tests/test_canonical_hrf.py` (17 passed)
+
+### `fix/tree-edge-cases` ⏳ (pushed, pending merge)
+- **NE-006** `tree.merge` inserts `node.copy()` so merged tree is independent; recursion walks SOURCE's children; empty-source early return
+- **NE-007** `tree.nearest_neighbor` explicit `if self.root is None: return None, inf` early return; tightened `== None` to `is None` and `if best:` to `if best is not None:`
+- **Cross-branch regression fix**: `load_montage` was not passing `channel['context']` to the `HRF` constructor; post-NE-002 this meant hasher had real context values but the nodes themselves carried only the default template. Caught by a pre-push comprehensive cross-branch audit of the full in-flight stack.
+- **Tests:** `tests/test_tree_edge_cases.py` (10 passed)
+
+### `fix/observer-and-typos` ⏳ (pushed, pending merge)
+- **3.9** `lens.__init__` initializes `self.sfreq` (default 7.81) and `self.channels = []`
+- **L1** "Cannonical" → "Canonical" (4 occurrences)
+- **L2** "intiialized" → "initialized"
+- **L3** "ommited" → "omitted"
+- Lint-sweep bonuses (real correctness bugs found by `ruff` + `mypy`, in v1.2.0 scope):
+  - `calc_snr` PSD variable swap — pre-fix each band's PSD was read from the signal filtered to the WRONG band, producing near-zero noise power and infinite SNR
+  - `calc_snr` `noise_bands` mutable default → None sentinel
+  - `correlate_canonical` None-root guard (was AttributeError on unconfigured montage)
+- **Tests:** `tests/test_observer_and_typos.py` (10 passed)
+
+**Full suite after all in-flight branches:** 213 passed, 0 xfailed
 
 ---
 
