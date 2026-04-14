@@ -7,6 +7,28 @@ from scipy.interpolate import interp1d
 from collections import deque
 from nilearn.glm.first_level import spm_hrf
 
+
+def _flatten_context_value(value):
+    """
+    Yield hashable hasher keys from a context dict value. Lists and tuples
+    are flattened one level; None and empty containers are skipped; dicts
+    are passed through as-is (caller is responsible for not indexing them).
+
+    This exists to bridge the HRF context schema (where values may be
+    scalars like 'flanker' or lists like [20, 30] for age_range) and the
+    hasher's key requirement (any hashable). Used by both load_hrfs and
+    load_montage when populating the hasher under NE-002.
+    """
+    if value is None:
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if item is None:
+                continue
+            yield item
+        return
+    yield value
+
 class tree:
 
     def __init__(self, hrf_filename = None, **kwargs):
@@ -133,9 +155,16 @@ class tree:
             # Insert hrf node into tree
             node = self.insert(new_hrf)
 
-            # Add newly added node into HRHash table
-            for context in self.context:
-                self.hasher.add(context, node)
+            # Add newly added node into HRHash table, keyed by the VALUES
+            # in the channel's own context dict — not by the tree's context
+            # dict KEYS, which was the NE-002 bug. After the fix,
+            # `hasher.search('flanker')` returns every node whose
+            # context dict contained 'flanker' anywhere.
+            channel_context = channel.get('context', {})
+            if isinstance(channel_context, dict):
+                for ctx_value in channel_context.values():
+                    for hashable in _flatten_context_value(ctx_value):
+                        self.hasher.add(hashable, node)
 
     def insert(self, hrf, depth = 0, node = None):
         """Insert a new node into the 3D k-d tree based on spatial position.
@@ -220,13 +249,18 @@ class tree:
         if node is None: # Set up filtering
             if self.root is None: # If nothing loaded yet
                 raise ValueError("No HRFs loaded yet, nothing to filter")
-            
-            node = self.root # Set root at node
-            self.context = {**self.context, **kwargs} 
 
-            if self.branched == False: # Branch to reduce number of hard comparison
-                print("Branching tree on context before filtering")
-                self.branch()
+            node = self.root # Set root at node
+            self.context = {**self.context, **kwargs}
+
+            # Historical no-op: the pre-fix code here called self.branch()
+            # and discarded the result — the intent was to pre-filter to
+            # a smaller sub-tree before compare_context, but filter()
+            # always ran against self.root regardless, so the "branch"
+            # was just a flag flip. Preserved as a direct assignment
+            # after the hasher-branch-correctness fix made branch() with
+            # no kwargs return an empty tree by design.
+            self.branched = True
 
         if node.left: # If there's a left node
             self.filter(similarity_threshold, node.left)
@@ -241,7 +275,13 @@ class tree:
 
     def compare_context(self, first_context, second_context, context_weights=None):
         """
-        Compare two contexts to see how similar they are
+        Compare two contexts to see how similar they are.
+
+        3.1: Context values may be scalars ('flanker'), lists ([20, 30]),
+        or None. Scalars are auto-wrapped to single-element lists before
+        comparison so the inner `for value in values:` loop behaves the
+        same way regardless of the raw type. A key missing from
+        second_context (or set to None there) counts as zero matches.
 
         Arguments:
             first_context (dict) - Context to compare against
@@ -254,27 +294,55 @@ class tree:
         weights = context_weights if context_weights is not None else self.context_weights
         context_similarity = []
         for key, values in first_context.items():
-            # If context not mentioned in first context
-            if values is None: # Exclude context in similarity comparison
+            if values is None: # Exclude from similarity comparison
                 continue
+
+            # Auto-wrap scalars so the inner loop doesn't iterate over
+            # characters of a string or crash on a non-iterable.
+            if not isinstance(values, (list, tuple)):
+                values = [values]
+            if len(values) == 0:
+                continue
+
+            other = second_context.get(key) if isinstance(second_context, dict) else None
+            if other is None:
+                other_values = []
+            elif not isinstance(other, (list, tuple)):
+                other_values = [other]
+            else:
+                other_values = list(other)
 
             same = 0 # Create a context specific similarity value
             for value in values:
-                if value in second_context[key]:
+                if value in other_values:
                     if weights: # If a context weight provided
-                        same += 1 * weights[key] # Weight similarity score
+                        same += 1 * weights.get(key, 1.0) # Weight similarity score
                     else:
                         same += 1
 
             # Calculate context-specific similarity and append (ND-002: use len(values) not len(first_context))
-            context_similarity.append(same / len(values) if len(values) > 0 else 0.0)
+            context_similarity.append(same / len(values))
 
         return sum(context_similarity) / len(context_similarity) if len(context_similarity) > 0 else 0.0
 
     def branch(self, **kwargs):
         """
-        Accepts context keyword inputs via kwargs, updates the trees context
-        and then builds a new tree filtering for just the context
+        Build a new tree filtered to nodes whose context dict contains
+        every user-specified kwarg value.
+
+        Semantics:
+        - kwargs are ANDed together: a node must match all user-specified
+          keys to be included.
+        - Values within a single kwarg are ORed: `branch(task=['a','b'])`
+          returns nodes whose task is 'a' or 'b'.
+        - Only the kwargs passed to this call act as filters. The tree's
+          own `self.context` defaults (e.g. `method='toeplitz'`) are not
+          treated as implicit filters — that pre-fix behavior made
+          `branch(task='nothing_matches')` return every node whose method
+          happened to equal 'toeplitz', because the loop iterated every
+          context-dict entry including defaults.
+        - Matching uses the hasher populated by `load_hrfs` / `load_montage`
+          keyed by the channel context VALUES (NE-002 fix).
 
         Arguments:
             **kwargs - Any context keyword value pair to branch on (i.e. doi, age, etc)
@@ -283,24 +351,55 @@ class tree:
             branch (tree object) - A new tree object filtered on the requested context
         """
         if kwargs:
-            self.context = {**self.context, **kwargs} # Update context
+            self.context = {**self.context, **kwargs} # Update context for downstream readers
 
         branch = tree()
+        self.branched = True
 
-        for key, values in self.context.items(): # Iterate through all context items
+        if not kwargs:
+            # No filter specified — return an empty branch rather than the
+            # whole tree. Callers wanting a full copy should use the
+            # montage.branch() API or a dedicated clone method.
+            return branch
+
+        # For each kwarg, gather the set of candidate nodes (ORed across
+        # that kwarg's values). Then intersect across kwargs to get the
+        # final ANDed set.
+        candidate_lists = []
+        for key, values in kwargs.items():
             if values is None:
                 continue
-            for value in values: # Iterate through each item in a context area
-                # Hash on the value and iterate through the tree pointers
-                context_references = self.hasher.search(value)
-                for node in context_references:
-                    # Create a deep copy of the HRF node to preserve all data
-                    node_copy = node.copy()
-                    branch.insert(node_copy)
-                    # Add context to hasher
-                    for context in branch.context:
-                        branch.hasher.add(context, node_copy)
-        self.branched = True
+            if not isinstance(values, (list, tuple)):
+                values = [values]
+            matches = []
+            seen_ids = set()
+            for value in values:
+                if value is None:
+                    continue
+                for node in self.hasher.search(value):
+                    if id(node) not in seen_ids:
+                        seen_ids.add(id(node))
+                        matches.append(node)
+            candidate_lists.append(matches)
+
+        if not candidate_lists:
+            return branch
+
+        final_nodes = candidate_lists[0]
+        for cl in candidate_lists[1:]:
+            cl_ids = {id(n) for n in cl}
+            final_nodes = [n for n in final_nodes if id(n) in cl_ids]
+
+        for node in final_nodes:
+            node_copy = node.copy()
+            branch.insert(node_copy)
+            # Populate the sub-tree's hasher keyed by the copied node's
+            # context VALUES — mirrors load_hrfs (NE-002 semantics).
+            if isinstance(node_copy.context, dict):
+                for ctx_value in node_copy.context.values():
+                    for hashable in _flatten_context_value(ctx_value):
+                        branch.hasher.add(hashable, node_copy)
+
         return branch
 
     def nearest_neighbor(self, optode, max_distance, node = 'root', depth = 0, best = None, verbose = False):
