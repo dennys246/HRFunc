@@ -488,16 +488,24 @@ class tree:
         """
         # If first call, attach root to node
         if node == 'root':
-            if verbose: print(f"Attaching root ({(self.root.ch_name if self.root else self.root)}) to search node for {optode.ch_name} search")
+            # NE-007: explicit empty-tree early return. If the caller
+            # invokes nearest_neighbor on a tree that has never had a
+            # node inserted, self.root is None and we short-circuit
+            # before the recursive base case. Keeps the control flow
+            # obvious for future readers.
+            if self.root is None:
+                if verbose: print(f"nearest_neighbor called on empty tree — no match")
+                return None, float("inf")
+            if verbose: print(f"Attaching root ({self.root.ch_name}) to search node for {optode.ch_name} search")
             node = self.root
 
         # Handle base cases
-        if node == None: 
-            if best:
-                if verbose: print(f"No node found, returning {best[0].ch_name}")
+        if node is None:
+            if best is not None:
+                if verbose: print(f"No further branch, returning running best {best[0].ch_name}")
                 return best
             else:
-                if verbose: print("No node found, returning canonical HRF")
+                if verbose: print("No further branch and no best yet")
                 return None, float("inf")
         
         k = 3 
@@ -673,20 +681,31 @@ class tree:
 
     def merge(self, tree, node = None):
         """
-        Merge another tree into this one
-        
+        Merge another tree into this one.
+
+        NE-006: pre-fix called `self.insert(node)` with the source tree's
+        node reference, so the inserted node in `self` still carried the
+        source's left/right pointers. Subsequent kd-tree operations on
+        either tree could corrupt the other. Fix: insert a fresh copy
+        (HRF.copy returns a node with left=right=None and deep-copied
+        payload), and recurse on the SOURCE's children so we traverse
+        the full source tree rather than the (empty-children) copy.
+
         Arguments:
             tree (tree object) - Tree to merge into this one
-            node (HRF object) - Node to start merging from 
+            node (HRF object) - Node to start merging from
         """
         if node is None:
             node = tree.root
+        # Empty source tree — nothing to merge
+        if node is None:
+            return
 
-        self.insert(node)
+        self.insert(node.copy())
 
         if node.left:
             self.merge(tree, node.left)
-        
+
         if node.right:
             self.merge(tree, node.right)
 

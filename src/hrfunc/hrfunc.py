@@ -115,7 +115,15 @@ def load_montage(json_filename, rich = False, **kwargs):
                             f"{field!r} (rich=True)"
                         )
 
-            # create an empty HRF object
+            # Create an HRF node from the saved channel. We must pass
+            # channel['context'] through — pre-fix this was omitted, so
+            # every loaded HRF fell back to the default template context
+            # inside HRF.__init__. After NE-002 the hasher was populated
+            # correctly with channel context VALUES, but the node itself
+            # carried no task/stimulus/demographics metadata, so
+            # compare_context / filter / branch comparisons downstream
+            # silently failed to match on the real values. Caught by the
+            # cross-branch audit on fix/tree-edge-cases.
             estimated_hrf = HRF(
                 doi,
                 ch_name,
@@ -125,7 +133,8 @@ def load_montage(json_filename, rich = False, **kwargs):
                 np.asarray(channel['hrf_std'], dtype=np.float64),
                 channel['location'],
                 channel['estimates'],
-                channel['locations']
+                channel['locations'],
+                channel['context'],
             )
 
             # Insert hrf into tree and attach pointer to channel. Populate
