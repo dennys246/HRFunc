@@ -370,7 +370,7 @@ class montage(tree):
         for ind in range(events.shape[0]): # Iterate through all events
             if events[ind] != 0: # if we found an event
                 if (ind - timeshift) < 0: # Check if we can expand the event
-                    print("WARNING: An event has been ommited due to edge expansion falling outside of the scan timeframe")
+                    print("WARNING: An event has been omitted due to edge expansion falling outside of the scan timeframe")
                     continue
                 new_events[ind - timeshift] = 1
         
@@ -714,6 +714,15 @@ class montage(tree):
         Returns:
             None
         """
+        # Guard against unconfigured / empty montage: self.root is None
+        # until _merge_montages runs, and was previously dereferenced
+        # directly below. Caught by the mypy sweep.
+        if self.root is None or not self.channels:
+            raise ValueError(
+                "correlate_canonical requires a configured montage with "
+                "at least one channel; call configure() or estimate_hrf() "
+                "first so self.channels is populated."
+            )
         # Generate canonical HRF
         time_stamps = np.arange(0, len(self.root.trace), 1)
 
@@ -735,9 +744,9 @@ class montage(tree):
         plt.figure(figsize=(10, 8))
         plt.imshow(corr_matrix[:, 0][np.newaxis, :], cmap='viridis', aspect='auto')
         plt.colorbar(label='Correlation Coefficient')
-        plt.title('Correlation Matrix of HRF Estimates with Cannonical HRF')
+        plt.title('Correlation Matrix of HRF Estimates with Canonical HRF')
         plt.xlabel('Montage Channels')
-        plt.ylabel('Cannonical HRF')
+        plt.ylabel('Canonical HRF')
         plt.xticks(range(len(self.hbo_channels) + len(self.hbr_channels)), self.hbo_channels + self.hbr_channels, rotation=90)
         plt.yticks(range(1), ['Canonical'])
         plt.tight_layout()
@@ -749,9 +758,9 @@ class montage(tree):
         plt.figure(figsize=(10, 8))
         plt.imshow(corr_matrix[:, 1][np.newaxis, :], cmap='viridis', aspect='auto')
         plt.colorbar(label='P-value')
-        plt.title('P-values of Correlation with Cannonical HRF')
+        plt.title('P-values of Correlation with Canonical HRF')
         plt.xlabel('Montage Channels')
-        plt.ylabel('Cannonical HRF')
+        plt.ylabel('Canonical HRF')
         plt.xticks(range(len(self.hbo_channels) + len(self.hbr_channels)), self.hbo_channels + self.hbr_channels, rotation=90)
         plt.yticks(range(1), ['Canonical'])
         plt.tight_layout()
