@@ -68,74 +68,82 @@ def load_montage(json_filename, rich = False, **kwargs):
     _montage.hbo_channels = [ch for ch in ch_names if _is_oxygenated(ch) == True]
     _montage.hbr_channels = [ch for ch in ch_names if _is_oxygenated(ch) == False]
 
-    # Update montage with saved info
+    # Update montage with saved info.
+    # M5: any failure inside the per-entry loop aborts the whole load. The
+    # local _montage is dropped on the exception path so the caller never
+    # sees a half-populated object; no explicit rollback is needed because
+    # _montage and its trees are unreferenced after we raise.
     required_top = ('hrf_mean', 'hrf_std', 'sfreq', 'location', 'context')
     for key, channel in json_contents.items():
-        key_split = key.split('-')
-        doi = key_split.pop()
-        ch_name = '-'.join(key_split)
+        try:
+            key_split = key.split('-')
+            doi = key_split.pop()
+            ch_name = '-'.join(key_split)
 
-        # Skip if canonical HRF
-        if ch_name == 'canonical':
-            continue
+            # Skip if canonical HRF
+            if ch_name == 'canonical':
+                continue
 
-        if not isinstance(channel, dict):
-            raise ValueError(
-                f"load_montage: entry {key!r} must be a JSON object, "
-                f"got {type(channel).__name__}"
-            )
-        for field in required_top:
-            if field not in channel:
+            if not isinstance(channel, dict):
                 raise ValueError(
-                    f"load_montage: entry {key!r} is missing required field "
-                    f"{field!r}"
+                    f"entry {key!r} must be a JSON object, "
+                    f"got {type(channel).__name__}"
                 )
-        if not isinstance(channel['context'], dict):
-            raise ValueError(
-                f"load_montage: entry {key!r} has non-object 'context' field"
-            )
-        if 'duration' not in channel['context']:
-            raise ValueError(
-                f"load_montage: entry {key!r} is missing required field "
-                "'context.duration'"
-            )
-
-        if rich == False:
-            channel['estimates'] = []
-            channel['locations'] = []
-        else:
-            for field in ('estimates', 'locations'):
+            for field in required_top:
                 if field not in channel:
                     raise ValueError(
-                        f"load_montage: entry {key!r} is missing required "
-                        f"field {field!r} (rich=True)"
+                        f"entry {key!r} is missing required field {field!r}"
                     )
+            if not isinstance(channel['context'], dict):
+                raise ValueError(
+                    f"entry {key!r} has non-object 'context' field"
+                )
+            if 'duration' not in channel['context']:
+                raise ValueError(
+                    f"entry {key!r} is missing required field "
+                    "'context.duration'"
+                )
 
-        # create an empty HRF object
-        estimated_hrf = HRF(
-            doi,
-            ch_name,
-            channel['context']['duration'],
-            channel['sfreq'],
-            np.asarray(channel['hrf_mean'], dtype=np.float64),
-            np.asarray(channel['hrf_std'], dtype=np.float64),
-            channel['location'],
-            channel['estimates'],
-            channel['locations']
-        )
+            if rich == False:
+                channel['estimates'] = []
+                channel['locations'] = []
+            else:
+                for field in ('estimates', 'locations'):
+                    if field not in channel:
+                        raise ValueError(
+                            f"entry {key!r} is missing required field "
+                            f"{field!r} (rich=True)"
+                        )
 
-        # Insert hrf into tree and attach pointer to channel
-        oxygenation = _is_oxygenated(ch_name)
-        if oxygenation:
-            _montage.channels[ch_name] = _montage.hbo_tree.insert(estimated_hrf)
-            # Add context to tree
-            for context in _montage.context:
-                _montage.hbo_tree.hasher.add(context, _montage.channels[ch_name])
-        elif oxygenation == False:
-            _montage.channels[ch_name] = _montage.hbr_tree.insert(estimated_hrf)
-            # Add context to tree
-            for context in _montage.context:
-                _montage.hbr_tree.hasher.add(context, _montage.channels[ch_name])
+            # create an empty HRF object
+            estimated_hrf = HRF(
+                doi,
+                ch_name,
+                channel['context']['duration'],
+                channel['sfreq'],
+                np.asarray(channel['hrf_mean'], dtype=np.float64),
+                np.asarray(channel['hrf_std'], dtype=np.float64),
+                channel['location'],
+                channel['estimates'],
+                channel['locations']
+            )
+
+            # Insert hrf into tree and attach pointer to channel
+            oxygenation = _is_oxygenated(ch_name)
+            if oxygenation:
+                _montage.channels[ch_name] = _montage.hbo_tree.insert(estimated_hrf)
+                # Add context to tree
+                for context in _montage.context:
+                    _montage.hbo_tree.hasher.add(context, _montage.channels[ch_name])
+            elif oxygenation == False:
+                _montage.channels[ch_name] = _montage.hbr_tree.insert(estimated_hrf)
+                # Add context to tree
+                for context in _montage.context:
+                    _montage.hbr_tree.hasher.add(context, _montage.channels[ch_name])
+        except Exception as exc:
+            raise ValueError(
+                f"load_montage: failed to load entry {key!r}: {exc}"
+            ) from exc
 
     _montage.sfreq = sfreq # Sampling frequency
 
@@ -206,13 +214,29 @@ class montage(tree):
 
     def __repr__(self):
         """
-        String representation of the montage object
-        
+        String representation of the montage object. Safe to call on both
+        configured and unconfigured instances (H3).
+
         Returns:
             str - String representation of the montage object
         """
-        context_str = '\n'.join([f'{key} - {value} - {self.context_weights[key]}' for key, value in self.context.items()])
-        return f" - Montage object - \nNumber of channels: {len(self.channels)}\n Sampling frequency: {self.sfreq}\nHbO channels (count of {len(self.hbo_channels)}): {self.hbo_channels}\n HbR channels (count of {len(self.hbr_channels)}): {self.hbr_channels}\n - Contexts - \n{context_str}\n"
+        context_str = '\n'.join(
+            f'{key} - {value} - {self.context_weights[key]}'
+            for key, value in self.context.items()
+        )
+        sfreq = getattr(self, 'sfreq', None)
+        hbo_channels = getattr(self, 'hbo_channels', [])
+        hbr_channels = getattr(self, 'hbr_channels', [])
+        configured = getattr(self, 'configured', False)
+        state = 'configured' if configured else 'unconfigured'
+        return (
+            f" - Montage object ({state}) - \n"
+            f"Number of channels: {len(self.channels)}\n"
+            f" Sampling frequency: {sfreq}\n"
+            f"HbO channels (count of {len(hbo_channels)}): {hbo_channels}\n"
+            f" HbR channels (count of {len(hbr_channels)}): {hbr_channels}\n"
+            f" - Contexts - \n{context_str}\n"
+        )
 
     def localize_hrfs(self, max_distance = 0.01, verbose = False):
         """
@@ -462,11 +486,24 @@ class montage(tree):
                     print(f"lstsq exceeded {timeout}s timeout, dropping channel")
                     deconvolved_signal = nirx
                     success = False
+                except Exception as exc:
+                    # Any other solve failure (numpy LinAlgError, ValueError on
+                    # malformed inputs, etc.) should be treated as a channel
+                    # drop, not propagated out of estimate_activity. Matching
+                    # M4's "no orphans after failure" contract — if we let the
+                    # exception escape, the outer loop's cleanup never runs.
+                    print(f"lstsq failed for channel: {type(exc).__name__}: {exc}; dropping channel")
+                    deconvolved_signal = nirx
+                    success = False
 
             return deconvolved_signal # Return recovered neural signal
 
-        # Apply deconvolution and return the nirx object
-        for ch_name, hrf in self.channels.items():
+        # Apply deconvolution and return the nirx object.
+        # Iterate a snapshot of channel names so we can safely pop orphaned
+        # entries inside the loop when deconvolution fails (M4).
+        dropped_channels = []
+        for ch_name in list(self.channels.keys()):
+            hrf = self.channels[ch_name]
             success = None  # reset per channel so stale state can't leak from prior iteration
 
             if 'global' in ch_name: continue # Skip if global hrf estimate
@@ -503,13 +540,29 @@ class montage(tree):
             print(f"Deconvolving channel {ch_name}...") # Apply deconvolution
             nirx_obj.apply_function(deconvolution, picks = [nirx_channel['ch_name']]) # Apply deconvolution for channel
 
-            # Remove channel if neural activity estimation failed to converge
+            # Remove channel if neural activity estimation failed to converge.
+            # M4: also drop the orphaned entry from self.channels and the
+            # hbo/hbr channel lists so downstream iterators (correlate_hrf,
+            # generate_distribution) don't trip on a stale pointer. The
+            # spatial tree copy of the HRF is left in place for now — the
+            # broken tree.delete path is fixed in fix/tree-delete-filter, and
+            # tree orphans are harmless until that lands because nothing in
+            # this release iterates the full tree except montage.branch()
+            # which rebuilds from self.channels.
             if success is False:
                 nirx_obj.drop_channels([nirx_channel['ch_name']])
+                dropped_channels.append(ch_name)
 
             # Replace the canonical HRF estimate temporarily used with the HRF estimate
             if hrf_model == 'canonical':
                 hrf = estimate_hrf # Replace the original HRF
+
+        for ch_name in dropped_channels:
+            self.channels.pop(ch_name, None)
+            if ch_name in self.hbo_channels:
+                self.hbo_channels.remove(ch_name)
+            if ch_name in self.hbr_channels:
+                self.hbr_channels.remove(ch_name)
 
         return nirx_obj
 
@@ -685,11 +738,11 @@ class montage(tree):
         Arguments:
             nirx_obj (mne raw object) - fNIRS scan file loaded in through
             **kwargs - Any context keyword value pair to branch on (i.e. doi, age, etc)
-        
+
         Returns:
             None"""
         print(f"Configuring HRfunc montage...")
-        self.sfreq = nirx_obj.info['sfreq'] # Sampling frequency            
+        self.sfreq = nirx_obj.info['sfreq'] # Sampling frequency
 
         self.hbo_channels = [standardize_name(ch) for ch in nirx_obj.ch_names if _is_oxygenated(ch) == True]
         self.hbr_channels = [standardize_name(ch) for ch in nirx_obj.ch_names if _is_oxygenated(ch) == False]
