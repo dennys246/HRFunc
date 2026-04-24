@@ -109,6 +109,7 @@ Packaging and release mechanics:
 | ID | File | Issue | v2.0.0 branch |
 |----|------|-------|----------------|
 | KI-024 | `hrfunc.py` | `class montage(tree)` inheritance clash with `hbo_tree`/`hbr_tree` composition | `refactor/composition` |
+| — | `hrfunc.py` `estimate_activity` | Return type is `mne.io.Raw` with `hbo`/`hbr` channel types, but data is deconvolved neural activity — type-dispatched downstream tools silently treat it as haemo. Introduce `NeuralActivity` wrapper. | `refactor/neural-activity-output-type` |
 | KI-031 | All modules | No logging infrastructure — `print()` everywhere | `feat/logging` |
 | — | All modules | No type hints; mypy cannot verify much structure | `feat/type-hints` |
 | — | All modules | Magic numbers throughout (`0.01`, `0.128`, `7.81`, `30.0`, `0.1`, `0.2`, `1e-3`, `1e-4`) | `feat/constants` |

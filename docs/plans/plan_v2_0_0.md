@@ -97,6 +97,83 @@ class montage:
 
 ---
 
+### `refactor/neural-activity-output-type`
+
+**Priority:** Pair with `refactor/composition` — both are breaking changes that need to land in the same release. Can be a follow-on branch stacked after composition.
+
+**Motivation:**
+
+`montage.estimate_activity()` currently returns an `mne.io.Raw` object whose channel data contains deconvolved **neural activity**, but whose channel names (`S1_D1 hbo`, `S1_D1 hbr`) and channel types (`'hbo'`, `'hbr'`) still advertise hemoglobin concentration. This is a semantic mismatch:
+
+1. Users saving the output risk interpreting it as HbO/HbR concentration later
+2. Downstream MNE tools that dispatch on channel type (topomaps, group-level GLMs, NIRS-aware visualizations) will accept the object as haemo input and silently produce wrong results
+3. The distinction between "preprocessed haemo" and "deconvolved neural activity" is load-bearing in the scientific workflow but invisible to introspection
+
+Considered and rejected during `fix/observer-and-typos`: a simple channel-name rename (`S1_D1 hbo` → `S1_D1 neural_activity_hbo`). That approach has problems:
+- MNE channel types are a constrained set (`'fnirs_cw_amplitude'`, `'hbo'`, `'hbr'`, `'fnirs_od'`, `'misc'`, etc.); "neural activity" isn't a recognized type
+- Setting type to `'misc'` disables MNE's NIRS-aware utilities
+- Collapsing HbO/HbR into a single label hides useful oxygenation info
+- `montage.channels` dict keys (`s1_d1_hbo`) would no longer match the returned Raw's channel names
+
+**Scope:**
+
+Introduce a lightweight `NeuralActivity` wrapper that composes the underlying MNE Raw with explicit metadata marking the data as deconvolved neural activity. Something like:
+
+```python
+class NeuralActivity:
+    """
+    Returned by montage.estimate_activity(). Wraps an MNE Raw whose channel
+    data contains deconvolved neural activity (not hemoglobin concentration).
+    The underlying Raw keeps its hbo/hbr channel names so montage.channels
+    keys still resolve, but the wrapper type prevents accidental treatment
+    as preprocessed haemo data.
+    """
+
+    def __init__(self, raw, sfreq, source_scan_id=None):
+        self.raw = raw
+        self.sfreq = sfreq
+        self.source_scan_id = source_scan_id
+        # Marker for introspection / round-trip
+        raw.info['description'] = 'hrfunc:neural_activity'
+
+    # Convenience delegates
+    def get_data(self, *a, **kw): return self.raw.get_data(*a, **kw)
+    def save(self, filename, *a, **kw): return self.raw.save(filename, *a, **kw)
+    @property
+    def ch_names(self): return self.raw.ch_names
+    @property
+    def info(self): return self.raw.info
+
+    def __repr__(self):
+        return (f"NeuralActivity(n_channels={len(self.raw.ch_names)}, "
+                f"sfreq={self.sfreq}, source={self.source_scan_id})")
+```
+
+`estimate_activity` then returns a `NeuralActivity` instance. Users who want the raw Raw access `.raw` explicitly.
+
+**Alternative (lighter weight):** Keep returning a Raw but set `raw.info['description'] = 'hrfunc:neural_activity'` so type-check dispatch downstream can opt in to the distinction. No wrapper class, no API surface change. Tradeoff: invisible to introspection unless the user knows to check `info['description']`.
+
+**Breaking changes:**
+- Existing callers that do `deconvolved = montage.estimate_activity(scan); deconvolved.save(...)` continue to work (wrapper delegates)
+- Callers that do `deconvolved.filter(...)` or other Raw methods directly need `.raw.filter(...)`
+- `isinstance(result, mne.io.Raw)` returns False; document in migration guide
+
+**Scope boundary:** This is NOT a channel-name rename. Names stay as `S1_D1 hbo`/`S1_D1 hbr` internally so `montage.channels` keys still map cleanly.
+
+**Review protocol:**
+- API surface review — confirm the wrapper covers every method users legitimately call on the return value (save, get_data, copy, crop, drop_channels, plot)
+- Data Integrity review — verify round-trip save/load preserves the neural-activity marker so re-loaded data can be distinguished from haemo
+
+**Tests:** `tests/test_neural_activity_type.py`:
+- estimate_activity returns NeuralActivity not Raw
+- `.save()` and round-trip `mne.io.read_raw_fif` works (marker preserved in info['description'])
+- `.get_data()` returns identical array to the underlying Raw
+- Migration smoke test: common Raw methods accessible via `.raw`
+
+**Estimated complexity:** Low-medium. The wrapper itself is small; the call-site audit for any downstream code that expects a Raw return is the bigger task.
+
+---
+
 ### `perf/estimate-hrf-batch`
 
 **Priority:** Early — biggest performance win, low risk, standalone.
@@ -523,6 +600,7 @@ Currently `lmbda` is a fixed default (`1e-3` for estimate_hrf, `1e-4` for estima
 1.2.0 ships, validated in real pipeline
 │
 ├── refactor/composition              ← start here, biggest architectural change
+│   ├── refactor/neural-activity-output-type  ← pair with composition, same release
 │   ├── refactor/shared-helpers
 │   │   ├── perf/estimate-hrf-batch
 │   │   └── perf/estimate-activity-parallel
@@ -547,6 +625,7 @@ Branches in the same tier can proceed in parallel if someone wants to split the 
 To be written during `release/2.0.0`. Must cover:
 
 - **`isinstance(m, tree)` returns False now**: use duck-typed methods instead of type checks
+- **`estimate_activity` returns a `NeuralActivity` wrapper, not an `mne.io.Raw`**: `.save()` and `.get_data()` still work directly; for Raw-specific methods, access `.raw`. Rationale: disambiguates deconvolved neural activity from preprocessed HbO/HbR concentration data.
 - **All `print` output is now logging**: users who want the old verbose behavior call `logging.basicConfig(level=logging.DEBUG)`
 - **`estimate_hrf` performance improvement** — same results, much faster
 - **Type hints available** — downstream projects can now `mypy` HRFunc usages
@@ -556,4 +635,4 @@ To be written during `release/2.0.0`. Must cover:
 
 ## Summary
 
-11 branches across architectural, performance, cleanliness, and tooling work. Estimated work unit: 2–4 sessions for the heavy branches (`composition`, `parallel`, `test-suite-restructure`), 1 session each for the rest. Total scope is larger than 1.2.0 but lower risk per branch.
+12 branches across architectural, performance, cleanliness, and tooling work. Estimated work unit: 2–4 sessions for the heavy branches (`composition`, `parallel`, `test-suite-restructure`), 1 session each for the rest. Total scope is larger than 1.2.0 but lower risk per branch.
