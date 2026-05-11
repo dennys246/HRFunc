@@ -324,9 +324,9 @@ class montage(tree):
         
         return estimate
 
-    def estimate_hrf(self, nirx_obj, events, duration = 30.0, lmbda = 1e-3, edge_expansion = 0.15, preprocess = True):
+    def estimate_hrf(self, nirx_obj, events, duration = 30.0, lmbda = 1e-3, edge_expansion = 0.15, preprocess = True, progress_callback = None):
         """
-        Estimate an HRF subject wise given a nirx object and event impulse series using toeplitz 
+        Estimate an HRF subject wise given a nirx object and event impulse series using toeplitz
         deconvolution with regularization.
 
         Arguments:
@@ -336,7 +336,13 @@ class montage(tree):
             lmbda (float) - Regularization parameter to apply during deconvolution
             edge_expansion (float) - Fraction of the duration to expand the events and duration by to account for toeplitz edge artifacts
             preprocess (bool) - If True, preprocess the fNIRS data before estimating the HRF
-        
+            progress_callback (callable or None) - Optional callable invoked at the start of each
+                channel iteration with (current_index, total_channels, channel_name). current_index
+                is 0-indexed; the final iteration is (total_channels - 1, total_channels, name).
+                channel_name is the standardized form (matching self.channels keys) so callers
+                see the same naming convention as estimate_activity. Used by GUI/batch tooling to
+                surface progress; exceptions raised by the callback propagate. Default None (no-op).
+
         Returns:
             None
         """
@@ -399,7 +405,10 @@ class montage(tree):
 
         # Build Toeplitz matrix
         X = scipy.linalg.toeplitz(events, np.zeros(hrf_len))
-        for fnirs_signal, channel in zip(data[:], nirx_obj.info['chs']) : # For each channel
+        total_channels = len(nirx_obj.info['chs'])
+        for i, (fnirs_signal, channel) in enumerate(zip(data[:], nirx_obj.info['chs'])): # For each channel
+            if progress_callback is not None:
+                progress_callback(i, total_channels, standardize_name(channel['ch_name']))
             print(f"Deconvolving HRF from channel {channel}")
             # Grab channel data and normalize
             #Y = fnirs_signal / np.max(np.abs(fnirs_signal))
@@ -430,7 +439,7 @@ class montage(tree):
             optode.locations.append(list(channel['loc'][:3]))
 
 
-    def estimate_activity(self, nirx_obj, lmbda = 1e-4, hrf_model = 'toeplitz', preprocess = True, cond_thresh = None, timeout = 30):
+    def estimate_activity(self, nirx_obj, lmbda = 1e-4, hrf_model = 'toeplitz', preprocess = True, cond_thresh = None, timeout = 30, progress_callback = None):
         """
         Deconvlve a fNIRS scan using estimated HRF's localized to optodes location
         to gain a neural activity estimate
@@ -445,6 +454,11 @@ class montage(tree):
                 Default 30 is a generous ceiling — realistic fNIRS inputs solve in tens of milliseconds,
                 so this fires only on genuinely pathological matrices. Can be tightened once empirical
                 solve-time data is collected from real runs.
+            progress_callback (callable or None) - Optional callable invoked at the start of each
+                channel iteration with (current_index, total_channels, channel_name). current_index
+                is 0-indexed and counts every entry in self.channels including 'global' entries that
+                are skipped internally, so the callback fires exactly total_channels times. Exceptions
+                raised by the callback propagate. Default None (no-op).
 
         Returns:
             nirx_obj (mne raw object) - Raw with deconvolved neural activity, or None if skipped
@@ -521,7 +535,11 @@ class montage(tree):
         # Iterate a snapshot of channel names so we can safely pop orphaned
         # entries inside the loop when deconvolution fails (M4).
         dropped_channels = []
-        for ch_name in list(self.channels.keys()):
+        all_channels = list(self.channels.keys())
+        total_channels = len(all_channels)
+        for i, ch_name in enumerate(all_channels):
+            if progress_callback is not None:
+                progress_callback(i, total_channels, ch_name)
             hrf = self.channels[ch_name]
             success = None  # reset per channel so stale state can't leak from prior iteration
 
