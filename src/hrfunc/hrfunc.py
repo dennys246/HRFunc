@@ -634,7 +634,16 @@ class montage(tree):
             optode.update_centroid()
 
             if plot_dir: # Plot if requested
-                optode.plot(plot_dir)
+                # HRF.plot was refactored to accept a full file path
+                # instead of a directory. Construct the per-channel
+                # filename here and ensure the directory exists.
+                # show=False so cluster / headless runs don't block on
+                # plt.show() and don't keep figure state around between
+                # channels.
+                os.makedirs(plot_dir, exist_ok=True)
+                plot_path = os.path.join(plot_dir, f"{optode.ch_name}_hrf.png")
+                optode.plot(plot_path, show=False)
+                plt.close('all')
             
             if optode.oxygenation: # Append data
                 hbo_estimates.append(optode.trace)
