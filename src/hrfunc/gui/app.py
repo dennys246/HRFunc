@@ -95,23 +95,49 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 def _register_pages() -> None:
     """Register all `@ui.page` handlers.
 
-    Sprint 2.1 ships only the placeholder root page. Sprint 2.2 replaces it
-    with the real welcome page; Sprint 2.3 adds /workspace. Page imports are
-    lazy so reloading individual modules during development picks up changes
+    Sprint 2.2 ships the real welcome page at ``/`` plus minimal stubs for
+    ``/workspace`` (Sprint 2.3 replaces) and ``/library`` (Sprint 4 replaces).
+    Page modules are imported lazily so dev-mode reloading picks up changes
     without restarting the NiceGUI server.
     """
     from nicegui import ui
 
+    from .pages import welcome
     from .theme import apply_theme, page_container
 
-    @ui.page("/")
-    def _placeholder_root_page() -> None:
+    welcome.register()
+
+    @ui.page("/workspace")
+    def _workspace_stub() -> None:
+        apply_theme()
+        from .state import state
+        with page_container():
+            ui.label("Workspace").classes("text-4xl font-bold")
+            if state.manifest is not None:
+                ui.label(
+                    f"Loaded {len(state.manifest.scans)} scans from {state.manifest.root}"
+                ).classes("text-lg opacity-80")
+            else:
+                ui.label("No dataset loaded.").classes("text-lg opacity-60")
+            ui.label("Full workspace UI lands in Sprint 2.3.").classes(
+                "text-sm opacity-50 mt-4"
+            )
+            ui.button("Back to welcome", on_click=lambda: ui.navigate.to("/")).props(
+                "flat color=primary"
+            )
+
+    @ui.page("/library")
+    def _library_stub() -> None:
         apply_theme()
         with page_container():
-            ui.label("HRFunc").classes("text-5xl font-bold")
+            ui.label("HRF Library").classes("text-4xl font-bold")
             ui.label(
-                "Sprint 2.1 placeholder. The welcome screen lands in Sprint 2.2."
+                "Browse the bundled literature-derived HRF databases. "
+                "Full library browser lands in Sprint 4."
             ).classes("text-lg opacity-80")
+            ui.button("Back to welcome", on_click=lambda: ui.navigate.to("/")).props(
+                "flat color=primary"
+            )
 
 
 def _find_free_port() -> int:
