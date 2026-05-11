@@ -27,13 +27,23 @@ dependencies = [
     "platformdirs>=3.0",
     ]
 
+[project.optional-dependencies]
+gui = [
+    "nicegui>=2.0",
+    "plotly>=5.18",
+    "pywebview>=5.0",
+    ]
+
+[project.scripts]
+hrfunc = "hrfunc.gui.app:main"
+
 [project.urls]
 Homepage = "https://github.com/dennys246/hrfunc"
 Documentation = "https://www.hrfunc.org"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["hrfunc", "hrfunc.io"]
+packages = ["hrfunc", "hrfunc.io", "hrfunc.gui"]
 include-package-data = true
 
 [tool.pytest.ini_options]
