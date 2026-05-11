@@ -51,6 +51,14 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# auto mode lets pytest-asyncio recognize async fixtures (like NiceGUI's
+# User fixture) without requiring per-fixture asyncio markers. Only affects
+# tests that are themselves async; sync tests are unaffected.
+asyncio_mode = "auto"
+# NiceGUI's User fixture needs a main_file it can import to bootstrap the
+# app and discover page routes. tests/gui_main.py imports hrfunc.gui.app
+# and calls _register_pages() — minimal shim, not collected as a test.
+main_file = "tests/gui_main.py"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests requiring real fNIRS data files",
