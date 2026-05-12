@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Optional
 
 from nicegui import background_tasks, ui
 
-from ..components import dataset_tree
+from ..components import dataset_tree, preprocess_panel
 from ..state import AppState, state as global_state
 from ..theme import apply_theme
 from ...io.manifest import ScanEntry
@@ -80,8 +80,16 @@ def _render(state: AppState) -> None:
 
     Split from the page handler so tests can call it with a synthetic
     state without going through NiceGUI's routing layer.
+
+    Event-bus subscriptions are scoped to a single workspace render. We
+    clear ``state.subscribers`` here so that navigating away and back
+    doesn't accumulate dead refreshable handles pointing at the previous
+    DOM. Each tab's render method re-subscribes during this render. If
+    future sprints add subscribers from outside the workspace page, this
+    cleanup needs a more selective approach.
     """
     apply_theme()
+    state.subscribers.clear()
     _render_toolbar()
 
     if state.manifest is None or not state.manifest.scans:
@@ -166,31 +174,31 @@ def _render_left_pane(state: AppState) -> None:
                 "text-xs font-mono opacity-70 break-all"
             )
         dataset_tree.render(
-            state, on_select_scan=lambda _scan: _refresh_inspector(state)
+            state, on_select_scan=lambda scan: _on_scan_selected(state, scan)
         )
 
 
-def _refresh_inspector(state: AppState) -> None:
-    """Refresh the Inspect tab body and kick off a background Raw load if needed.
+def _on_scan_selected(state: AppState, scan: Optional[ScanEntry]) -> None:
+    """Publish ``scan_selected`` and kick off a background Raw load if needed.
 
-    Two paths:
-    - Always re-runs the Inspect body so the metadata section reflects the
-      newly-selected scan immediately.
-    - If a scan is selected and its Raw is not yet cached, dispatches a
-      background load via ``nicegui.background_tasks.create``. When that
-      load finishes, ``_load_scan_raw`` re-refreshes the body — but only
-      if the user is still on the same scan (path-equality check, since
-      a new Manifest scan can produce a new ScanEntry object for the same
-      file).
+    Dataset-tree clicks reach the workspace via this single function, which
+    has two responsibilities:
+
+    1. Fan the selection out to subscribers (Inspect tab, Preprocess tab,
+       and any future panel that reacts to selection) by publishing
+       ``"scan_selected"``.
+    2. If a scan is selected and its Raw is not yet cached, schedule a
+       background load. When that load completes, ``_load_scan_raw``
+       publishes ``"scan_loaded"`` so panels can react to the now-available
+       Raw — typically by re-rendering the section that depends on it.
+
+    The path-equality check in ``_load_scan_raw`` (not done here) ensures
+    that if the user clicks A then B before A loads, A's late completion
+    does NOT publish a stale ``scan_loaded`` for A.
     """
-    refresh = getattr(state, "_inspect_refresh", None)
-    if refresh is not None:
-        refresh()
+    state.publish("scan_selected", scan)
 
-    scan = state.selected_scan
-    if scan is None:
-        return
-    if scan in state.raw_cache:
+    if scan is None or scan in state.raw_cache:
         return
     background_tasks.create(_load_scan_raw(state, scan))
 
@@ -203,9 +211,10 @@ async def _load_scan_raw(state: AppState, scan: ScanEntry) -> None:
     wire up), and rapid scan navigation should not be blocked by that gate
     or affect the estimation progress indicator.
 
-    After the load completes (or fails), the Inspect body is refreshed only
-    if the user is still inspecting the same scan — compared by path, not
-    object identity, so a fresh ScanEntry from a re-scan still matches.
+    After the load completes (or fails), publishes ``"scan_loaded"`` so
+    subscribers can react — but only if the user is still inspecting the
+    same scan. Equality is by path, not object identity, so a fresh
+    ScanEntry from a re-scan still matches.
     """
     loop = asyncio.get_event_loop()
     try:
@@ -215,12 +224,11 @@ async def _load_scan_raw(state: AppState, scan: ScanEntry) -> None:
             f"Failed to load scan: {type(exc).__name__}: {exc}"
         )
         logger.exception("Failed to load scan %s", scan.path)
+        return
 
     current = state.selected_scan
     if current is not None and current.path == scan.path:
-        refresh = getattr(state, "_inspect_refresh", None)
-        if refresh is not None:
-            refresh()
+        state.publish("scan_loaded", scan)
 
 
 # ---------------------------------------------------------------------------
@@ -251,11 +259,13 @@ def _render_tab_panel(name: str, state: AppState) -> None:
     if name == "Inspect":
         _render_inspect_tab(state)
         return
+    if name == "Preprocess":
+        preprocess_panel.render(state)
+        return
 
     # Map each placeholder tab to the sprint that fills it in.
     next_sprint = {
         "Quality": "Sprint 4 (lens-module wrapper)",
-        "Preprocess": "Sprint 3 (preprocess panel)",
         "HRFs": "Sprint 3 (estimate panel + HRF gallery)",
         "Activity": "Sprint 3 (estimate-activity panel)",
         "HRtree": "Sprint 4 (plotly 3D explorer)",
@@ -272,10 +282,10 @@ def _render_tab_panel(name: str, state: AppState) -> None:
 def _render_inspect_tab(state: AppState) -> None:
     """Inspect tab — Metadata + Recording sections, refreshable on scan change.
 
-    Wraps ``_render_inspect_body`` in ``ui.refreshable`` and stashes the
-    resulting refresher on ``state._inspect_refresh`` so dataset-tree
-    clicks and background-load completions can drive a re-render without
-    rebuilding the whole workspace.
+    Wraps ``_render_inspect_body`` in ``ui.refreshable`` and subscribes the
+    resulting refresher to the event bus so dataset-tree clicks
+    (``scan_selected``) and background-load completions (``scan_loaded``)
+    drive a re-render without rebuilding the whole workspace.
     """
 
     @ui.refreshable
@@ -283,11 +293,15 @@ def _render_inspect_tab(state: AppState) -> None:
         _render_inspect_body(state)
 
     _body()
-    # Stash the refresher on the state so external callers (the dataset-tree
-    # click handler and the async Raw loader) can trigger a re-render. Sprint
-    # 3.2 should formalize this as an event bus once a second subscriber
-    # (the Preprocess tab) joins.
-    state._inspect_refresh = _body.refresh  # type: ignore[attr-defined]
+
+    # Subscribe the refreshable to scan-state events. ``_render`` clears the
+    # subscriber list at the top of each workspace render, so this is safe to
+    # call once per render without accumulating duplicates.
+    def _refresh(_payload=None):
+        _body.refresh()
+
+    state.subscribe("scan_selected", _refresh)
+    state.subscribe("scan_loaded", _refresh)
 
 
 def _render_inspect_body(state: AppState) -> None:

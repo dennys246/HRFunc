@@ -13,28 +13,57 @@ Lifecycle:
   to these fields and re-render on changes.
 
 What lives here:
-- `manifest`           - last folder scan result (None until a scan completes)
-- `selected_scan`      - currently inspected ScanEntry, or None
-- `raw_cache`          - hot-path LRU(3) loader of MNE Raw objects
-- `preload_path`       - CLI arg from `hrfunc <path>`; consumed by welcome page on first render
-- `busy`               - True while a background task is running (drives spinner UI)
-- `estimation_progress`- (current, total, channel_name) tuple from the latest
-                         progress_callback fire; None when no estimation is in flight
-- `last_error`         - last error message surfaced to the user, or None
+- `manifest`             - last folder scan result (None until a scan completes)
+- `selected_scan`        - currently inspected ScanEntry, or None
+- `raw_cache`            - hot-path LRU(3) loader of source MNE Raw objects
+- `processed_cache`      - LRU(3) of *preprocessed* Raw objects (Sprint 3.2);
+                           HRFs / Activity tabs read from here
+- `preload_path`         - CLI arg from `hrfunc <path>`; consumed by welcome
+                           page on first render
+- `busy`                 - True while a background task is running (drives
+                           spinner UI); gate for estimation, NOT for scan loads
+- `estimation_progress`  - (current, total, channel_name) tuple from the latest
+                           progress_callback fire; None when no estimation in flight
+- `last_error`           - last error message surfaced to the user, or None
+- `subscribers`          - event-bus dispatch table (Sprint 3.2); see
+                           ``subscribe`` / ``publish``
+
+Event bus (Sprint 3.2):
+The bus replaces the Sprint 2.3-era ``_inspect_refresh`` private attribute.
+Panels subscribe to named events and are called when other parts of the GUI
+publish. The bus is dict-of-lists, deliberately minimal — no priorities, no
+async dispatch, no payload schemas. Defined events:
+
+- ``"scan_selected"``  — payload: ``ScanEntry`` (or None for deselection).
+  Published when the dataset tree updates ``state.selected_scan``.
+- ``"scan_loaded"``    — payload: ``ScanEntry``. Published after a background
+  Raw load completes successfully; subscribers can read the Raw from
+  ``state.raw_cache``.
+- ``"preprocess_done"`` — payload: ``ScanEntry``. Published after a successful
+  preprocess run; subscribers can read the processed Raw from
+  ``state.processed_cache``.
+
+Subscribers are sync callables. Async handlers can dispatch via
+``nicegui.background_tasks.create`` from inside their callback.
 
 Fields are added (not removed) as later sprints integrate more state. Keeping
 the AppState surface stable across sprints means GUI components written in
-Sprint 2 won't need updates as Sprint 3+ panels land.
+earlier sprints don't need updates as later panels land.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..io.manifest import Manifest, ScanEntry
 from ..io.raw_cache import RawCache
+
+logger = logging.getLogger(__name__)
+
+EventCallback = Callable[..., None]
 
 
 @dataclass
@@ -48,25 +77,77 @@ class AppState:
     manifest: Optional[Manifest] = None
     selected_scan: Optional[ScanEntry] = None
     raw_cache: RawCache = field(default_factory=RawCache)
+    processed_cache: RawCache = field(default_factory=RawCache)
     preload_path: Optional[Path] = None
     busy: bool = False
     estimation_progress: Optional[Tuple[int, int, str]] = None
     last_error: Optional[str] = None
+    subscribers: Dict[str, List[EventCallback]] = field(default_factory=dict)
+
+    def subscribe(self, event: str, callback: EventCallback) -> None:
+        """Register ``callback`` to be called on ``publish(event, ...)``.
+
+        Multiple subscribers per event are supported and called in
+        registration order. Re-subscribing the same callable for the same
+        event adds a duplicate registration — callers responsible for
+        avoiding duplicate registration if they re-run their setup
+        (e.g. ``ui.refreshable`` bodies should subscribe once at module
+        scope, not inside the refreshable function).
+        """
+        self.subscribers.setdefault(event, []).append(callback)
+
+    def unsubscribe(self, event: str, callback: EventCallback) -> bool:
+        """Remove ``callback`` from ``event``'s subscriber list.
+
+        Returns True if a registration was removed, False if no matching
+        registration was found. Removes only one registration per call
+        (matching the first occurrence) so duplicate registrations from
+        accidental re-subscription require multiple unsubscribe calls.
+        """
+        callbacks = self.subscribers.get(event)
+        if not callbacks:
+            return False
+        try:
+            callbacks.remove(callback)
+            return True
+        except ValueError:
+            return False
+
+    def publish(self, event: str, *args: Any, **kwargs: Any) -> None:
+        """Call every subscriber of ``event`` with the given args.
+
+        Subscriber exceptions are logged and swallowed so one buggy panel
+        cannot break event delivery to the others. This matches the GUI's
+        broader "errors go to state.last_error, not the user's view" stance.
+        """
+        for callback in list(self.subscribers.get(event, [])):
+            try:
+                callback(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "Subscriber %r raised on event %r: %s",
+                    callback, event, exc,
+                )
 
     def reset(self) -> None:
         """Return to the welcome-screen state.
 
         Used when the user closes the current project / switches datasets.
-        Drops cached Raws so memory is released. The RawCache instance is
-        kept (not reassigned) so any references held elsewhere stay valid.
+        Drops cached Raws (both source and processed) so memory is released.
+        The RawCache instances are kept (not reassigned) so any references
+        held elsewhere stay valid. Event subscribers are also cleared —
+        a fresh dataset is a clean slate and old subscribers may point at
+        widgets that no longer exist.
         """
         self.manifest = None
         self.selected_scan = None
         self.raw_cache.clear()
+        self.processed_cache.clear()
         self.preload_path = None
         self.busy = False
         self.estimation_progress = None
         self.last_error = None
+        self.subscribers.clear()
 
 
 # Module-level singleton. Page handlers and components import this directly.
