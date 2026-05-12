@@ -7,6 +7,7 @@ HRFunc is a Python library for estimating hemodynamic response functions and neu
 
 - [Features](#features)
 - [Installation](#installation)
+- [Desktop GUI](#desktop-gui)
 - [Quickstart](#quickstart)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
@@ -22,6 +23,7 @@ HRFunc is a Python library for estimating hemodynamic response functions and neu
 - ✅ Fast computations with NumPy + SciPy
 - ✅ Supports group-level aggregation
 - ✅ Neural activity estimation for block task and resting state scans
+- ✅ Native desktop GUI for point-and-click workflows (v1.3.0+)
 
 ---
 
@@ -35,6 +37,51 @@ pip install hrfunc
 
 If you need to install Python, check out this great guide for installing it on your operating system
 -> https://realpython.com/installing-python/
+
+To install the optional desktop GUI alongside the library:
+
+```bash
+pip install hrfunc[gui]
+```
+
+---
+
+## Desktop GUI ##
+
+v1.3.0 ships a NiceGUI-based desktop app for researchers who prefer
+point-and-click over Python. The same library powers the GUI under the
+hood, so analyses produced from the GUI are equivalent to those from
+the programmatic API.
+
+Launch the GUI:
+
+```bash
+hrfunc                          # opens the welcome screen
+hrfunc /path/to/study           # preloads a folder of scans
+hrfunc subject_01.snirf         # preloads a single scan
+```
+
+The workspace exposes seven tabs that mirror the analysis pipeline:
+
+1. **Inspect** — preview channel list, 2D probe layout, and event
+   annotations for the selected scan.
+2. **Preprocess** — run `preprocess_fnirs` with the canonical pipeline
+   (OD → SCI → bad-channel interpolation → TDDR → Beer-Lambert →
+   baseline correct → bandpass) plus optional diagnostic toggles.
+3. **HRFs** — estimate per-channel HRFs via toeplitz deconvolution, or
+   render an SPM-style canonical reference.
+4. **Activity** — deconvolve neural-activity time series from the
+   preprocessed scan using either your estimated HRFs or the bundled
+   canonical library.
+5. **Quality / HRtree / Export** — placeholders, landing in Sprints 4
+   and 5.
+
+A 3-pane workspace with a BIDS-aware dataset tree on the left, tabbed
+analysis surface in the middle, and a manifest summary on the right.
+
+For the full walkthrough — including installation troubleshooting,
+caching behavior, scan-mismatch guards, and tab-by-tab usage — see
+[docs/external/gui_guide.md](docs/external/gui_guide.md).
 
 ---
 

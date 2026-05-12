@@ -386,6 +386,9 @@ def _run(
         if result is None:
             return
         state.montage = result
+        # Track which scan produced this montage so the Activity tab can
+        # refuse a toeplitz run when the user switches scans mid-flow.
+        state.montage_source_scan = scan
         state.publish("hrf_estimated", scan)
 
     background_tasks.create(

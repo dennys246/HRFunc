@@ -4,3 +4,29 @@
 
 ## v1.1.1
 - Exposed the preprocess_fnirs function in the library
+
+## v1.3.0
+- New: NiceGUI-based desktop GUI installed via `pip install hrfunc[gui]`
+- New: `hrfunc` console script launches the GUI; `hrfunc <path>` preloads
+- New: 3-path welcome screen (Open my data / Browse HRF library /
+  Recent projects) with XDG-cache-backed recent-folder list
+- New: BIDS-aware dataset tree with case-insensitive substring filter
+- New: Inspect tab — channel list, 2D probe layout, event-annotation
+  table; loads MNE Raw lazily via an in-memory LRU(3) cache
+- New: Preprocess tab — full pipeline button + diagnostic stage toggles
+  + before/after preview; results stored in a separate `processed_cache`
+- New: HRFs tab — toeplitz deconvolution with multi-event picker,
+  log-scale lambda slider, duration field, progress bar; canonical
+  mode renders an SPM-style double-gamma reference HRF
+- New: Activity tab — toeplitz (reuses estimated HRFs) and canonical
+  (uses bundled HRF library) modes; lens.plot_nirx-style overlay
+  preview with event markers
+- New: Cross-component event bus (`scan_selected`, `scan_loaded`,
+  `preprocess_done`, `hrf_estimated`, `activity_estimated`) for panel
+  reactivity
+- New: Folder-scan I/O subsystem (`hrfunc.io.scan_folder`,
+  `classify_path`, `RawCache`) reusable from the Python API
+- New: `progress_callback` kwarg added to `montage.estimate_hrf` and
+  `montage.estimate_activity` for non-GUI progress tracking
+- See [docs/external/gui_guide.md](docs/external/gui_guide.md) for the
+  full GUI walkthrough and troubleshooting guide
