@@ -183,10 +183,13 @@ async def test_welcome_page_shows_version_in_footer(user: User):
 
 
 @pytest.mark.asyncio
-async def test_library_stub_renders(user: User):
+async def test_library_page_renders(user: User):
+    """Sprint 4.4 replaced the inline /library stub with the real Library
+    page; this test asserts the toolbar + a filter-pane header so the
+    welcome-flow test file knows /library is reachable."""
     await user.open("/library")
     await user.should_see("HRF Library")
-    await user.should_see("Full library browser lands in Sprint 4")
+    await user.should_see("Filter")
 
 
 # ---------------------------------------------------------------------------

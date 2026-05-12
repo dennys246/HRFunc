@@ -128,6 +128,22 @@ class AppState:
     # views Quality for the current scan, or in bulk during the dataset-wide
     # aggregate run.
     quality_metrics: Dict[Path, Dict[str, Any]] = field(default_factory=dict)
+    # Lazy-loaded bundled HRF databases for the /library page (Sprint 4.2-4.4).
+    # Tree objects from ``hrfunc.hrtree.tree``. Populated on first /library
+    # visit; never cleared (the data is read-only from disk so re-loading
+    # would just re-read the same files). Typed Any to keep the GUI import
+    # graph free of hrfunc.hrtree at module load.
+    library_hbo: Optional[Any] = None
+    library_hbr: Optional[Any] = None
+    # Current context filter state for the Library page. Keys are context
+    # field names ('task', 'doi', 'demographics', ...). Empty dict = no
+    # filter applied. The Library page rebuilds the visible HRF list from
+    # the filter every render.
+    library_filter: Dict[str, Any] = field(default_factory=dict)
+    # Currently-selected HRF on the Library page (from a click in the
+    # plotly viz or a manual list selection). Stored as the gathered-form
+    # dict (the value type produced by ``tree.gather``), or None.
+    library_selected_hrf: Optional[Dict[str, Any]] = None
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -196,6 +212,11 @@ class AppState:
         self.montage_source_scan = None
         self.activity_raw = None
         self.quality_metrics.clear()
+        # Note: library_hbo / library_hbr are deliberately NOT cleared by
+        # reset(). They hold immutable bundled data loaded once per process;
+        # re-loading on every dataset switch would burn ~100 ms unnecessarily.
+        self.library_filter.clear()
+        self.library_selected_hrf = None
 
 
 # Module-level singleton. Page handlers and components import this directly.
