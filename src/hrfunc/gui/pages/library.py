@@ -404,16 +404,42 @@ def _kv(key: str, value: str) -> None:
 def gather_library_hrfs(state: AppState) -> Dict[str, Dict[str, Any]]:
     """Combine the HbO + HbR trees into a single name → HRF-dict map.
 
-    Returns empty dict if the trees aren't loaded. Each value is the
-    gathered-form dict produced by ``tree.gather``.
+    Returns empty dict if the trees aren't loaded.
+
+    Two filters applied while merging:
+
+    1. **Global sentinels excluded.** ``montage.estimate_hrf`` and friends
+       seed every Montage with ``global_hbo`` / ``global_hbr`` placeholder
+       entries at the sentinel location ``[~360, ~360, ~360]`` (out-of-
+       MNI-range so they don't collide with real optodes — see
+       ``montage._merge_montages`` and ``tree.get_canonical_hrf``). Those
+       entries leak into the bundled HRF databases when a researcher
+       saves their montage. They have no business in the user-facing
+       library browser, and at ``[360, 360, 360]`` they dominate
+       plotly's ``aspectmode="data"`` axis range, compressing the real
+       optode cluster (~0.07 m) to a single invisible pixel. Skip
+       anything whose key starts with ``global_``.
+    2. **Re-keyed by oxygenation prefix.** The bundled HbO and HbR
+       JSONs share at least one key (``s8_d4_hbr-temp`` appears in
+       both — community-contributed entries can be duplicated across
+       files). A plain ``dict.update`` would silently drop one copy on
+       collision. Prefixing with ``hbo:`` / ``hbr:`` preserves both
+       oxygenation flavors even when their optode-pair keys match.
     """
     out: Dict[str, Dict[str, Any]] = {}
-    for tree_obj in (state.library_hbo, state.library_hbr):
+    for tree_obj, prefix in (
+        (state.library_hbo, "hbo:"),
+        (state.library_hbr, "hbr:"),
+    ):
         if tree_obj is None:
             continue
         hrfs = tree_obj.gather(tree_obj.root)
-        if hrfs:
-            out.update(hrfs)
+        if not hrfs:
+            continue
+        for key, hrf in hrfs.items():
+            if key.startswith("global_"):
+                continue
+            out[f"{prefix}{key}"] = hrf
     return out
 
 
