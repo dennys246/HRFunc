@@ -347,3 +347,73 @@ class TestRunInBackground:
 
         asyncio.run(run_in_background(s, lambda: "hello", on_done=_on_done))
         assert captured == ["hello"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: ui.run kwargs must compose with the installed NiceGUI
+# ---------------------------------------------------------------------------
+
+
+class TestUiRunKwargs:
+    """Sprint 2.1 shipped ``ui.run(show_welcome_message_on_startup=False)``
+    — that kwarg doesn't exist on the real NiceGUI ``Config.__init__``.
+    Tests using the User fixture intercept ``ui.run`` and never validate
+    the kwargs against the real signature, so the bug shipped to v1.3.0
+    and only surfaced when researchers actually launched ``hrfunc`` from
+    the installed shortcut. This test introspects the live signature so
+    a future kwarg drift breaks CI instead of breaking users."""
+
+    def test_every_ui_run_kwarg_we_pass_is_valid(self):
+        import inspect
+
+        from nicegui import ui
+
+        from hrfunc.gui import app
+
+        # Pull the kwargs string out of _launch_gui's source. Cheap parser:
+        # find the `ui.run(` call and pull every `keyword=...` token before
+        # the closing paren. Resilient to formatting changes.
+        source = inspect.getsource(app._launch_gui)
+        marker = "ui.run("
+        start = source.index(marker) + len(marker)
+        # Match the closing paren by walking the source character-by-character
+        # with a paren counter. Avoids regex pitfalls with nested tuples
+        # like ``window_size=(1400, 900)``.
+        depth = 1
+        end = start
+        while end < len(source) and depth > 0:
+            ch = source[end]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            end += 1
+        call_args = source[start:end - 1]
+
+        # Extract keyword names (before the `=` on each comma-separated arg).
+        kwarg_names = []
+        depth = 0
+        token = ""
+        for ch in call_args + ",":
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if ch == "," and depth == 0:
+                bit = token.strip()
+                if "=" in bit:
+                    name = bit.split("=", 1)[0].strip()
+                    if name and name.isidentifier():
+                        kwarg_names.append(name)
+                token = ""
+            else:
+                token += ch
+
+        sig = inspect.signature(ui.run)
+        valid = set(sig.parameters)
+        unknown = [k for k in kwarg_names if k not in valid]
+        assert not unknown, (
+            f"_launch_gui passes ui.run kwargs that aren't in the installed "
+            f"NiceGUI's Config.__init__ signature: {unknown}. "
+            f"Check the NiceGUI changelog for renamed/removed parameters."
+        )
