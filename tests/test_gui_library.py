@@ -278,91 +278,135 @@ class TestBuildPlotlyFigure:
 # ---------------------------------------------------------------------------
 
 
-class TestBrainMeshLoader:
-    """The bundled fsaverage pial mesh ships in `hrfunc.assets` as a .npz so
-    no fsaverage download is required at runtime. Verify the asset loads,
-    contains the expected arrays in the right shapes, and is cached on
-    second call."""
+class TestMeshLoader:
+    """The bundled fsaverage meshes (pial cortical + outer-skin scalp)
+    ship in ``hrfunc.assets`` as .npz files so no fsaverage download is
+    required at runtime. Both layers are independently togglable."""
 
-    def test_load_returns_vertices_and_faces_arrays(self):
-        # Clear any cached state from prior tests
-        library._BRAIN_MESH = None
-        result = library.load_brain_mesh()
+    def test_load_pial_returns_arrays(self):
+        library._MESH_CACHE.clear()
+        result = library.load_mesh("pial")
         assert result is not None
         verts, faces = result
-        # decimate_surface(quadric, n_triangles=2500 per hemisphere) → ~2500
-        # verts + 5000 faces total after stitching the two hemispheres.
         assert verts.shape[1] == 3
         assert faces.shape[1] == 3
-        # Reasonable bounds — should be tens of thousands of triangles max.
         assert 1_000 < verts.shape[0] < 50_000
-        assert 1_000 < faces.shape[0] < 100_000
 
-    def test_vertex_coords_in_mni_meter_scale(self):
-        """Bundled mesh is converted from mm → m during the build script so
-        it overlays directly on bundled HRF locations (which are in meters
-        too). If a future build accidentally ships mm-scale verts, plotly's
-        aspectmode=data would blow up the axis range — exactly the bug that
-        had us showing only 2 globals in PR #38."""
-        library._BRAIN_MESH = None
-        verts, _ = library.load_brain_mesh()
-        # Human head fits in a ~0.2m cube; mm-scale would blow this past 100.
-        max_abs = float(abs(verts).max())
-        assert max_abs < 1.0, f"verts max-abs={max_abs} looks like mm scale"
+    def test_load_scalp_returns_arrays(self):
+        library._MESH_CACHE.clear()
+        result = library.load_mesh("scalp")
+        assert result is not None
+        verts, faces = result
+        assert verts.shape[1] == 3
+        assert faces.shape[1] == 3
+        assert 1_000 < verts.shape[0] < 50_000
 
-    def test_load_is_cached_on_second_call(self):
-        library._BRAIN_MESH = None
-        a = library.load_brain_mesh()
-        b = library.load_brain_mesh()
-        assert a is b  # same tuple object reused
+    def test_unknown_layer_returns_none(self):
+        library._MESH_CACHE.clear()
+        result = library.load_mesh("not-a-real-layer")
+        assert result is None
+
+    def test_both_layers_in_mni_meter_scale(self):
+        """Same defensive bound that caught the 360-meter globals bug —
+        if a future mesh rebuild ships mm-scale verts by mistake,
+        plotly's aspectmode=data would blow up the visible range and
+        compress the HRF cluster to a single pixel."""
+        library._MESH_CACHE.clear()
+        for layer in ("pial", "scalp"):
+            verts, _ = library.load_mesh(layer)
+            max_abs = float(abs(verts).max())
+            assert max_abs < 1.0, (
+                f"{layer}: verts max-abs={max_abs} looks like mm scale"
+            )
+
+    def test_per_layer_caching(self):
+        library._MESH_CACHE.clear()
+        a = library.load_mesh("pial")
+        b = library.load_mesh("pial")
+        assert a is b
+        scalp = library.load_mesh("scalp")
+        assert scalp is not a  # different layer, different object
+
+    def test_load_brain_mesh_alias_points_at_scalp(self):
+        """Back-compat shim: callers that still import ``load_brain_mesh``
+        now get the scalp layer (which is the user-visible default)."""
+        library._MESH_CACHE.clear()
+        result = library.load_brain_mesh()
+        scalp = library.load_mesh("scalp")
+        assert result is scalp
 
 
-class TestBrainOverlayInFigure:
-    """``build_plotly_figure(hrfs, show_brain=...)`` adds a Mesh3d trace
-    only when the toggle is on, and adds it as the FIRST trace so the
-    HRF scatter renders on top of the brain surface."""
+class TestOverlaysInFigure:
+    """``build_plotly_figure`` has two independent overlay toggles —
+    ``show_brain`` (cortical pial) and ``show_scalp`` (outer-skin
+    head). Each adds a Mesh3d trace; the order is scalp first, brain
+    second, HRF scatter on top, so the painter-order produces nested
+    anatomy with the markers visible above everything."""
 
-    def test_no_brain_trace_when_toggle_off(self):
-        hrfs = {
-            "hbo:a": {"location": [0.01, 0.02, 0.03], "oxygenation": True, "context": {}},
-        }
-        fig = library.build_plotly_figure(hrfs, show_brain=False)
-        # Only HbO trace, no Mesh3d
-        assert len(fig.data) == 1
-        assert fig.data[0].type == "scatter3d"
-
-    def test_brain_trace_added_first_when_toggle_on(self):
-        hrfs = {
+    def _hrfs(self):
+        return {
             "hbo:a": {"location": [0.01, 0.02, 0.03], "oxygenation": True, "context": {}},
             "hbr:a": {"location": [-0.01, 0.02, 0.03], "oxygenation": False, "context": {}},
         }
-        library._BRAIN_MESH = None  # force a fresh load
-        fig = library.build_plotly_figure(hrfs, show_brain=True)
-        # Mesh first so HRF scatter renders on top of the brain.
-        assert len(fig.data) == 3
-        assert fig.data[0].type == "mesh3d"
-        assert fig.data[0].name == "MNI brain"
-        assert fig.data[1].type == "scatter3d"  # HbO
-        assert fig.data[2].type == "scatter3d"  # HbR
 
-    def test_brain_trace_hides_from_legend_and_hover(self):
-        hrfs = {"hbo:a": {"location": [0.0, 0.0, 0.0], "oxygenation": True, "context": {}}}
-        fig = library.build_plotly_figure(hrfs, show_brain=True)
-        brain = fig.data[0]
-        assert brain.showlegend is False
-        assert brain.hoverinfo == "skip"
+    def test_no_overlays_when_both_off(self):
+        library._MESH_CACHE.clear()
+        fig = library.build_plotly_figure(
+            self._hrfs(), show_brain=False, show_scalp=False
+        )
+        assert len(fig.data) == 2
+        assert {t.type for t in fig.data} == {"scatter3d"}
+
+    def test_brain_only(self):
+        library._MESH_CACHE.clear()
+        fig = library.build_plotly_figure(
+            self._hrfs(), show_brain=True, show_scalp=False
+        )
+        names = [t.name for t in fig.data]
+        assert names == ["MNI brain", "HbO", "HbR"]
+
+    def test_scalp_only(self):
+        library._MESH_CACHE.clear()
+        fig = library.build_plotly_figure(
+            self._hrfs(), show_brain=False, show_scalp=True
+        )
+        names = [t.name for t in fig.data]
+        assert names == ["MNI head", "HbO", "HbR"]
+
+    def test_both_overlays_correct_painter_order(self):
+        """Scalp drawn first so it's the outermost in painter order;
+        brain nests inside; HRF scatter renders on top of both."""
+        library._MESH_CACHE.clear()
+        fig = library.build_plotly_figure(
+            self._hrfs(), show_brain=True, show_scalp=True
+        )
+        names = [t.name for t in fig.data]
+        assert names == ["MNI head", "MNI brain", "HbO", "HbR"]
+
+    def test_overlays_hidden_from_legend_and_hover(self):
+        library._MESH_CACHE.clear()
+        fig = library.build_plotly_figure(
+            self._hrfs(), show_brain=True, show_scalp=True
+        )
+        for mesh in fig.data[:2]:
+            assert mesh.type == "mesh3d"
+            assert mesh.showlegend is False
+            assert mesh.hoverinfo == "skip"
 
 
-class TestStateLibraryShowBrain:
-    def test_default_off(self):
+class TestStateLibraryOverlays:
+    def test_both_default_on(self):
         s = AppState()
-        assert s.library_show_brain is False
+        assert s.library_show_brain is True
+        assert s.library_show_scalp is True
 
-    def test_reset_clears_toggle(self):
+    def test_reset_restores_both_to_default_on(self):
         s = AppState()
-        s.library_show_brain = True
+        s.library_show_brain = False
+        s.library_show_scalp = False
         s.reset()
-        assert s.library_show_brain is False
+        assert s.library_show_brain is True
+        assert s.library_show_scalp is True
 
 
 # ---------------------------------------------------------------------------
