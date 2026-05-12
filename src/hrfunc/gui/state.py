@@ -61,6 +61,10 @@ async dispatch, no payload schemas. Defined events:
 - ``"activity_estimated"`` — payload: ``ScanEntry``. Published after a
   successful ``estimate_activity`` run; subscribers can read the deconvolved
   Raw from ``state.activity_raw``.
+- ``"quality_computed"`` — payload: ``ScanEntry`` or ``None``. Published
+  after a Quality-panel metrics computation finishes (per-scan: ScanEntry;
+  dataset-wide aggregate: None). Subscribers can read
+  ``state.quality_metrics`` for the results.
 
 Subscribers are sync callables. Async handlers can dispatch via
 ``nicegui.background_tasks.create`` from inside their callback.
@@ -116,6 +120,14 @@ class AppState:
     # Typed Any for the same import-graph reason. The Activity panel reads
     # the data + annotations for the lens-style preproc/deconv overlay plot.
     activity_raw: Optional[Any] = None
+    # Per-scan quality metrics (Sprint 4.1). Keyed by ``ScanEntry.path.resolve()``;
+    # each value is a dict {"raw": metrics_dict, "preprocessed": metrics_dict,
+    # "deconvolved": metrics_dict}. Each metrics_dict contains numeric summaries
+    # (snr_mean, skew_mean, kurtosis_mean, sci_mean when applicable). Entries
+    # appear as the Quality panel computes them — either per-scan when the user
+    # views Quality for the current scan, or in bulk during the dataset-wide
+    # aggregate run.
+    quality_metrics: Dict[Path, Dict[str, Any]] = field(default_factory=dict)
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -183,6 +195,7 @@ class AppState:
         self.montage = None
         self.montage_source_scan = None
         self.activity_raw = None
+        self.quality_metrics.clear()
 
 
 # Module-level singleton. Page handlers and components import this directly.
