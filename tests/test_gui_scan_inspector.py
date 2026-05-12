@@ -262,8 +262,11 @@ async def test_workspace_recording_section_shows_channels_when_cached(
 
 
 class TestLoadScanRaw:
-    def test_refresh_fires_when_scan_unchanged(self, tmp_path, monkeypatch):
-        """After load, refresh fires only if state.selected_scan still matches by path."""
+    """``_load_scan_raw`` publishes ``scan_loaded`` only when the user is still
+    on the same scan, identified by path-equality (not object identity, so a
+    fresh ScanEntry from a re-scan still counts as 'the same scan')."""
+
+    def test_publishes_scan_loaded_when_scan_unchanged(self, tmp_path, monkeypatch):
         scan = ScanEntry(
             format="snirf",
             path=tmp_path / "x.snirf",
@@ -278,24 +281,23 @@ class TestLoadScanRaw:
 
         fake_raw = _make_fake_raw()
 
-        # Stub raw_cache.get so we don't hit disk; insert directly into cache.
         def fake_get(scan_or_path):
             state.raw_cache._cache[scan.path.resolve()] = fake_raw
             return fake_raw
 
         monkeypatch.setattr(state.raw_cache, "get", fake_get)
 
-        refresh_calls = []
-        state._inspect_refresh = lambda: refresh_calls.append(1)  # type: ignore
+        published = []
+        state.subscribe("scan_loaded", lambda payload: published.append(payload))
 
         asyncio.run(workspace._load_scan_raw(state, scan))
 
         assert scan in state.raw_cache
-        # Refresh fires because state.selected_scan path still matches.
-        assert refresh_calls == [1]
+        assert len(published) == 1
+        assert published[0].path == scan.path
 
-    def test_refresh_skipped_when_scan_changed(self, tmp_path, monkeypatch):
-        """User navigated away mid-load → no stale refresh."""
+    def test_scan_loaded_skipped_when_scan_changed(self, tmp_path, monkeypatch):
+        """User navigated away mid-load → no stale scan_loaded for old scan."""
         scan_a = ScanEntry(
             format="snirf",
             path=tmp_path / "a.snirf",
@@ -324,13 +326,13 @@ class TestLoadScanRaw:
 
         monkeypatch.setattr(state.raw_cache, "get", fake_get)
 
-        refresh_calls = []
-        state._inspect_refresh = lambda: refresh_calls.append(1)  # type: ignore
+        published = []
+        state.subscribe("scan_loaded", lambda payload: published.append(payload))
 
         asyncio.run(workspace._load_scan_raw(state, scan_a))
 
-        # Load completed but user is on scan_b now → no stale refresh.
-        assert refresh_calls == []
+        # Load completed but user is on scan_b now → no stale event for A.
+        assert published == []
 
     def test_path_equality_match_when_object_changed(self, tmp_path, monkeypatch):
         """A re-scan can produce a new ScanEntry object for the same path —
@@ -355,15 +357,15 @@ class TestLoadScanRaw:
 
         monkeypatch.setattr(state.raw_cache, "get", fake_get)
 
-        refresh_calls = []
-        state._inspect_refresh = lambda: refresh_calls.append(1)  # type: ignore
+        published = []
+        state.subscribe("scan_loaded", lambda payload: published.append(payload))
 
         asyncio.run(workspace._load_scan_raw(state, scan))
 
-        # Path matches even though objects differ → refresh fires.
-        assert refresh_calls == [1]
+        # Path matches even though objects differ → event fires.
+        assert len(published) == 1
 
-    def test_load_failure_sets_last_error(self, tmp_path, monkeypatch):
+    def test_load_failure_sets_last_error_and_no_event(self, tmp_path, monkeypatch):
         scan = ScanEntry(format="snirf", path=tmp_path / "x.snirf", display_name="x")
         from hrfunc.gui.state import AppState
         from hrfunc.io.raw_cache import RawCache
@@ -376,14 +378,17 @@ class TestLoadScanRaw:
             raise FileNotFoundError("nope")
 
         monkeypatch.setattr(state.raw_cache, "get", fake_get)
-        # No refresher attached — the helper should still tolerate the
-        # absence and just record the error.
+
+        published = []
+        state.subscribe("scan_loaded", lambda payload: published.append(payload))
+
         asyncio.run(workspace._load_scan_raw(state, scan))
 
         assert state.last_error is not None
         assert "FileNotFoundError" in state.last_error
-        # Cache is untouched
+        # Cache is untouched and no event fired for a failed load.
         assert scan not in state.raw_cache
+        assert published == []
 
 
 # ---------------------------------------------------------------------------
