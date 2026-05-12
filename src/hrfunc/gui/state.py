@@ -161,6 +161,11 @@ class AppState:
     # cortex-relative position is the scientifically meaningful one.
     library_show_brain: bool = True
     library_show_scalp: bool = True
+    # Oxygenation filter for the /library viz. ``"both"`` (default)
+    # shows HbO + HbR; ``"hbo"`` / ``"hbr"`` hide the other channel.
+    # Researchers often want to inspect one haemoglobin at a time;
+    # the toggle lets them do that without writing a context filter.
+    library_oxygenation: str = "both"
     # ROI selection on the /library viz. Two ways to add HRFs to the
     # ROI, used in combination:
     #
@@ -261,6 +266,7 @@ class AppState:
         # context overlays when they re-enter the library page.
         self.library_show_brain = True
         self.library_show_scalp = True
+        self.library_oxygenation = "both"
         self.library_roi_radius_m = 0.02
         self.library_roi_painted.clear()
         self.hrf_selected_channel = None

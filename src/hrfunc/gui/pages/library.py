@@ -312,7 +312,10 @@ def _render_filter_pane(state: AppState) -> None:
         @ui.refreshable
         def _count_label() -> None:
             all_hrfs = gather_library_hrfs(state)
-            matched = apply_filter(all_hrfs, state.library_filter)
+            matched = filter_by_oxygenation(
+                apply_filter(all_hrfs, state.library_filter),
+                state.library_oxygenation,
+            )
             visualizable = sum(
                 1
                 for hrf in matched.values()
@@ -370,6 +373,23 @@ def _render_filter_pane(state: AppState) -> None:
             "Translucent fsaverage scalp (outer-skin) surface — where "
             "forehead/head-mounted fNIRS optodes physically sit."
         )
+
+        # ── Oxygenation filter. Radio rather than a switch because
+        # there are three meaningful states (both / HbO only / HbR
+        # only) and a switch wouldn't surface the third.
+        ui.label("Show oxygenation").classes(
+            "text-xs uppercase opacity-60 tracking-wide"
+        )
+
+        def _on_oxygenation_change(event) -> None:
+            state.library_oxygenation = event.value or "both"
+            state.publish("library_filter_changed", state.library_filter)
+
+        ui.radio(
+            {"both": "Both", "hbo": "HbO only", "hbr": "HbR only"},
+            value=state.library_oxygenation,
+            on_change=_on_oxygenation_change,
+        ).props("inline dense")
 
         # ── Region-of-Interest controls. Anchor is set by clicking an
         # HRF in the viz; the radius slider sweeps neighbours into the
@@ -430,7 +450,10 @@ def _render_viz_pane(state: AppState) -> None:
     @ui.refreshable
     def _viz_body() -> None:
         all_hrfs = gather_library_hrfs(state)
-        matched = apply_filter(all_hrfs, state.library_filter)
+        matched = filter_by_oxygenation(
+            apply_filter(all_hrfs, state.library_filter),
+            state.library_oxygenation,
+        )
 
         if not all_hrfs:
             with ui.column().classes("p-6 gap-2"):
@@ -698,7 +721,10 @@ def _render_roi_average(state: AppState) -> None:
     if anchor is None:
         return
     all_hrfs = gather_library_hrfs(state)
-    matched = apply_filter(all_hrfs, state.library_filter)
+    matched = filter_by_oxygenation(
+        apply_filter(all_hrfs, state.library_filter),
+        state.library_oxygenation,
+    )
     roi_keys = compute_roi_keys(
         matched,
         anchor,
@@ -811,6 +837,29 @@ def gather_library_hrfs(state: AppState) -> Dict[str, Dict[str, Any]]:
                 continue
             out[f"{prefix}{key}"] = hrf
     return out
+
+
+def filter_by_oxygenation(
+    hrfs: Dict[str, Dict[str, Any]],
+    mode: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Filter HRFs by oxygenation channel.
+
+    Args:
+        hrfs: name → HRF-dict map (post-context-filter).
+        mode: ``"both"`` returns unchanged; ``"hbo"`` keeps only HRFs
+            with ``oxygenation is True``; ``"hbr"`` keeps only HRFs
+            with ``oxygenation is False``. Unknown mode strings
+            fall through as ``"both"`` so a typo doesn't blank the
+            entire viz.
+
+    Module-level so tests can hit it without spinning up the GUI.
+    """
+    if mode == "hbo":
+        return {k: v for k, v in hrfs.items() if v.get("oxygenation") is True}
+    if mode == "hbr":
+        return {k: v for k, v in hrfs.items() if v.get("oxygenation") is False}
+    return dict(hrfs)
 
 
 def apply_filter(
@@ -1134,9 +1183,10 @@ def compute_roi_average(
     Module-level so tests can call without a UI.
     """
     import numpy as np
+    from collections import Counter
 
-    traces = []
-    canonical_len: Optional[int] = None
+    # First pass: parse every candidate trace into a numpy array.
+    candidates: List[np.ndarray] = []
     for key in roi_keys:
         hrf = hrfs.get(key)
         if hrf is None:
@@ -1150,11 +1200,21 @@ def compute_roi_average(
             continue
         if arr.size == 0:
             continue
-        if canonical_len is None:
-            canonical_len = arr.shape[0]
-        if arr.shape[0] != canonical_len:
-            continue
-        traces.append(arr)
+        candidates.append(arr)
+
+    if len(candidates) < 2:
+        return None
+
+    # Pick the MODAL length as the canonical one rather than the first
+    # iterated one. ``roi_keys`` is typically a set (no order
+    # guarantees), and taking the first-seen length means an outlier
+    # length could throw out the majority. Modal length is robust to
+    # iteration order and matches what a researcher would expect:
+    # "average the traces that share the typical duration; skip the
+    # oddball".
+    lengths = Counter(arr.shape[0] for arr in candidates)
+    canonical_len = lengths.most_common(1)[0][0]
+    traces = [arr for arr in candidates if arr.shape[0] == canonical_len]
 
     if len(traces) < 2:
         return None

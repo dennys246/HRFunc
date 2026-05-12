@@ -167,4 +167,4 @@ async def test_prompt_skipped_when_pyshortcuts_unavailable(
 
     await user.open("/")
     # No crash; welcome cards still visible.
-    await user.should_see("Open my data")
+    await user.should_see("Estimate hemodynamics")

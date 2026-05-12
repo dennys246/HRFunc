@@ -108,14 +108,16 @@ def _render_background_image() -> None:
         logger.debug("welcome background unavailable: %s", exc)
         return
 
-    # Opacity 0.08 is high enough to read the silhouette but low enough
-    # not to compete with the welcome cards' content. Adjust later if
-    # researchers find it too prominent or too subtle.
+    # Opacity 0.22 — visible enough that researchers see the figure
+    # silhouette behind the cards (which gives the welcome page a sense
+    # of place) but still subtle enough not to compete with the
+    # foreground content. Pair with translucent cards (below) so the
+    # background actually shows through where it matters.
     ui.image(bg_path).style(
         "position: fixed; inset: 0; "
         "width: 100vw; height: 100vh; "
         "object-fit: cover; "
-        "opacity: 0.08; "
+        "opacity: 0.22; "
         "pointer-events: none; "
         "z-index: 0;"
     )
@@ -197,12 +199,22 @@ def _render_header() -> None:
 
 
 def _render_cards(state: AppState) -> None:
+    # NiceGUI's ``.on("click", handler)`` awaits the handler if it is
+    # itself a coroutine function. Wrapping an ``async def`` in a sync
+    # lambda hides the coroutine-function-ness — NiceGUI sees a sync
+    # callable, invokes it, gets back a coroutine that's never awaited,
+    # and the click silently no-ops. So the open-data handler is
+    # bound as a bare coroutine-function (no lambda wrapping); the
+    # other handlers are sync and stay as lambdas.
+    async def _on_estimate_hemodynamics() -> None:
+        await _handle_open_my_data(state)
+
     with ui.grid(columns=3).classes("w-full gap-6"):
         _card(
-            label="Open my data",
+            label="Estimate hemodynamics",
             description="Pick a folder of fNIRS scans. Estimate or localize HRFs against the literature database.",
             icon="folder_open",
-            on_click=lambda: _handle_open_my_data(state),
+            on_click=_on_estimate_hemodynamics,
         )
         _card(
             label="Browse HRF library",
@@ -219,10 +231,25 @@ def _render_cards(state: AppState) -> None:
 
 
 def _card(label: str, description: str, icon: str, on_click) -> None:
-    """One welcome-screen card. Buttons styled as Quasar cards for visual weight."""
-    with ui.card().classes(
-        "p-6 cursor-pointer hover:bg-slate-800 transition-colors h-full"
-    ).on("click", on_click):
+    """One welcome-screen card. Buttons styled as Quasar cards for visual weight.
+
+    Translucent background + backdrop blur let the page's background image
+    show through behind the card without sacrificing text legibility.
+    """
+    card = (
+        ui.card()
+        .classes(
+            "p-6 cursor-pointer transition-colors h-full "
+            "hover:!bg-slate-700"
+        )
+        .style(
+            "background: rgba(15, 23, 42, 0.55); "
+            "backdrop-filter: blur(3px); "
+            "-webkit-backdrop-filter: blur(3px);"
+        )
+        .on("click", on_click)
+    )
+    with card:
         with ui.column().classes("gap-3 h-full"):
             ui.icon(icon, size="3rem").classes("text-primary")
             ui.label(label).classes("text-2xl font-semibold")

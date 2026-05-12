@@ -183,7 +183,7 @@ async def test_welcome_page_shows_brand_header(user: User):
 @pytest.mark.asyncio
 async def test_welcome_page_shows_three_cards(user: User):
     await user.open("/")
-    await user.should_see("Open my data")
+    await user.should_see("Estimate hemodynamics")
     await user.should_see("Browse HRF library")
     await user.should_see("Recent projects")
 
