@@ -33,8 +33,13 @@ What lives here:
                            selected scan does NOT clear it, so users can
                            switch tabs and come back without losing results
                            — but a new estimation overwrites the field
-                           regardless of which scan it came from. Sprint 3.4
-                           may upgrade to per-scan storage.
+                           regardless of which scan it came from.
+- `activity_raw`         - most recent deconvolved Raw from the Activity tab
+                           (Sprint 3.4); the output of ``estimate_activity``
+                           which mutates a copy of the preprocessed Raw and
+                           returns it with neural-activity values in place
+                           of haemoglobin values. None until run at least
+                           once; cleared on reset.
 
 Event bus (Sprint 3.2, extended in 3.3):
 The bus replaces the Sprint 2.3-era ``_inspect_refresh`` private attribute.
@@ -53,6 +58,9 @@ async dispatch, no payload schemas. Defined events:
 - ``"hrf_estimated"``   — payload: ``ScanEntry``. Published after a successful
   ``estimate_hrf`` (or canonical HRF generation); subscribers can read the
   resulting Montage from ``state.montage``.
+- ``"activity_estimated"`` — payload: ``ScanEntry``. Published after a
+  successful ``estimate_activity`` run; subscribers can read the deconvolved
+  Raw from ``state.activity_raw``.
 
 Subscribers are sync callables. Async handlers can dispatch via
 ``nicegui.background_tasks.create`` from inside their callback.
@@ -98,6 +106,16 @@ class AppState:
     # avoid pulling hrfunc.hrfunc into the GUI import graph at module load —
     # the GUI must stay importable without MNE for tests that disable it.
     montage: Optional[Any] = None
+    # Scan that produced the current ``montage`` (Sprint 3.4). The Activity tab
+    # uses this to refuse toeplitz-mode estimation when the user has switched
+    # to a different scan since estimate_hrf ran — applying scan A's HRFs to
+    # scan B's Raw would silently produce wrong results because the library
+    # matches by channel name, not by scan identity.
+    montage_source_scan: Optional[ScanEntry] = None
+    # Deconvolved Raw from the most recent estimate_activity call (Sprint 3.4).
+    # Typed Any for the same import-graph reason. The Activity panel reads
+    # the data + annotations for the lens-style preproc/deconv overlay plot.
+    activity_raw: Optional[Any] = None
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -163,6 +181,8 @@ class AppState:
         self.last_error = None
         self.subscribers.clear()
         self.montage = None
+        self.montage_source_scan = None
+        self.activity_raw = None
 
 
 # Module-level singleton. Page handlers and components import this directly.
