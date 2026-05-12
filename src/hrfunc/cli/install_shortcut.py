@@ -74,12 +74,18 @@ class UninstallResult:
 
 
 def icon_path() -> Optional[Path]:
-    """Return the absolute path to the bundled executable icon.
+    """Return the absolute path to the bundled executable PNG icon.
 
     The icon ships inside the installed ``hrfunc`` package at
     ``hrfunc/assets/executable_icon.png``. Returns None if the file is
     somehow missing (e.g. a broken install) so callers can fall back to
     pyshortcuts' generic default icon rather than crashing.
+
+    macOS callers should prefer :func:`mac_icon_path` — pyshortcuts copies
+    the source PNG verbatim into ``HRfunc.app/Contents/Resources/HRfunc
+    .icns`` without converting, but macOS Finder requires the real
+    IconFamily byte format (``Mac OS X icon``) and silently falls back to
+    the generic app icon when the magic bytes don't match.
     """
     try:
         from importlib import resources
@@ -110,6 +116,65 @@ def icon_path() -> Optional[Path]:
         "shortcut will use pyshortcuts' default icon."
     )
     return None
+
+
+def mac_icon_path() -> Optional[Path]:
+    """Return a real ``.icns`` converted from the bundled PNG.
+
+    pyshortcuts' macOS path copies the icon source verbatim into
+    ``HRfunc.app/Contents/Resources/HRfunc.icns``. If the source is a
+    PNG (which ours is), macOS Finder silently shows the generic app
+    icon because the file's magic bytes don't match the IconFamily
+    format Finder expects despite the ``.icns`` extension.
+
+    This helper produces a properly-formatted ``.icns`` via Pillow
+    (which ships with the haematology pipeline's matplotlib dep so
+    it's already in the gui-extras transitive closure). Returns None
+    on any failure — caller falls back to passing the PNG to
+    pyshortcuts, which gives the user the same generic-icon UX they
+    had pre-conversion (no regression, just no improvement).
+
+    The output is written to a cache directory inside the bundle's
+    install location so repeated installs don't keep regenerating it
+    in ``/tmp``.
+    """
+    source = icon_path()
+    if source is None:
+        return None
+
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning(
+            "Pillow unavailable; falling back to PNG icon (macOS Finder "
+            "will show the generic app icon). Install Pillow with "
+            "`pip install Pillow` or use the gui extras to fix."
+        )
+        return None
+
+    # Cache the converted .icns next to the source PNG so we don't
+    # regenerate it on every install. ``executable_icon.icns`` lives in
+    # the same hrfunc.assets directory but is generated, not version-
+    # controlled — the package_data wildcard ships both formats.
+    target = source.with_suffix(".icns")
+    if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
+        return target
+
+    try:
+        img = Image.open(source)
+        # Pillow's ICNS encoder requires RGBA + a size from the supported
+        # icon ladder (16, 32, 64, 128, 256, 512, 1024). Our source is
+        # 500×500 — Pillow handles the resize internally when writing
+        # the multi-resolution bundle.
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+        img.save(target, format="ICNS")
+        return target
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "PNG → ICNS conversion failed (%s); falling back to PNG.", exc
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -165,15 +230,25 @@ def install_shortcut(
             ),
         )
 
-    icon = icon_path()
-    icon_arg = str(icon) if icon is not None else None
-
     # Per-OS placement defaults — see docstring for the rationale.
     is_mac = platform.system() == "Darwin"
     if desktop is None:
         desktop = True if is_mac else False
     if startmenu is None:
         startmenu = False if is_mac else True
+
+    # On macOS, hand pyshortcuts a real ICNS (converted from our source
+    # PNG via Pillow). pyshortcuts copies the source verbatim into the
+    # .app bundle without converting; macOS Finder needs real IconFamily
+    # bytes, not a PNG-with-an-icns-extension, to render the icon.
+    icon = mac_icon_path() if is_mac else icon_path()
+    if icon is None:
+        # Either the package is broken (no source PNG) or Pillow's ICNS
+        # conversion failed on macOS. Fall back to the raw PNG so
+        # pyshortcuts has *something* to copy — the user gets a generic
+        # icon instead of an unhelpful crash.
+        icon = icon_path()
+    icon_arg = str(icon) if icon is not None else None
 
     try:
         pyshortcuts.make_shortcut(

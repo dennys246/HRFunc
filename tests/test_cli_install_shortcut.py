@@ -41,6 +41,47 @@ class TestIconPath:
         assert path.stat().st_size > 0
 
 
+class TestMacIconPath:
+    """``mac_icon_path`` converts our bundled PNG to a real macOS ICNS
+    file. pyshortcuts copies whatever we hand it verbatim into the .app
+    bundle's Resources directory; without conversion, Finder shows the
+    generic app icon because the file's magic bytes don't match the
+    IconFamily format despite the .icns extension."""
+
+    def test_produces_real_icns_file(self, tmp_path):
+        """The converted file must have the macOS IconFamily magic bytes
+        (``icns`` at offset 0), not PNG magic bytes."""
+        result = ish.mac_icon_path()
+        assert result is not None
+        assert result.exists()
+        assert result.suffix == ".icns"
+        # Validate magic bytes — the IconFamily format starts with `icns`.
+        with open(result, "rb") as f:
+            magic = f.read(4)
+        assert magic == b"icns", (
+            f"expected macOS IconFamily magic 'icns', got {magic!r}; "
+            f"this means the file is not a real .icns (likely a PNG with "
+            f"a renamed extension) and macOS Finder will show the generic "
+            f"app icon."
+        )
+
+    def test_pillow_missing_returns_none(self, monkeypatch):
+        """Without Pillow, the helper degrades gracefully (caller falls
+        back to the PNG)."""
+        import sys
+        monkeypatch.setitem(sys.modules, "PIL", None)
+        monkeypatch.setitem(sys.modules, "PIL.Image", None)
+        result = ish.mac_icon_path()
+        assert result is None
+
+    def test_no_source_png_returns_none(self, monkeypatch):
+        """If the source PNG is somehow missing, the helper can't
+        convert anything and returns None."""
+        monkeypatch.setattr(ish, "icon_path", lambda: None)
+        result = ish.mac_icon_path()
+        assert result is None
+
+
 # ---------------------------------------------------------------------------
 # Result dataclasses
 # ---------------------------------------------------------------------------
