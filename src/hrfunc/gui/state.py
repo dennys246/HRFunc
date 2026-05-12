@@ -144,6 +144,12 @@ class AppState:
     # plotly viz or a manual list selection). Stored as the gathered-form
     # dict (the value type produced by ``tree.gather``), or None.
     library_selected_hrf: Optional[Dict[str, Any]] = None
+    # Channel name selected for the HRF gallery's detail-pane focus
+    # (Sprint 5.1). Sprint 3.3 rendered all channel HRFs overlaid on one
+    # plot; Sprint 5 replaces that with a clickable grid + a per-channel
+    # full-detail view. None = no channel focused yet (grid renders, no
+    # detail view).
+    hrf_selected_channel: Optional[str] = None
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -217,6 +223,7 @@ class AppState:
         # re-loading on every dataset switch would burn ~100 ms unnecessarily.
         self.library_filter.clear()
         self.library_selected_hrf = None
+        self.hrf_selected_channel = None
 
 
 # Module-level singleton. Page handlers and components import this directly.

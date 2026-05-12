@@ -44,6 +44,7 @@ from nicegui import background_tasks, ui
 from ..components import (
     activity_panel,
     dataset_tree,
+    export_panel,
     hrf_panel,
     preprocess_panel,
     quality_panel,
@@ -277,11 +278,13 @@ def _render_tab_panel(name: str, state: AppState) -> None:
     if name == "Quality":
         quality_panel.render(state)
         return
+    if name == "Export":
+        export_panel.render(state)
+        return
 
     # Map each placeholder tab to the sprint that fills it in.
     next_sprint = {
-        "HRtree": "Sprint 4 (plotly 3D explorer)",
-        "Export": "Sprint 5 (export panel)",
+        "HRtree": "Sprint 4 (plotly 3D explorer at /library)",
     }.get(name, "a future sprint")
 
     with ui.column().classes("p-6 gap-2"):
