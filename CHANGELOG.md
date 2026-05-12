@@ -47,5 +47,10 @@
   macOS, Start menu on Windows, Activities on Linux) so non-coder
   researchers can open HRfunc like any other desktop app. First GUI
   launch prompts the user to install the shortcut automatically.
+- New: "Show MNI brain" toggle on the `/library` HRtree explorer —
+  overlays a translucent fsaverage pial surface beneath the HRF
+  scatter for spatial context. Mesh is bundled in the wheel
+  (~2.5k verts / 5k tris in MNI-meter coords) so no fsaverage
+  download is required.
 - See [docs/external/gui_guide.md](docs/external/gui_guide.md) for the
   full GUI walkthrough and troubleshooting guide

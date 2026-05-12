@@ -297,6 +297,13 @@ oxygenation visibility from the plotly legend.
   full context dict and a trace preview.
 - **Rotate / zoom / pan** — standard plotly 3D controls (drag to
   rotate, scroll to zoom, shift-drag to pan).
+- **Show MNI brain** (toggle in the filter pane's Overlay section) —
+  adds a translucent fsaverage pial surface beneath the HRF scatter
+  for spatial context. The mesh is a low-poly fsaverage surface
+  (~2.5k vertices, ~5k triangles) bundled in the wheel so no
+  fsaverage download is required. Coordinates are in MNI-meter space
+  matching the bundled HRF locations, so the overlay aligns directly
+  without a transform. Toggle resets to off when the project resets.
 
 HRFs without a recorded 3D location are excluded from the viz rather
 than clustered at the origin (the spatial display only makes sense for

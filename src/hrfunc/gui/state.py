@@ -150,6 +150,11 @@ class AppState:
     # full-detail view. None = no channel focused yet (grid renders, no
     # detail view).
     hrf_selected_channel: Optional[str] = None
+    # Toggle for the MNI fsaverage-pial brain overlay on the /library
+    # plotly viz. Default off — researchers who just want to scan the
+    # HRF cloud get an unobstructed view; toggling on adds the brain
+    # surface as a translucent Mesh3d trace beneath the HRF scatter.
+    library_show_brain: bool = False
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -223,6 +228,7 @@ class AppState:
         # re-loading on every dataset switch would burn ~100 ms unnecessarily.
         self.library_filter.clear()
         self.library_selected_hrf = None
+        self.library_show_brain = False
         self.hrf_selected_channel = None
 
 

@@ -274,6 +274,98 @@ class TestBuildPlotlyFigure:
 
 
 # ---------------------------------------------------------------------------
+# MNI brain overlay
+# ---------------------------------------------------------------------------
+
+
+class TestBrainMeshLoader:
+    """The bundled fsaverage pial mesh ships in `hrfunc.assets` as a .npz so
+    no fsaverage download is required at runtime. Verify the asset loads,
+    contains the expected arrays in the right shapes, and is cached on
+    second call."""
+
+    def test_load_returns_vertices_and_faces_arrays(self):
+        # Clear any cached state from prior tests
+        library._BRAIN_MESH = None
+        result = library.load_brain_mesh()
+        assert result is not None
+        verts, faces = result
+        # decimate_surface(quadric, n_triangles=2500 per hemisphere) → ~2500
+        # verts + 5000 faces total after stitching the two hemispheres.
+        assert verts.shape[1] == 3
+        assert faces.shape[1] == 3
+        # Reasonable bounds — should be tens of thousands of triangles max.
+        assert 1_000 < verts.shape[0] < 50_000
+        assert 1_000 < faces.shape[0] < 100_000
+
+    def test_vertex_coords_in_mni_meter_scale(self):
+        """Bundled mesh is converted from mm → m during the build script so
+        it overlays directly on bundled HRF locations (which are in meters
+        too). If a future build accidentally ships mm-scale verts, plotly's
+        aspectmode=data would blow up the axis range — exactly the bug that
+        had us showing only 2 globals in PR #38."""
+        library._BRAIN_MESH = None
+        verts, _ = library.load_brain_mesh()
+        # Human head fits in a ~0.2m cube; mm-scale would blow this past 100.
+        max_abs = float(abs(verts).max())
+        assert max_abs < 1.0, f"verts max-abs={max_abs} looks like mm scale"
+
+    def test_load_is_cached_on_second_call(self):
+        library._BRAIN_MESH = None
+        a = library.load_brain_mesh()
+        b = library.load_brain_mesh()
+        assert a is b  # same tuple object reused
+
+
+class TestBrainOverlayInFigure:
+    """``build_plotly_figure(hrfs, show_brain=...)`` adds a Mesh3d trace
+    only when the toggle is on, and adds it as the FIRST trace so the
+    HRF scatter renders on top of the brain surface."""
+
+    def test_no_brain_trace_when_toggle_off(self):
+        hrfs = {
+            "hbo:a": {"location": [0.01, 0.02, 0.03], "oxygenation": True, "context": {}},
+        }
+        fig = library.build_plotly_figure(hrfs, show_brain=False)
+        # Only HbO trace, no Mesh3d
+        assert len(fig.data) == 1
+        assert fig.data[0].type == "scatter3d"
+
+    def test_brain_trace_added_first_when_toggle_on(self):
+        hrfs = {
+            "hbo:a": {"location": [0.01, 0.02, 0.03], "oxygenation": True, "context": {}},
+            "hbr:a": {"location": [-0.01, 0.02, 0.03], "oxygenation": False, "context": {}},
+        }
+        library._BRAIN_MESH = None  # force a fresh load
+        fig = library.build_plotly_figure(hrfs, show_brain=True)
+        # Mesh first so HRF scatter renders on top of the brain.
+        assert len(fig.data) == 3
+        assert fig.data[0].type == "mesh3d"
+        assert fig.data[0].name == "MNI brain"
+        assert fig.data[1].type == "scatter3d"  # HbO
+        assert fig.data[2].type == "scatter3d"  # HbR
+
+    def test_brain_trace_hides_from_legend_and_hover(self):
+        hrfs = {"hbo:a": {"location": [0.0, 0.0, 0.0], "oxygenation": True, "context": {}}}
+        fig = library.build_plotly_figure(hrfs, show_brain=True)
+        brain = fig.data[0]
+        assert brain.showlegend is False
+        assert brain.hoverinfo == "skip"
+
+
+class TestStateLibraryShowBrain:
+    def test_default_off(self):
+        s = AppState()
+        assert s.library_show_brain is False
+
+    def test_reset_clears_toggle(self):
+        s = AppState()
+        s.library_show_brain = True
+        s.reset()
+        assert s.library_show_brain is False
+
+
+# ---------------------------------------------------------------------------
 # Click extraction
 # ---------------------------------------------------------------------------
 
