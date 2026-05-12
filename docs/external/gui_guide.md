@@ -33,12 +33,32 @@ hrfunc                       # opens to the welcome screen
 hrfunc /path/to/study        # opens with that folder pre-loaded
 hrfunc subject_01.snirf      # opens with a single file pre-loaded
 hrfunc --version             # prints version and exits
-hrfunc --help                # shows CLI help
+hrfunc --help                # shows CLI help (also: hrfunc help)
 ```
 
 There is no `--gui` flag. The bare `hrfunc` command is reserved as the
 GUI entry; future library subcommands (e.g. `hrfunc estimate`) will be
 added as positional commands.
+
+### System menu integration
+
+After your first `hrfunc` launch, the welcome screen offers to add
+HRFunc to your system menu so you can open it without the terminal.
+"Yes, add it" puts a clickable launcher in Spotlight (macOS), the
+Start menu (Windows), or Activities (Linux); "Not now" defers the
+question to the next launch; "Don't ask again" silences the prompt
+without installing.
+
+You can also manage the shortcut from the command line at any time:
+
+```bash
+hrfunc install-shortcut      # add HRFunc to your system menu
+hrfunc uninstall-shortcut    # remove the system menu entry
+```
+
+The shortcut points at the same `hrfunc` console script the welcome
+prompt would have installed, so the user experience after install is
+identical no matter which path you took.
 
 ---
 

@@ -61,6 +61,16 @@ hrfunc /path/to/study           # preloads a folder of scans
 hrfunc subject_01.snirf         # preloads a single scan
 ```
 
+On first launch HRFunc offers to add itself to your system menu
+(Spotlight on macOS, Start menu on Windows, Activities on Linux) so
+you can open it without the terminal afterward. You can also run the
+install manually at any time:
+
+```bash
+hrfunc install-shortcut         # add HRFunc to your system menu
+hrfunc uninstall-shortcut       # remove it
+```
+
 The workspace exposes seven tabs that mirror the analysis pipeline:
 
 1. **Inspect** — preview channel list, 2D probe layout, and event

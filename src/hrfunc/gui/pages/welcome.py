@@ -70,10 +70,83 @@ async def _render(state: AppState) -> None:
         _render_cards(state)
         _render_footer()
 
+    # First-launch shortcut prompt — show a one-time dialog asking the
+    # user whether they want HRFunc added to their system menu
+    # (Spotlight / Start menu / Activities). The XDG-cache marker means
+    # this dialog appears at most once per machine.
+    _maybe_show_shortcut_prompt()
+
     if state.preload_path is not None:
         path = state.preload_path
         state.preload_path = None  # consume so subsequent renders don't re-trigger
         await _handle_open_path(state, path)
+
+
+def _maybe_show_shortcut_prompt() -> None:
+    """Show the first-launch shortcut prompt if the user hasn't been asked yet.
+
+    Skips silently if pyshortcuts isn't installed (e.g. user has the GUI
+    extras half-installed) or if the marker file already exists. The
+    "Yes" path runs the install on a background thread because some
+    pywebview backends serialize file-system writes with UI events on
+    Linux — keeping the dialog responsive.
+    """
+    try:
+        from ...cli.install_shortcut import (
+            install_shortcut,
+            set_prompted,
+            was_prompted,
+        )
+    except ImportError:
+        logger.debug("install_shortcut module unavailable; skipping prompt")
+        return
+
+    if was_prompted():
+        return
+
+    with ui.dialog() as dialog, ui.card().classes("max-w-md"):
+        ui.label("Add HRFunc to your system menu?").classes(
+            "text-lg font-semibold"
+        )
+        ui.label(
+            "We can install a launcher so HRFunc appears in your system's "
+            "app search (Spotlight on macOS, Start menu on Windows, "
+            "Activities on Linux). You'll be able to open it like any "
+            "other desktop app — no terminal needed."
+        ).classes("text-sm opacity-80")
+        ui.label(
+            "You can change this later with `hrfunc install-shortcut` or "
+            "`hrfunc uninstall-shortcut`."
+        ).classes("text-xs opacity-60 italic")
+
+        def _yes() -> None:
+            result = install_shortcut()
+            set_prompted()
+            dialog.close()
+            ui.notify(
+                result.message,
+                type="positive" if result.ok else "negative",
+            )
+
+        def _later() -> None:
+            # Don't write the marker — re-prompt on next launch.
+            dialog.close()
+
+        def _never() -> None:
+            set_prompted()
+            dialog.close()
+            ui.notify(
+                "Got it. Run `hrfunc install-shortcut` later if you "
+                "change your mind.",
+                type="info",
+            )
+
+        with ui.row().classes("w-full justify-end gap-2 mt-2"):
+            ui.button("Don't ask again", on_click=_never).props("flat")
+            ui.button("Not now", on_click=_later).props("flat")
+            ui.button("Yes, add it", on_click=_yes).props("color=primary")
+
+    dialog.open()
 
 
 def _render_header() -> None:
