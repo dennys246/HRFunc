@@ -45,12 +45,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Cached MNI brain mesh — the bundled fsaverage pial decimated to ~2.5k verts
-# / 5k triangles per hemisphere, stitched, and stored in MNI-meter coordinates
-# so it overlays directly on the HRF locations without a coord transform. The
-# .npz is loaded once on first toggle-on and reused for every subsequent
-# render. None until first load.
-_BRAIN_MESH: Optional[Tuple["np.ndarray", "np.ndarray"]] = None
+# Cached MNI head + brain meshes. Both are bundled in the wheel as decimated
+# fsaverage surfaces (~2.5k verts / 5k tris each, MNI-meter coords).
+# Loaded lazily on first toggle-on and reused for every subsequent render.
+#
+# Two layers (researchers find both useful and they show different things):
+#   - "pial"  → fsaverage lh.pial + rh.pial, stitched. The cortical surface.
+#   - "scalp" → fsaverage bem/outer_skin.surf. The head's outer skin —
+#               where forehead-mounted optodes physically sit, so HRF
+#               points overlay this surface anatomically correctly.
+_MESH_CACHE: Dict[str, Optional[Tuple["np.ndarray", "np.ndarray"]]] = {}
+
+_MESH_FILENAMES = {
+    "pial": "fsaverage_pial_lowpoly.npz",
+    "scalp": "fsaverage_scalp_lowpoly.npz",
+}
 
 
 # Subset of context fields exposed as filter controls. The library tree
@@ -248,29 +257,45 @@ def _render_filter_pane(state: AppState) -> None:
             "library_filter_changed", lambda _p=None: _count_label.refresh()
         )
 
-        # MNI brain overlay toggle. Drawn below the filter section because
-        # it's a viz-only switch, not a data filter — visually grouping it
+        # MNI overlay toggles. Drawn below the filter section because
+        # they're viz-only switches, not data filters — grouping them
         # with the filters would confuse the count label semantics.
+        # Two independent toggles so users can show either, both, or
+        # neither.
         ui.separator()
         ui.label("Overlay").classes(
             "text-xs uppercase opacity-60 tracking-wide"
         )
 
-        def _on_brain_toggle(event) -> None:
-            state.library_show_brain = bool(event.value)
+        def _publish_filter_change() -> None:
             # The viz re-renders on library_filter_changed; reuse the
             # event rather than adding a separate one — payload is the
             # current filter, which the viz already handles correctly.
             state.publish("library_filter_changed", state.library_filter)
+
+        def _on_brain_toggle(event) -> None:
+            state.library_show_brain = bool(event.value)
+            _publish_filter_change()
+
+        def _on_scalp_toggle(event) -> None:
+            state.library_show_scalp = bool(event.value)
+            _publish_filter_change()
 
         ui.switch(
             "Show MNI brain",
             value=state.library_show_brain,
             on_change=_on_brain_toggle,
         ).tooltip(
-            "Adds a translucent fsaverage pial surface beneath the HRF "
-            "scatter for spatial context. Mesh ships in the wheel — no "
-            "download required."
+            "Translucent fsaverage pial cortical surface beneath the "
+            "HRF scatter — where the neural activity originates."
+        )
+        ui.switch(
+            "Show MNI head",
+            value=state.library_show_scalp,
+            on_change=_on_scalp_toggle,
+        ).tooltip(
+            "Translucent fsaverage scalp (outer-skin) surface — where "
+            "forehead/head-mounted fNIRS optodes physically sit."
         )
 
 
@@ -309,7 +334,9 @@ def _render_viz_pane(state: AppState) -> None:
                 f"HRtree — {len(matched)} HRFs shown"
             ).classes("text-sm opacity-70")
             fig = build_plotly_figure(
-                matched, show_brain=state.library_show_brain
+                matched,
+                show_brain=state.library_show_brain,
+                show_scalp=state.library_show_scalp,
             )
             plot = ui.plotly(fig).classes("w-full h-full")
 
@@ -337,42 +364,70 @@ def _render_viz_pane(state: AppState) -> None:
     state.subscribe("library_filter_changed", _refresh_viz)
 
 
-def load_brain_mesh() -> Optional[Tuple["np.ndarray", "np.ndarray"]]:
-    """Return the bundled MNI brain mesh as ``(vertices, faces)`` arrays.
+def load_mesh(layer: str) -> Optional[Tuple["np.ndarray", "np.ndarray"]]:
+    """Return a bundled MNI anatomical mesh as ``(vertices, faces)``.
 
-    Loads the pre-decimated fsaverage pial surface from
-    ``hrfunc.assets.fsaverage_pial_lowpoly.npz`` on first call and caches
-    the result at module scope. Both hemispheres are pre-stitched into a
-    single mesh (~2.5k verts + 5k tris total) in MNI-meter coordinates,
-    so the mesh overlays directly on bundled-HRF locations without any
-    transform.
+    Args:
+        layer: ``"pial"`` for the cortical surface (fsaverage lh.pial +
+            rh.pial stitched) or ``"scalp"`` for the outer-skin head
+            surface (fsaverage bem/outer_skin.surf). Anything else
+            returns None.
 
-    Returns None if the asset is missing or numpy can't be imported —
-    callers fall back to no-brain rendering rather than crashing.
+    Both meshes are pre-decimated to ~2.5k verts / 5k triangles in
+    MNI-meter coordinates so they overlay directly on bundled HRF
+    locations without any transform. Results are cached per-layer at
+    module scope; the first call per layer pays the .npz load cost.
+
+    Returns None if the asset is missing, numpy can't be imported, or
+    the requested layer is unknown. Callers fall back to no-overlay
+    rendering rather than crashing.
+
+    Why both layers: the pial shows where neural activity comes from
+    (the cortical surface). The scalp shows where the optodes sit —
+    forehead-mounted optodes are anatomically 5-10 mm beyond the pial,
+    so they float visually outside the pial mesh and look "misaligned"
+    even though their coordinates are correct. The scalp surface
+    contains the optodes naturally. Users can show either, both, or
+    neither.
 
     Mesh source: ``mne.surface.decimate_surface(method="quadric")``
-    applied to fsaverage's ``lh.pial`` and ``rh.pial`` via
-    ``scripts/build_brain_mesh.py``. The .npz is bundled in the wheel
-    via ``[tool.setuptools.package-data]`` so users get the mesh
-    without a 150 MB fsaverage download.
+    applied to fsaverage's ``lh.pial`` + ``rh.pial`` for the pial
+    layer, and to ``bem/outer_skin.surf`` for the scalp layer. mm → m
+    conversion baked in. Bundled in the wheel so no fsaverage download
+    is required at runtime.
     """
-    global _BRAIN_MESH
-    if _BRAIN_MESH is not None:
-        return _BRAIN_MESH
+    if layer in _MESH_CACHE:
+        cached = _MESH_CACHE[layer]
+        return cached
+    filename = _MESH_FILENAMES.get(layer)
+    if filename is None:
+        logger.warning("load_mesh: unknown layer %r", layer)
+        _MESH_CACHE[layer] = None
+        return None
     try:
         import numpy as np
         from importlib import resources
 
-        ref = resources.files("hrfunc.assets") / "fsaverage_pial_lowpoly.npz"
+        ref = resources.files("hrfunc.assets") / filename
         with resources.as_file(ref) as path:
             data = np.load(path)
             verts = data["vertices"]
             faces = data["faces"]
-        _BRAIN_MESH = (verts, faces)
-        return _BRAIN_MESH
+        _MESH_CACHE[layer] = (verts, faces)
+        return _MESH_CACHE[layer]
     except Exception as exc:  # noqa: BLE001
-        logger.warning("brain mesh load failed: %s", exc)
+        logger.warning("mesh load failed for layer=%r: %s", layer, exc)
+        _MESH_CACHE[layer] = None
         return None
+
+
+# Back-compat alias for the original Sprint 4 single-mesh loader. Kept so
+# external callers (and the test suite) that imported ``load_brain_mesh``
+# don't break. Defaults to the scalp layer because that's the new visible
+# default in the GUI.
+def load_brain_mesh() -> Optional[Tuple["np.ndarray", "np.ndarray"]]:
+    """Deprecated alias for ``load_mesh("scalp")``."""
+    return load_mesh("scalp")
 
 
 def _extract_clicked_hrf_key(event) -> Optional[str]:
@@ -576,22 +631,28 @@ def build_plotly_figure(
     hrfs: Dict[str, Dict[str, Any]],
     *,
     show_brain: bool = False,
+    show_scalp: bool = False,
 ):
     """Build the 3D scatter figure for the given HRF dict.
 
-    Up to three traces:
+    Up to four traces, ordered so the HRF scatter renders on top:
 
-    - **Brain** (``go.Mesh3d``): the MNI fsaverage pial surface, added
-      first so the HRF scatter points render on top. Only included when
-      ``show_brain=True`` and the bundled mesh asset is loadable.
-      Rendered as a translucent grey surface — purely contextual,
-      `hoverinfo="skip"` and `showlegend=False` so it doesn't clutter
-      legend / hover UX.
+    - **Scalp** (``go.Mesh3d``, only when ``show_scalp=True``):
+      fsaverage outer-skin surface — anatomically where the optodes
+      sit. Drawn first (outermost in 3D-painter order).
+    - **Brain** (``go.Mesh3d``, only when ``show_brain=True``):
+      fsaverage pial cortical surface — where the neural activity
+      originates. Drawn inside the scalp.
     - **HbO** (``go.Scatter3d``, red): oxygenated HRFs.
     - **HbR** (``go.Scatter3d``, blue): deoxygenated HRFs.
 
-    Each scatter point's ``customdata`` is the HRF key so click handlers
-    can look it up; ``hovertext`` carries a short context summary.
+    Both overlays are independent toggles — users can show either,
+    both, or neither. Both have ``hoverinfo="skip"`` and
+    ``showlegend=False`` so they don't clutter legend / hover UX.
+
+    Each scatter point's ``customdata`` is the HRF key so click
+    handlers can look it up; ``hovertext`` carries a short context
+    summary.
     """
     import plotly.graph_objects as go
 
@@ -623,21 +684,41 @@ def build_plotly_figure(
 
     traces = []
 
-    # Brain mesh first so the HRF scatter renders on top of it.
-    if show_brain:
-        mesh = load_brain_mesh()
+    # Overlay meshes first (scalp outside, brain inside, both more
+    # transparent than the HRF markers) so the HRF scatter renders on
+    # top. Scalp is drawn FIRST so it's the outermost in 3D-painter
+    # order — when both are on, the brain visually nests inside the
+    # head.
+    if show_scalp:
+        mesh = load_mesh("scalp")
         if mesh is not None:
             verts, faces = mesh
             traces.append(
                 go.Mesh3d(
                     x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
                     i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
-                    color="#888",
-                    opacity=0.20,
-                    name="MNI brain",
+                    color="#c4b5a0",  # warm skin tone
+                    opacity=0.12,
+                    name="MNI head",
                     hoverinfo="skip",
                     showlegend=False,
                     lighting=dict(ambient=0.6, diffuse=0.5),
+                )
+            )
+    if show_brain:
+        mesh = load_mesh("pial")
+        if mesh is not None:
+            verts, faces = mesh
+            traces.append(
+                go.Mesh3d(
+                    x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+                    i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+                    color="#9ca3af",  # cool grey for cortex
+                    opacity=0.30,
+                    name="MNI brain",
+                    hoverinfo="skip",
+                    showlegend=False,
+                    lighting=dict(ambient=0.5, diffuse=0.6),
                 )
             )
 

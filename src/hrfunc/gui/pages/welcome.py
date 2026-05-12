@@ -64,6 +64,7 @@ async def _render(state: AppState) -> None:
     AppState instance without going through NiceGUI's route registration.
     """
     apply_theme()
+    _render_background_image()
 
     with page_container():
         _render_header()
@@ -80,6 +81,44 @@ async def _render(state: AppState) -> None:
         path = state.preload_path
         state.preload_path = None  # consume so subsequent renders don't re-trigger
         await _handle_open_path(state, path)
+
+
+def _render_background_image() -> None:
+    """Render the bundled fNIRS activity-channel-data PNG as a faded
+    full-viewport background for the welcome page.
+
+    Approach: emit a single absolute-positioned ``ui.image`` element
+    sized to fit the viewport with very low opacity and
+    ``pointer-events: none`` so it's purely decorative — every other
+    welcome-page widget renders on top at full opacity. No global CSS
+    injection / static-file route plumbing needed because NiceGUI's
+    ``ui.image`` accepts a local path directly and serves it from the
+    embedded HTTP server on demand.
+
+    Silently no-ops if the bundled image isn't resolvable (e.g.
+    broken install) — better to show a plain welcome page than crash.
+    """
+    try:
+        from importlib import resources
+
+        ref = resources.files("hrfunc.assets") / "fnirs_activity_channel_data.png"
+        with resources.as_file(ref) as path:
+            bg_path = str(path)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("welcome background unavailable: %s", exc)
+        return
+
+    # Opacity 0.08 is high enough to read the silhouette but low enough
+    # not to compete with the welcome cards' content. Adjust later if
+    # researchers find it too prominent or too subtle.
+    ui.image(bg_path).style(
+        "position: fixed; inset: 0; "
+        "width: 100vw; height: 100vh; "
+        "object-fit: cover; "
+        "opacity: 0.08; "
+        "pointer-events: none; "
+        "z-index: 0;"
+    )
 
 
 def _maybe_show_shortcut_prompt() -> None:
