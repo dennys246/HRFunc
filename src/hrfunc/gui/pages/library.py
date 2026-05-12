@@ -746,6 +746,42 @@ def _render_roi_average(state: AppState) -> None:
     if png is not None:
         ui.image(png).classes("max-w-md")
 
+    # ── Save-to-workspace button. Writes the averaged trace as JSON in
+    # the same schema as hrtree HRF entries (plus ROI provenance fields)
+    # so it can be re-loaded into hrfunc.tree if researchers want to
+    # treat the ROI average as a derived HRF.
+    def _on_save_roi() -> None:
+        from ..workspace_io import save_roi_average, workspace_dir
+
+        try:
+            out_path = save_roi_average(
+                anchor=anchor,
+                roi_keys=roi_keys,
+                hrf_mean=mean,
+                hrf_std=std,
+                sfreq=sfreq,
+                radius_m=state.library_roi_radius_m,
+                library_filter=state.library_filter,
+            )
+            ui.notify(
+                f"Saved ROI average to {out_path.name} "
+                f"({workspace_dir()})",
+                type="positive",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("save ROI average failed: %s", exc)
+            ui.notify(
+                f"Save failed: {type(exc).__name__}: {exc}",
+                type="negative",
+            )
+
+    with ui.row().classes("gap-2 mt-1"):
+        ui.button(
+            "Save ROI average",
+            icon="download",
+            on_click=_on_save_roi,
+        ).props("color=primary dense")
+
 
 def _render_roi_average_png(
     mean, std, sfreq: float, n: int

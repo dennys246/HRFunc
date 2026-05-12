@@ -319,6 +319,24 @@ Empty until you click an HRF in the viz. Once selected, shows:
 - A trace preview plot in seconds (with ±1 standard-deviation shading
   when `hrf_std` is available)
 
+### Saving ROI averages
+
+After anchoring an HRF and pulling neighbors into the ROI (radius
+slider or Shift+hover paint), the detail pane shows an averaged
+trace and a **Save ROI average** button. Clicking saves the average
+plus its provenance as a JSON file in the **HRfunc workspace folder**:
+
+- Default location: `~/hrfunc_workspace/`
+- Override via the `HRFUNC_WORKSPACE` environment variable for shared
+  analysis directories: `export HRFUNC_WORKSPACE=/lab/shared/hrfunc`
+
+The file is named `roi_<anchor-key>_<UTC-timestamp>.json` and follows
+the same schema as the bundled library HRFs, so you can re-load with
+`hrfunc.tree.load_hrfs` if you want to treat the ROI average as a
+derived HRF. The `context` block records ROI provenance (anchor key,
+radius, member keys, active library filter, save timestamp) so you
+can audit what went into the average later.
+
 ### Library limitations to know about
 
 - **Read-only** — v1.3.0 does not let you delete, insert, or merge
