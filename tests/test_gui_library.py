@@ -409,6 +409,46 @@ class TestStateLibraryOverlays:
         assert s.library_show_scalp is True
 
 
+class TestFilterByOxygenation:
+    def _hrfs(self):
+        return {
+            "hbo:a": {"oxygenation": True},
+            "hbo:b": {"oxygenation": True},
+            "hbr:c": {"oxygenation": False},
+            "hbr:d": {"oxygenation": False},
+        }
+
+    def test_both_returns_all(self):
+        hrfs = self._hrfs()
+        result = library.filter_by_oxygenation(hrfs, "both")
+        assert set(result.keys()) == set(hrfs.keys())
+
+    def test_hbo_keeps_only_true(self):
+        result = library.filter_by_oxygenation(self._hrfs(), "hbo")
+        assert set(result.keys()) == {"hbo:a", "hbo:b"}
+
+    def test_hbr_keeps_only_false(self):
+        result = library.filter_by_oxygenation(self._hrfs(), "hbr")
+        assert set(result.keys()) == {"hbr:c", "hbr:d"}
+
+    def test_unknown_mode_falls_through_to_both(self):
+        """A typo or stale state value should NOT blank the whole viz."""
+        result = library.filter_by_oxygenation(self._hrfs(), "garbage")
+        assert set(result.keys()) == set(self._hrfs().keys())
+
+
+class TestStateLibraryOxygenation:
+    def test_default_is_both(self):
+        s = AppState()
+        assert s.library_oxygenation == "both"
+
+    def test_reset_restores_default(self):
+        s = AppState()
+        s.library_oxygenation = "hbo"
+        s.reset()
+        assert s.library_oxygenation == "both"
+
+
 # ---------------------------------------------------------------------------
 # Region-of-Interest selection
 # ---------------------------------------------------------------------------
