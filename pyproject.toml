@@ -32,6 +32,7 @@ gui = [
     "nicegui>=2.0",
     "plotly>=5.18",
     "pywebview>=5.0",
+    "pyshortcuts>=1.9",
     ]
 
 [project.scripts]
@@ -45,12 +46,18 @@ Documentation = "https://www.hrfunc.org"
 package-dir = {"" = "src"}
 packages = [
     "hrfunc",
+    "hrfunc.assets",
+    "hrfunc.cli",
     "hrfunc.io",
     "hrfunc.gui",
     "hrfunc.gui.components",
     "hrfunc.gui.pages",
     ]
 include-package-data = true
+
+[tool.setuptools.package-data]
+"hrfunc.assets" = ["*.png"]
+"hrfunc.hrfs" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

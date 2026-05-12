@@ -42,5 +42,10 @@
   `classify_path`, `RawCache`) reusable from the Python API
 - New: `progress_callback` kwarg added to `montage.estimate_hrf` and
   `montage.estimate_activity` for non-GUI progress tracking
+- New: `hrfunc install-shortcut` / `hrfunc uninstall-shortcut`
+  subcommands add or remove a system-level launcher (Spotlight on
+  macOS, Start menu on Windows, Activities on Linux) so non-coder
+  researchers can open HRFunc like any other desktop app. First GUI
+  launch prompts the user to install the shortcut automatically.
 - See [docs/external/gui_guide.md](docs/external/gui_guide.md) for the
   full GUI walkthrough and troubleshooting guide

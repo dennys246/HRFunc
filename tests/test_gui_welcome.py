@@ -40,6 +40,19 @@ from nicegui.testing import User  # noqa: E402
 pytest_plugins = ["nicegui.testing.user_plugin"]
 
 
+@pytest.fixture(autouse=True)
+def _suppress_first_launch_shortcut_prompt(monkeypatch, tmp_path):
+    """Force the shortcut prompt to "already shown" so the existing
+    welcome tests don't see the dialog overlay added in the install-
+    shortcut PR. Tests that explicitly cover the prompt live in
+    test_gui_welcome_shortcut_prompt.py.
+    """
+    from hrfunc.cli import install_shortcut as _ish
+    marker = tmp_path / ".shortcut_prompted"
+    marker.touch()
+    monkeypatch.setattr(_ish, "_marker_path", lambda: marker)
+
+
 # ---------------------------------------------------------------------------
 # Helpers — recent-manifest enumeration (sync, no rendering)
 # ---------------------------------------------------------------------------

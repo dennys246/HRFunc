@@ -1,42 +1,94 @@
 """HRFunc GUI entry point.
 
-`hrfunc` (the CLI command installed by ``pip install hrfunc[gui]``) calls
-``main()``, which:
+``hrfunc`` (the CLI command installed by ``pip install hrfunc[gui]``)
+calls ``main()``, which dispatches three classes of invocation:
 
-1. Parses argv for an optional dataset path
-2. Stashes the path on the AppState singleton for the welcome page to consume
-3. Registers page handlers
-4. Opens a native desktop window via NiceGUI + pywebview
+1. **Bare launch** (``hrfunc`` or ``hrfunc <path>``) — the dominant path.
+   Boots the NiceGUI desktop window. An optional positional ``path``
+   preloads a folder / file before the welcome page renders.
+2. **Shortcut subcommands** — ``hrfunc install-shortcut`` /
+   ``hrfunc uninstall-shortcut``. Adds or removes a system-level
+   launcher (Spotlight on macOS, Start menu on Windows, Activities on
+   Linux) via ``pyshortcuts``. Researchers who don't live in a terminal
+   only need to run this once and can then click HRFunc like any other
+   desktop app.
+3. **Help / version** — ``hrfunc --help``, ``hrfunc help``, or
+   ``hrfunc --version``. Print and exit.
 
 Usage:
     hrfunc                              # launch the GUI
     hrfunc /path/to/study               # launch with that folder preloaded
     hrfunc subject_01.snirf             # launch with a single file preloaded
+    hrfunc install-shortcut             # add HRFunc to your system menu
+    hrfunc uninstall-shortcut           # remove the HRFunc system menu entry
     hrfunc --version                    # print version and exit
+    hrfunc --help                       # show CLI help
+    hrfunc help                         # alias for --help
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 
+# Subcommands handled outside argparse — see ``main`` for why.
+_SUBCOMMANDS = {"install-shortcut", "uninstall-shortcut", "help"}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point. Returns the exit code (0 on success).
 
+    Why the manual subcommand prefilter (vs argparse subparsers): the
+    bare-launch form ``hrfunc /path/to/study`` takes a positional path
+    argument. argparse subparsers consume the first positional as the
+    subcommand name, which would force users to type ``hrfunc launch
+    /path/...`` — exactly the friction Denny rejected. The prefilter
+    here treats the first argv element as a subcommand only when it
+    matches one of the known names; anything else (including paths)
+    falls through to the existing bare-launch handling.
+
     Args:
         argv: Argument list (excluding the program name). When None
-            (production), argparse pulls from sys.argv. Tests pass an
-            explicit list to exercise without touching sys.argv.
+            (production), pulls from sys.argv. Tests pass an explicit
+            list to exercise without touching sys.argv.
 
     Returns:
-        Exit code. 0 if the GUI ran cleanly. Non-zero on argument-parsing
-        failure (argparse handles those itself via SystemExit).
+        Exit code. 0 if the invocation completed cleanly. Non-zero on
+        argument-parsing failure (argparse exits via SystemExit) or
+        subcommand failure.
     """
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # Subcommand prefilter — match the literal subcommand name before
+    # handing argv to argparse.
+    if argv:
+        head = argv[0]
+        if head == "install-shortcut":
+            return _run_install_shortcut(argv[1:])
+        if head == "uninstall-shortcut":
+            return _run_uninstall_shortcut(argv[1:])
+        if head == "help":
+            # Friendly alias for --help / -h. Forward to argparse so
+            # the same usage block renders.
+            argv = ["--help"]
+
+    return _launch_gui(argv)
+
+
+# ---------------------------------------------------------------------------
+# Bare-launch GUI path
+# ---------------------------------------------------------------------------
+
+
+def _launch_gui(argv: List[str]) -> int:
+    """Parse argv as ``hrfunc [path]`` and boot the NiceGUI window."""
     parser = _build_argument_parser()
     args = parser.parse_args(argv)
 
@@ -46,7 +98,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     from nicegui import ui
 
     from .state import state
-    from .theme import apply_theme
 
     if args.path is not None:
         state.preload_path = args.path.resolve()
@@ -71,8 +122,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         prog="hrfunc",
         description=(
             "HRFunc — fNIRS hemodynamic response function estimation and "
-            "neural activity recovery. Launches the desktop GUI."
+            "neural activity recovery. Bare `hrfunc` launches the desktop "
+            "GUI; use `hrfunc install-shortcut` to add HRFunc to your "
+            "system menu so you can launch it without the terminal."
         ),
+        epilog=(
+            "Subcommands:\n"
+            "  install-shortcut   Add HRFunc to system menu (Spotlight / "
+            "Start menu / Activities)\n"
+            "  uninstall-shortcut Remove the HRFunc system menu entry\n"
+            "  help               Show this help text (alias for --help)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "path",
@@ -108,13 +169,7 @@ def _register_pages() -> None:
 
 
 def _find_free_port() -> int:
-    """Return an unused localhost port for NiceGUI to bind.
-
-    NiceGUI defaults to 8080, which collides if anything else on the user's
-    machine is listening there (common — many dev servers default to 8080).
-    Letting the OS pick avoids a confusing "address already in use" crash
-    on launch.
-    """
+    """Return an unused localhost port for NiceGUI to bind."""
     import socket
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -129,6 +184,51 @@ def _get_version() -> str:
         return version("hrfunc")
     except Exception:
         return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Shortcut subcommands
+# ---------------------------------------------------------------------------
+
+
+def _run_install_shortcut(argv: List[str]) -> int:
+    """Handle ``hrfunc install-shortcut`` — install + report.
+
+    ``argv`` is currently ignored (no flags). Reserved for future use
+    (e.g. ``--desktop`` to also write a desktop shortcut).
+    """
+    if argv:
+        print(
+            f"hrfunc install-shortcut: unexpected arguments {argv!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    from ..cli.install_shortcut import install_shortcut, set_prompted
+
+    result = install_shortcut()
+    print(result.message)
+    if result.ok:
+        # Treat manual install as the user's definitive answer to the
+        # first-launch prompt so the welcome page doesn't ask again.
+        set_prompted()
+    return 0 if result.ok else 1
+
+
+def _run_uninstall_shortcut(argv: List[str]) -> int:
+    """Handle ``hrfunc uninstall-shortcut``."""
+    if argv:
+        print(
+            f"hrfunc uninstall-shortcut: unexpected arguments {argv!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    from ..cli.install_shortcut import uninstall_shortcut
+
+    result = uninstall_shortcut()
+    print(result.message)
+    return 0 if result.ok else 1
 
 
 if __name__ == "__main__":
