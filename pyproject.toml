@@ -61,7 +61,7 @@ packages = [
 include-package-data = true
 
 [tool.setuptools.package-data]
-"hrfunc.assets" = ["*.png", "*.icns"]
+"hrfunc.assets" = ["*.png", "*.icns", "*.npz"]
 "hrfunc.hrfs" = ["*.json"]
 
 [tool.pytest.ini_options]

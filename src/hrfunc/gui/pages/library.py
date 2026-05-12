@@ -31,7 +31,7 @@ sub-tree, and we want users to be able to toggle filters freely.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from nicegui import ui
 
@@ -39,9 +39,18 @@ from ..state import AppState, state as global_state
 from ..theme import apply_theme, page_container
 
 if TYPE_CHECKING:
+    import numpy as np
     from ...hrtree import tree as TreeType
 
 logger = logging.getLogger(__name__)
+
+
+# Cached MNI brain mesh — the bundled fsaverage pial decimated to ~2.5k verts
+# / 5k triangles per hemisphere, stitched, and stored in MNI-meter coordinates
+# so it overlays directly on the HRF locations without a coord transform. The
+# .npz is loaded once on first toggle-on and reused for every subsequent
+# render. None until first load.
+_BRAIN_MESH: Optional[Tuple["np.ndarray", "np.ndarray"]] = None
 
 
 # Subset of context fields exposed as filter controls. The library tree
@@ -239,6 +248,31 @@ def _render_filter_pane(state: AppState) -> None:
             "library_filter_changed", lambda _p=None: _count_label.refresh()
         )
 
+        # MNI brain overlay toggle. Drawn below the filter section because
+        # it's a viz-only switch, not a data filter — visually grouping it
+        # with the filters would confuse the count label semantics.
+        ui.separator()
+        ui.label("Overlay").classes(
+            "text-xs uppercase opacity-60 tracking-wide"
+        )
+
+        def _on_brain_toggle(event) -> None:
+            state.library_show_brain = bool(event.value)
+            # The viz re-renders on library_filter_changed; reuse the
+            # event rather than adding a separate one — payload is the
+            # current filter, which the viz already handles correctly.
+            state.publish("library_filter_changed", state.library_filter)
+
+        ui.switch(
+            "Show MNI brain",
+            value=state.library_show_brain,
+            on_change=_on_brain_toggle,
+        ).tooltip(
+            "Adds a translucent fsaverage pial surface beneath the HRF "
+            "scatter for spatial context. Mesh ships in the wheel — no "
+            "download required."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Center pane: HRtree 3D viz
@@ -274,7 +308,9 @@ def _render_viz_pane(state: AppState) -> None:
             ui.label(
                 f"HRtree — {len(matched)} HRFs shown"
             ).classes("text-sm opacity-70")
-            fig = build_plotly_figure(matched)
+            fig = build_plotly_figure(
+                matched, show_brain=state.library_show_brain
+            )
             plot = ui.plotly(fig).classes("w-full h-full")
 
             def _on_click(event) -> None:
@@ -299,6 +335,44 @@ def _render_viz_pane(state: AppState) -> None:
     def _refresh_viz(_payload=None) -> None:
         _viz_body.refresh()
     state.subscribe("library_filter_changed", _refresh_viz)
+
+
+def load_brain_mesh() -> Optional[Tuple["np.ndarray", "np.ndarray"]]:
+    """Return the bundled MNI brain mesh as ``(vertices, faces)`` arrays.
+
+    Loads the pre-decimated fsaverage pial surface from
+    ``hrfunc.assets.fsaverage_pial_lowpoly.npz`` on first call and caches
+    the result at module scope. Both hemispheres are pre-stitched into a
+    single mesh (~2.5k verts + 5k tris total) in MNI-meter coordinates,
+    so the mesh overlays directly on bundled-HRF locations without any
+    transform.
+
+    Returns None if the asset is missing or numpy can't be imported —
+    callers fall back to no-brain rendering rather than crashing.
+
+    Mesh source: ``mne.surface.decimate_surface(method="quadric")``
+    applied to fsaverage's ``lh.pial`` and ``rh.pial`` via
+    ``scripts/build_brain_mesh.py``. The .npz is bundled in the wheel
+    via ``[tool.setuptools.package-data]`` so users get the mesh
+    without a 150 MB fsaverage download.
+    """
+    global _BRAIN_MESH
+    if _BRAIN_MESH is not None:
+        return _BRAIN_MESH
+    try:
+        import numpy as np
+        from importlib import resources
+
+        ref = resources.files("hrfunc.assets") / "fsaverage_pial_lowpoly.npz"
+        with resources.as_file(ref) as path:
+            data = np.load(path)
+            verts = data["vertices"]
+            faces = data["faces"]
+        _BRAIN_MESH = (verts, faces)
+        return _BRAIN_MESH
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("brain mesh load failed: %s", exc)
+        return None
 
 
 def _extract_clicked_hrf_key(event) -> Optional[str]:
@@ -498,12 +572,26 @@ def _str_match(value: Any, needle: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def build_plotly_figure(hrfs: Dict[str, Dict[str, Any]]):
+def build_plotly_figure(
+    hrfs: Dict[str, Dict[str, Any]],
+    *,
+    show_brain: bool = False,
+):
     """Build the 3D scatter figure for the given HRF dict.
 
-    Two traces: HbO (red) and HbR (blue). Each point's ``customdata`` is
-    the HRF key so click handlers can look it up. ``hovertext`` carries a
-    short context summary.
+    Up to three traces:
+
+    - **Brain** (``go.Mesh3d``): the MNI fsaverage pial surface, added
+      first so the HRF scatter points render on top. Only included when
+      ``show_brain=True`` and the bundled mesh asset is loadable.
+      Rendered as a translucent grey surface — purely contextual,
+      `hoverinfo="skip"` and `showlegend=False` so it doesn't clutter
+      legend / hover UX.
+    - **HbO** (``go.Scatter3d``, red): oxygenated HRFs.
+    - **HbR** (``go.Scatter3d``, blue): deoxygenated HRFs.
+
+    Each scatter point's ``customdata`` is the HRF key so click handlers
+    can look it up; ``hovertext`` carries a short context summary.
     """
     import plotly.graph_objects as go
 
@@ -534,6 +622,25 @@ def build_plotly_figure(hrfs: Dict[str, Dict[str, Any]]):
             hbr_hover.append(hover)
 
     traces = []
+
+    # Brain mesh first so the HRF scatter renders on top of it.
+    if show_brain:
+        mesh = load_brain_mesh()
+        if mesh is not None:
+            verts, faces = mesh
+            traces.append(
+                go.Mesh3d(
+                    x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+                    i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+                    color="#888",
+                    opacity=0.20,
+                    name="MNI brain",
+                    hoverinfo="skip",
+                    showlegend=False,
+                    lighting=dict(ambient=0.6, diffuse=0.5),
+                )
+            )
+
     if hbo_x:
         traces.append(
             go.Scatter3d(
