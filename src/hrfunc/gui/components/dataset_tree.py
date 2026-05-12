@@ -16,9 +16,16 @@ combines BIDS components when available — see ``scan._make_display_name``).
 Node IDs are the absolute scan path stringified — this makes the click
 lookup O(1) given a dict from path → ScanEntry.
 
+Search filter (Sprint 3.1):
+``build_nodes`` accepts an optional ``filter_text``. When non-empty, scans
+are kept only if the filter (case-insensitive) appears in ``display_name``
+or the stringified path. Subjects and sessions with zero surviving scans
+are pruned, so the tree only shows the relevant subtree. ``render`` wires
+a ``ui.input`` above the tree that refreshes the body on change.
+
 Public API:
-    build_nodes(manifest) -> list[dict]   - tree node structure
-    render(state)                         - render the tree + wire selection
+    build_nodes(manifest, filter_text="") -> list[dict]   - tree node structure
+    render(state, on_select_scan=None)                    - render the tree + wire selection
 """
 
 from __future__ import annotations
@@ -38,13 +45,27 @@ _NO_SESSION_LABEL = "(no session)"
 OnScanSelect = Callable[[Optional[ScanEntry]], None]
 
 
-def build_nodes(manifest: Manifest) -> List[dict]:
+def _scan_matches_filter(scan: ScanEntry, filter_text: str) -> bool:
+    """Case-insensitive substring match against display_name + path."""
+    if not filter_text:
+        return True
+    needle = filter_text.lower()
+    if scan.display_name and needle in scan.display_name.lower():
+        return True
+    return needle in str(scan.path).lower()
+
+
+def build_nodes(manifest: Manifest, filter_text: str = "") -> List[dict]:
     """Convert a Manifest into the dict structure ``ui.tree`` expects.
 
     Returns a list of subject-level nodes. Each subject node has children
     (sessions); each session has children (scans). The scan-level nodes use
     the stringified absolute path as the ``id`` so click handlers can do a
     direct dict lookup back to the ScanEntry.
+
+    When ``filter_text`` is non-empty, scans are filtered by case-insensitive
+    substring match against their display_name and path. Subjects/sessions
+    with zero surviving scans are pruned.
 
     Stable ordering: subjects sorted alphabetically, sessions within a
     subject sorted alphabetically, scans within a session sorted by
@@ -55,6 +76,8 @@ def build_nodes(manifest: Manifest) -> List[dict]:
     subjects: Dict[str, Dict[str, List[ScanEntry]]] = {}
 
     for scan in manifest.scans:
+        if not _scan_matches_filter(scan, filter_text):
+            continue
         sub_key = (
             f"sub-{scan.bids_subject}"
             if scan.bids_subject
@@ -106,6 +129,10 @@ def render(
     ``None`` if the user clicked a group node) — typically used by the
     workspace to refresh the inspector panel.
 
+    A search input above the tree filters scans by case-insensitive
+    substring match against display_name or path. Filter state lives in a
+    closure dict so the refreshable body always reads the latest value.
+
     Caller is responsible for placing this inside the desired layout
     (typically the left pane of a splitter).
     """
@@ -113,9 +140,13 @@ def render(
         ui.label("No dataset loaded.").classes("opacity-60 text-sm p-4")
         return
 
-    nodes = build_nodes(state.manifest)
+    # Closure-held filter state. A mutable dict (rather than a nonlocal
+    # string) lets the on_change handler write without scope gymnastics.
+    filter_state: Dict[str, str] = {"text": ""}
 
     # Path string -> ScanEntry, for O(1) lookup in the click handler.
+    # Built once over the full manifest — filtering only affects which
+    # nodes are *rendered*, not which paths can be resolved on click.
     path_to_scan: Dict[str, ScanEntry] = {
         str(s.path): s for s in state.manifest.scans
     }
@@ -131,7 +162,25 @@ def render(
         if on_select_scan is not None:
             on_select_scan(scan)
 
-    ui.tree(nodes, on_select=_on_select).classes("w-full")
+    @ui.refreshable
+    def _tree_body() -> None:
+        nodes = build_nodes(state.manifest, filter_state["text"])
+        if not nodes:
+            ui.label("No scans match filter.").classes(
+                "opacity-60 text-xs p-2"
+            )
+            return
+        ui.tree(nodes, on_select=_on_select).classes("w-full")
+
+    def _on_filter_change(event) -> None:
+        filter_state["text"] = event.value or ""
+        _tree_body.refresh()
+
+    ui.input(
+        placeholder="Filter scans…",
+        on_change=_on_filter_change,
+    ).props("dense clearable").classes("w-full")
+    _tree_body()
 
 
 def find_scan(manifest: Optional[Manifest], path_id: str) -> Optional[ScanEntry]:

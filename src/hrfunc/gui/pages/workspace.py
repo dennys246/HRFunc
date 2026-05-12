@@ -11,10 +11,11 @@ the available real estate:
   │   scans)    │                                │              │
   └─────────────┴──────────────────────────────┴──────────────┘
 
-Sprint 2.3 ships the shell: dataset tree (real), tab structure (real), and
-inspector showing selected ScanEntry metadata (real). Tab content beyond
-``Inspect`` is placeholder — Sprint 3+ replaces it with the estimation,
-quality, and visualization panels.
+Sprint 2.3 shipped the shell: dataset tree (real), tab structure (real), and
+inspector showing selected ScanEntry metadata (real). Sprint 3.1 enriches
+the Inspect tab to be Raw-aware: when a scan is selected, the underlying
+MNE Raw is loaded in the background and the channel list, 2D probe layout,
+and event annotations appear in the Inspect tab.
 
 Routing:
 - Welcome → workspace via ``ui.navigate.to("/workspace")`` after a
@@ -24,20 +25,29 @@ Routing:
 State:
 - Reads ``state.manifest`` (set by the welcome page's open-folder flow).
 - Reads/writes ``state.selected_scan`` (driven by dataset-tree clicks).
+- Reads/writes ``state.raw_cache`` (Sprint 3.1 — populated by background
+  Raw loads kicked off when a scan is selected).
 - Tab change does not modify state — the visible tab is local to the
   workspace render.
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
 import logging
+from typing import TYPE_CHECKING, Optional
 
-from nicegui import ui
+from nicegui import background_tasks, ui
 
 from ..components import dataset_tree
 from ..state import AppState, state as global_state
 from ..theme import apply_theme
 from ...io.manifest import ScanEntry
+
+if TYPE_CHECKING:
+    import mne
 
 logger = logging.getLogger(__name__)
 
@@ -155,20 +165,62 @@ def _render_left_pane(state: AppState) -> None:
             ui.label(str(state.manifest.root)).classes(
                 "text-xs font-mono opacity-70 break-all"
             )
-        dataset_tree.render(state, on_select_scan=lambda _scan: _refresh_inspector(state))
+        dataset_tree.render(
+            state, on_select_scan=lambda _scan: _refresh_inspector(state)
+        )
 
 
 def _refresh_inspector(state: AppState) -> None:
-    """Refresh the Inspect tab body after a dataset-tree selection change.
+    """Refresh the Inspect tab body and kick off a background Raw load if needed.
 
-    The Inspect tab's body is wrapped in ``@ui.refreshable`` and stashes its
-    refresh callable on ``state._inspect_refresh`` at render time. Calling
-    that re-runs the body against the latest ``state.selected_scan`` without
-    rebuilding the whole workspace.
+    Two paths:
+    - Always re-runs the Inspect body so the metadata section reflects the
+      newly-selected scan immediately.
+    - If a scan is selected and its Raw is not yet cached, dispatches a
+      background load via ``nicegui.background_tasks.create``. When that
+      load finishes, ``_load_scan_raw`` re-refreshes the body — but only
+      if the user is still on the same scan (path-equality check, since
+      a new Manifest scan can produce a new ScanEntry object for the same
+      file).
     """
     refresh = getattr(state, "_inspect_refresh", None)
     if refresh is not None:
         refresh()
+
+    scan = state.selected_scan
+    if scan is None:
+        return
+    if scan in state.raw_cache:
+        return
+    background_tasks.create(_load_scan_raw(state, scan))
+
+
+async def _load_scan_raw(state: AppState, scan: ScanEntry) -> None:
+    """Load ``scan`` into ``state.raw_cache`` off the event loop.
+
+    Bypasses ``workers.run_in_background`` deliberately: that helper gates on
+    ``state.busy`` (reserved for the long estimation tasks Sprint 3.3/3.4
+    wire up), and rapid scan navigation should not be blocked by that gate
+    or affect the estimation progress indicator.
+
+    After the load completes (or fails), the Inspect body is refreshed only
+    if the user is still inspecting the same scan — compared by path, not
+    object identity, so a fresh ScanEntry from a re-scan still matches.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, state.raw_cache.get, scan)
+    except Exception as exc:  # noqa: BLE001 — surface to UI via last_error
+        state.last_error = (
+            f"Failed to load scan: {type(exc).__name__}: {exc}"
+        )
+        logger.exception("Failed to load scan %s", scan.path)
+
+    current = state.selected_scan
+    if current is not None and current.path == scan.path:
+        refresh = getattr(state, "_inspect_refresh", None)
+        if refresh is not None:
+            refresh()
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +244,9 @@ def _render_center_pane(state: AppState) -> None:
 def _render_tab_panel(name: str, state: AppState) -> None:
     """Render one tab's body.
 
-    ``Inspect`` is real and shows the selected scan's metadata. Every other
-    tab is a "Coming in Sprint N" placeholder for now — Sprint 3+ replaces
-    them.
+    ``Inspect`` is real and shows the selected scan's metadata plus
+    Raw-derived recording info (Sprint 3.1). Every other tab is a "Coming
+    in Sprint N" placeholder — Sprint 3.2+ replaces them.
     """
     if name == "Inspect":
         _render_inspect_tab(state)
@@ -218,48 +270,209 @@ def _render_tab_panel(name: str, state: AppState) -> None:
 
 
 def _render_inspect_tab(state: AppState) -> None:
-    """Inspect tab content — selected scan's basic metadata.
+    """Inspect tab — Metadata + Recording sections, refreshable on scan change.
 
-    Renders against ``state.selected_scan``. When no scan is selected, shows
-    a prompt to pick one. The render is wrapped in ``ui.refreshable`` so
-    dataset-tree clicks update this panel without a full page rebuild.
+    Wraps ``_render_inspect_body`` in ``ui.refreshable`` and stashes the
+    resulting refresher on ``state._inspect_refresh`` so dataset-tree
+    clicks and background-load completions can drive a re-render without
+    rebuilding the whole workspace.
     """
 
     @ui.refreshable
     def _body() -> None:
-        scan = state.selected_scan
-        if scan is None:
-            with ui.column().classes("p-6 gap-2"):
-                ui.label("Inspect").classes("text-2xl font-semibold")
-                ui.label("Select a scan from the dataset tree.").classes(
-                    "text-sm opacity-60"
-                )
-            return
-        with ui.column().classes("p-6 gap-3"):
-            ui.label(scan.display_name or scan.path.name).classes(
-                "text-2xl font-semibold"
-            )
-            _kv_row("Format", scan.format)
-            _kv_row("Path", str(scan.path))
-            if scan.n_channels is not None:
-                _kv_row("Channels", str(scan.n_channels))
-            if scan.sfreq is not None:
-                _kv_row("Sampling rate", f"{scan.sfreq:.4g} Hz")
-            if scan.bids_subject:
-                _kv_row("BIDS subject", scan.bids_subject)
-            if scan.bids_session:
-                _kv_row("BIDS session", scan.bids_session)
-            if scan.bids_task:
-                _kv_row("BIDS task", scan.bids_task)
-            if scan.bids_run:
-                _kv_row("BIDS run", scan.bids_run)
+        _render_inspect_body(state)
 
     _body()
-    # Stash the refresher on the state so dataset_tree.render's on_select
-    # can call it after updating state.selected_scan. Sprint 3+ panels will
-    # subscribe to the same channel via a more structured event bus, but
-    # the direct ref keeps Sprint 2.3 scope tight.
+    # Stash the refresher on the state so external callers (the dataset-tree
+    # click handler and the async Raw loader) can trigger a re-render. Sprint
+    # 3.2 should formalize this as an event bus once a second subscriber
+    # (the Preprocess tab) joins.
     state._inspect_refresh = _body.refresh  # type: ignore[attr-defined]
+
+
+def _render_inspect_body(state: AppState) -> None:
+    """Render the Inspect tab body against the current ``state.selected_scan``.
+
+    Two sections: Metadata (always available from ScanEntry) and Recording
+    (renders once the MNE Raw is in ``state.raw_cache``). If no scan is
+    selected, shows a prompt; if a scan is selected but not yet cached,
+    shows a "Loading recording…" skeleton so users see the load is in
+    flight.
+
+    Extracted as a top-level function so tests can call it inside a
+    synthetic NiceGUI context without going through the refreshable wrapper.
+    """
+    scan = state.selected_scan
+    if scan is None:
+        with ui.column().classes("p-6 gap-2"):
+            ui.label("Inspect").classes("text-2xl font-semibold")
+            ui.label("Select a scan from the dataset tree.").classes(
+                "text-sm opacity-60"
+            )
+        return
+
+    with ui.column().classes("p-6 gap-4 w-full"):
+        ui.label(scan.display_name or scan.path.name).classes(
+            "text-2xl font-semibold"
+        )
+
+        # ── Metadata section (always renders from ScanEntry)
+        ui.label("Metadata").classes(
+            "text-xs uppercase opacity-60 tracking-wide"
+        )
+        _kv_row("Format", scan.format)
+        _kv_row("Path", str(scan.path))
+        if scan.n_channels is not None:
+            _kv_row("Channels", str(scan.n_channels))
+        if scan.sfreq is not None:
+            _kv_row("Sampling rate", f"{scan.sfreq:.4g} Hz")
+        if scan.bids_subject:
+            _kv_row("BIDS subject", scan.bids_subject)
+        if scan.bids_session:
+            _kv_row("BIDS session", scan.bids_session)
+        if scan.bids_task:
+            _kv_row("BIDS task", scan.bids_task)
+        if scan.bids_run:
+            _kv_row("BIDS run", scan.bids_run)
+
+        ui.separator()
+
+        # ── Recording section (loaded MNE Raw)
+        ui.label("Recording").classes(
+            "text-xs uppercase opacity-60 tracking-wide"
+        )
+        if scan in state.raw_cache:
+            try:
+                raw = state.raw_cache.get(scan)
+            except Exception as exc:  # noqa: BLE001
+                # Cache hit but reload failed (defensive — get() shouldn't
+                # error on hit, but the cache could be cleared between the
+                # __contains__ check and the get call by another callback).
+                logger.warning("Inspect: cache.get raised: %s", exc)
+                ui.label(
+                    "Recording unavailable — cache entry was cleared."
+                ).classes("text-sm opacity-60")
+                return
+            _render_recording_sections(raw)
+        else:
+            with ui.row().classes("items-center gap-3"):
+                ui.spinner(size="sm")
+                ui.label("Loading recording…").classes(
+                    "text-sm opacity-70"
+                )
+
+
+def _render_recording_sections(raw: "mne.io.BaseRaw") -> None:
+    """Render channel list + probe layout + events for a loaded Raw."""
+    ch_names = list(raw.ch_names)
+    annotations = raw.annotations if raw.annotations is not None else []
+
+    # ── Channel list (collapsed by default; channel counts dominate the
+    # vertical real estate on dense montages otherwise).
+    with ui.expansion(
+        f"Channels ({len(ch_names)})",
+        icon="sensors",
+    ).classes("w-full"):
+        with ui.column().classes(
+            "max-h-64 overflow-auto gap-1 text-xs font-mono"
+        ):
+            for name in ch_names:
+                ui.label(name).classes("opacity-80")
+
+    # ── 2D probe layout — matplotlib via base64 PNG. ui.matplotlib would
+    # also work, but PNG keeps the snapshot purely declarative and avoids
+    # holding a Figure across the NiceGUI re-render cycle.
+    with ui.expansion("Probe layout", icon="scatter_plot").classes(
+        "w-full"
+    ):
+        probe_html = _render_probe_png(raw)
+        if probe_html is None:
+            ui.label("Probe layout unavailable for this scan.").classes(
+                "text-sm opacity-60"
+            )
+        else:
+            ui.image(probe_html).classes("max-w-md")
+
+    # ── Events / annotations
+    n_events = len(annotations)
+    with ui.expansion(
+        f"Events ({n_events})", icon="event"
+    ).classes("w-full"):
+        if n_events == 0:
+            ui.label("No events recorded in this scan.").classes(
+                "text-sm opacity-60"
+            )
+        else:
+            rows = [
+                {
+                    "description": str(ann["description"]),
+                    "onset": f"{float(ann['onset']):.3f}",
+                    "duration": f"{float(ann['duration']):.3f}",
+                }
+                for ann in annotations
+            ]
+            ui.table(
+                columns=[
+                    {
+                        "name": "description",
+                        "label": "Description",
+                        "field": "description",
+                        "align": "left",
+                    },
+                    {
+                        "name": "onset",
+                        "label": "Onset (s)",
+                        "field": "onset",
+                        "align": "right",
+                    },
+                    {
+                        "name": "duration",
+                        "label": "Duration (s)",
+                        "field": "duration",
+                        "align": "right",
+                    },
+                ],
+                rows=rows,
+                row_key="onset",
+            ).classes("w-full")
+
+
+def _render_probe_png(raw: "mne.io.BaseRaw") -> Optional[str]:
+    """Render the probe layout to a base64-encoded PNG data URL.
+
+    Returns None if MNE refuses to plot (no montage, no sensor positions,
+    or any matplotlib failure). The caller is expected to fall back to a
+    placeholder label in that case.
+    """
+    try:
+        # Lazy imports — matplotlib import time is noticeable at GUI startup,
+        # and this function is only called on a successful Raw load.
+        import matplotlib
+        matplotlib.use("Agg", force=False)
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("matplotlib unavailable for probe layout: %s", exc)
+        return None
+
+    fig = None
+    try:
+        fig = raw.plot_sensors(show=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("raw.plot_sensors failed: %s", exc)
+        if fig is not None:
+            plt.close(fig)
+        return None
+
+    try:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+        encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("probe layout encode failed: %s", exc)
+        return None
+    finally:
+        plt.close(fig)
 
 
 def _kv_row(key: str, value: str) -> None:
@@ -277,7 +490,7 @@ def _render_right_pane(state: AppState) -> None:
     """Right-pane inspector.
 
     Sprint 2.3 shows manifest-level summary (root, scan count, scan-by-
-    format histogram). Sprint 3 replaces this with parameter controls
+    format histogram). Sprint 3+ replaces this with parameter controls
     (preprocess toggles, estimate sliders) when an estimation tab is
     active, and falls back to this summary otherwise.
     """
