@@ -192,7 +192,16 @@ def _maybe_show_shortcut_prompt() -> None:
 
 def _render_header() -> None:
     with ui.column().classes("w-full items-center mt-12 mb-8 gap-2"):
-        ui.label("HRfunc").classes("text-6xl font-bold tracking-tight")
+        # "HR" upright, "func" italic — both Times New Roman to match
+        # the paper's typesetting. ui.html (vs ui.label) lets us emit
+        # the inline ``<em>`` tag for the italic span.
+        ui.html('HR<em>func</em>').style(
+            'font-family: "Times New Roman", Times, serif; '
+            'font-size: 4.5rem; '
+            'font-weight: bold; '
+            'letter-spacing: -0.025em; '
+            'line-height: 1;'
+        )
         ui.label("fNIRS hemodynamic response estimation").classes(
             "text-xl opacity-70"
         )
@@ -378,13 +387,20 @@ async def _pick_folder() -> Optional[Path]:
         )
         return None
 
-    import asyncio
+    # pywebview ≥5 made ``create_file_dialog`` an async coroutine
+    # (older versions were sync-blocking). The old ``run_in_executor``
+    # path returned the coroutine itself un-awaited, so ``paths`` was
+    # a coroutine object and the subsequent subscript raised
+    # ``TypeError: 'coroutine' object is not subscriptable``. Await
+    # the coroutine directly; pywebview's async API is built for the
+    # NiceGUI event loop.
+    import inspect
 
-    loop = asyncio.get_event_loop()
-    paths = await loop.run_in_executor(
-        None,
-        lambda: window.create_file_dialog(webview.FOLDER_DIALOG),
-    )
+    result = window.create_file_dialog(webview.FOLDER_DIALOG)
+    if inspect.isawaitable(result):
+        paths = await result
+    else:
+        paths = result
     if not paths:
         return None
     return Path(paths[0])

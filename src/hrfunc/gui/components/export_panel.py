@@ -486,14 +486,17 @@ async def _pick_save_path(suggested: str, title: str) -> Optional[Path]:
         )
         return None
 
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: window.create_file_dialog(
-            webview.SAVE_DIALOG,
-            save_filename=suggested,
-        ),
+    # pywebview ≥5 returns a coroutine here — see welcome.py:_pick_folder
+    # for the equivalent fix. Await the coroutine when present; older
+    # versions return synchronously.
+    import inspect
+
+    result = window.create_file_dialog(
+        webview.SAVE_DIALOG,
+        save_filename=suggested,
     )
+    if inspect.isawaitable(result):
+        result = await result
     if not result:
         return None
     # pywebview returns a string for SAVE_DIALOG and a list for OPEN/FOLDER
@@ -518,11 +521,10 @@ async def _pick_folder_path(title: str) -> Optional[Path]:
         )
         return None
 
-    loop = asyncio.get_event_loop()
-    paths = await loop.run_in_executor(
-        None,
-        lambda: window.create_file_dialog(webview.FOLDER_DIALOG),
-    )
+    import inspect
+
+    result = window.create_file_dialog(webview.FOLDER_DIALOG)
+    paths = await result if inspect.isawaitable(result) else result
     if not paths:
         return None
     return Path(paths[0])
