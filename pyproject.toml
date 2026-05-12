@@ -43,7 +43,13 @@ Documentation = "https://www.hrfunc.org"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["hrfunc", "hrfunc.io", "hrfunc.gui"]
+packages = [
+    "hrfunc",
+    "hrfunc.io",
+    "hrfunc.gui",
+    "hrfunc.gui.components",
+    "hrfunc.gui.pages",
+    ]
 include-package-data = true
 
 [tool.pytest.ini_options]

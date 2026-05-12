@@ -183,22 +183,6 @@ async def test_welcome_page_shows_version_in_footer(user: User):
 
 
 @pytest.mark.asyncio
-async def test_workspace_stub_renders(user: User):
-    await user.open("/workspace")
-    await user.should_see("Workspace")
-    await user.should_see("Full workspace UI lands in Sprint 2.3")
-
-
-@pytest.mark.asyncio
-async def test_workspace_stub_shows_no_dataset_message(user: User):
-    # state.manifest defaults to None — stub should report that.
-    from hrfunc.gui.state import state
-    state.manifest = None
-    await user.open("/workspace")
-    await user.should_see("No dataset loaded")
-
-
-@pytest.mark.asyncio
 async def test_library_stub_renders(user: User):
     await user.open("/library")
     await user.should_see("HRF Library")
