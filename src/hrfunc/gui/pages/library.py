@@ -140,6 +140,79 @@ def _load_trees(state: AppState) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ROI shift-hover paint — JS injection
+# ---------------------------------------------------------------------------
+
+
+_PAINT_HOOK_HEAD_INJECTED = False
+
+
+def _ensure_shift_tracker_injected() -> None:
+    """Inject a global shift-key tracker into the page head (once per process).
+
+    The tracker writes ``window._hrfShift = True/False`` on Shift down/up,
+    plus a safety reset on window blur (so a Shift-down outside the window
+    followed by a release-outside doesn't leave a stuck shift state).
+
+    Page-render-scope idempotency: every /library render calls this, but
+    a module-level flag ensures we add the ``<script>`` to the document
+    head only once per process. Subsequent calls are no-ops.
+    """
+    global _PAINT_HOOK_HEAD_INJECTED
+    if _PAINT_HOOK_HEAD_INJECTED:
+        return
+    ui.add_head_html(
+        """
+<script>
+  if (window._hrfShiftWired === undefined) {
+    window._hrfShift = false;
+    window._hrfShiftWired = true;
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Shift') window._hrfShift = true;
+    });
+    document.addEventListener('keyup', (e) => {
+      if (e.key === 'Shift') window._hrfShift = false;
+    });
+    window.addEventListener('blur', () => { window._hrfShift = false; });
+  }
+</script>
+"""
+    )
+    _PAINT_HOOK_HEAD_INJECTED = True
+
+
+def _install_paint_hook(plot_id: int) -> None:
+    """Hook the freshly-rendered plotly element's ``plotly_hover`` event.
+
+    Plotly's native hover event includes the points data; what we need
+    beyond that is the Shift-key state. We read it from the global
+    ``window._hrfShift`` flag wired by :func:`_ensure_shift_tracker_injected`,
+    then forward a custom ``roi_paint`` event up to the NiceGUI Python
+    handler via the element's ``$emit``.
+
+    A small ``ui.timer`` delay gives plotly's render cycle time to attach
+    the underlying div to the DOM before we query it.
+    """
+    _ensure_shift_tracker_injected()
+
+    js = f"""
+const el = getElement({plot_id}).$el;
+if (el && el.on && !el._hrfPaintHooked) {{
+  el._hrfPaintHooked = true;
+  el.on('plotly_hover', function(data) {{
+    if (!window._hrfShift) return;
+    if (!data || !data.points || !data.points.length) return;
+    const key = data.points[0].customdata;
+    if (!key) return;
+    getElement({plot_id}).$emit('roi_paint', {{key: key}});
+  }});
+}}
+"""
+
+    ui.timer(0.5, lambda: ui.run_javascript(js), once=True)
+
+
+# ---------------------------------------------------------------------------
 # Toolbar + empty state
 # ---------------------------------------------------------------------------
 
@@ -298,6 +371,50 @@ def _render_filter_pane(state: AppState) -> None:
             "forehead/head-mounted fNIRS optodes physically sit."
         )
 
+        # ── Region-of-Interest controls. Anchor is set by clicking an
+        # HRF in the viz; the radius slider sweeps neighbours into the
+        # ROI; Shift+hover adds individual HRFs (paint mode) for
+        # non-spherical selections. The averaged ROI trace renders in
+        # the detail pane (right side of the page).
+        ui.separator()
+        ui.label("Region of interest").classes(
+            "text-xs uppercase opacity-60 tracking-wide"
+        )
+        ui.label(
+            "Click an HRF to anchor. Hold Shift + hover to paint extra "
+            "same-oxygenation HRFs into the selection. The detail pane "
+            "shows the averaged trace."
+        ).classes("text-xs opacity-60")
+
+        radius_label = ui.label(
+            f"Radius: {state.library_roi_radius_m * 100:.1f} cm"
+        ).classes("text-xs font-mono opacity-80")
+
+        def _on_radius_change(event) -> None:
+            # The slider is in centimetres for human-readable steps; we
+            # store metres on state so the geometric compute keeps its
+            # MNI-meter native units.
+            cm = float(event.value)
+            state.library_roi_radius_m = cm / 100.0
+            radius_label.set_text(f"Radius: {cm:.1f} cm")
+            state.publish("library_filter_changed", state.library_filter)
+
+        ui.slider(
+            min=0.5, max=10.0, step=0.1,
+            value=state.library_roi_radius_m * 100.0,
+            on_change=_on_radius_change,
+        ).props("dense")
+
+        def _on_clear_roi() -> None:
+            state.library_selected_hrf = None
+            state.library_roi_painted.clear()
+            state.publish("library_selection_changed", None)
+            state.publish("library_filter_changed", state.library_filter)
+
+        ui.button(
+            "Clear ROI", on_click=_on_clear_roi
+        ).props("flat dense")
+
 
 # ---------------------------------------------------------------------------
 # Center pane: HRtree 3D viz
@@ -330,13 +447,26 @@ def _render_viz_pane(state: AppState) -> None:
             return
 
         with ui.column().classes("w-full h-full p-3 gap-2"):
+            # Compute ROI keys now so the figure draws the highlight
+            # halo and the label can report the count.
+            anchor = state.library_selected_hrf
+            roi_keys = compute_roi_keys(
+                matched,
+                anchor,
+                state.library_roi_radius_m,
+                state.library_roi_painted,
+            )
+            roi_status = ""
+            if roi_keys:
+                roi_status = f"  •  ROI: {len(roi_keys)} highlighted"
             ui.label(
-                f"HRtree — {len(matched)} HRFs shown"
+                f"HRtree — {len(matched)} HRFs shown{roi_status}"
             ).classes("text-sm opacity-70")
             fig = build_plotly_figure(
                 matched,
                 show_brain=state.library_show_brain,
                 show_scalp=state.library_show_scalp,
+                roi_keys=roi_keys,
             )
             plot = ui.plotly(fig).classes("w-full h-full")
 
@@ -351,10 +481,39 @@ def _render_viz_pane(state: AppState) -> None:
                 if hrf is None:
                     return
                 # Stash the key on the dict so the detail pane can show it.
+                # A plain click also resets the painted set — the user is
+                # picking a fresh anchor, so accumulated shift-hover paint
+                # from a prior anchor shouldn't carry over.
                 state.library_selected_hrf = {**hrf, "_key": hrf_key}
+                state.library_roi_painted.clear()
                 state.publish("library_selection_changed", hrf_key)
 
+            def _on_paint(event) -> None:
+                # Shift+hover fired our custom roi_paint event with a key
+                # in event.args. Add to painted set, refresh viz + detail.
+                args = getattr(event, "args", None) or {}
+                key = args.get("key") if isinstance(args, dict) else None
+                if not key or key not in matched:
+                    return
+                # Only paint HRFs that match the anchor's oxygenation so
+                # the average trace doesn't mix HbO + HbR (different
+                # physiological signals, scientifically wrong to average).
+                anchor_inner = state.library_selected_hrf
+                if anchor_inner is not None:
+                    if matched[key].get("oxygenation") != anchor_inner.get("oxygenation"):
+                        return
+                if key in state.library_roi_painted:
+                    return  # already painted, no-op
+                state.library_roi_painted.add(key)
+                state.publish("library_selection_changed", key)
+
             plot.on("plotly_click", _on_click)
+            plot.on("roi_paint", _on_paint)
+            # Wire the JS shift-tracker + plotly_hover hook AFTER the
+            # plotly element has rendered. Slight delay so the
+            # underlying div is queryable in the DOM. once=True so
+            # the hook isn't registered repeatedly on each refresh.
+            _install_paint_hook(plot.id)
 
     _viz_body()
 
@@ -512,11 +671,93 @@ def _render_detail_pane(state: AppState) -> None:
                 if png is not None:
                     ui.image(png).classes("max-w-md")
 
+            # ROI average plot (only renders when the ROI has at least
+            # 2 averageable same-oxygenation HRFs — fewer than that
+            # means there's nothing useful to average).
+            _render_roi_average(state)
+
     _detail_body()
 
     def _refresh_detail(_payload=None) -> None:
         _detail_body.refresh()
     state.subscribe("library_selection_changed", _refresh_detail)
+    # The radius slider publishes ``library_filter_changed`` because the
+    # viz already listens there; the detail pane needs to refresh too
+    # so the ROI-average plot updates when the user widens the radius.
+    state.subscribe("library_filter_changed", _refresh_detail)
+
+
+def _render_roi_average(state: AppState) -> None:
+    """Render the averaged-trace plot for the current ROI.
+
+    Pulls ``compute_roi_keys`` for the same set the viz highlights, then
+    feeds those to ``compute_roi_average``. Renders nothing when the ROI
+    has fewer than 2 averageable HRFs.
+    """
+    anchor = state.library_selected_hrf
+    if anchor is None:
+        return
+    all_hrfs = gather_library_hrfs(state)
+    matched = apply_filter(all_hrfs, state.library_filter)
+    roi_keys = compute_roi_keys(
+        matched,
+        anchor,
+        state.library_roi_radius_m,
+        state.library_roi_painted,
+    )
+    result = compute_roi_average(matched, roi_keys)
+    if result is None:
+        return
+    mean, std, n = result
+    sfreq = float(anchor.get("sfreq") or 1.0)
+    if sfreq <= 0:
+        sfreq = 1.0
+    ui.separator()
+    ui.label(
+        f"ROI average ({n} HRFs)"
+    ).classes("text-xs uppercase opacity-60 tracking-wide")
+    png = _render_roi_average_png(mean, std, sfreq, n)
+    if png is not None:
+        ui.image(png).classes("max-w-md")
+
+
+def _render_roi_average_png(
+    mean, std, sfreq: float, n: int
+) -> Optional[str]:
+    """Plot ROI-averaged trace with ±1 std shading."""
+    try:
+        import base64
+        import io as _io
+        import matplotlib
+        matplotlib.use("Agg", force=False)
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("matplotlib unavailable for ROI average: %s", exc)
+        return None
+    fig = None
+    try:
+        t = np.arange(len(mean)) / sfreq
+        fig, ax = plt.subplots(1, 1, figsize=(5, 2.5))
+        ax.plot(t, mean, lw=1.4, color="#f59e0b", label=f"mean (n={n})")
+        ax.fill_between(
+            t, mean - std, mean + std,
+            alpha=0.18, color="#f59e0b",
+            label="±1 std",
+        )
+        ax.set_xlabel("time (s)")
+        ax.set_ylabel("amplitude (a.u.)")
+        ax.legend(fontsize=8, loc="best")
+        fig.tight_layout()
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ROI average render failed: %s", exc)
+        return None
+    finally:
+        if fig is not None:
+            plt.close(fig)
 
 
 def _kv(key: str, value: str) -> None:
@@ -632,10 +873,11 @@ def build_plotly_figure(
     *,
     show_brain: bool = False,
     show_scalp: bool = False,
+    roi_keys: Optional[Any] = None,
 ):
     """Build the 3D scatter figure for the given HRF dict.
 
-    Up to four traces, ordered so the HRF scatter renders on top:
+    Up to five traces, ordered so the ROI highlight renders on top:
 
     - **Scalp** (``go.Mesh3d``, only when ``show_scalp=True``):
       fsaverage outer-skin surface — anatomically where the optodes
@@ -645,14 +887,13 @@ def build_plotly_figure(
       originates. Drawn inside the scalp.
     - **HbO** (``go.Scatter3d``, red): oxygenated HRFs.
     - **HbR** (``go.Scatter3d``, blue): deoxygenated HRFs.
+    - **ROI** (``go.Scatter3d``, gold, larger): every HRF whose key
+      is in ``roi_keys``. Drawn last so the highlight sits above the
+      regular markers. Skipped when ``roi_keys`` is None or empty.
 
-    Both overlays are independent toggles — users can show either,
-    both, or neither. Both have ``hoverinfo="skip"`` and
-    ``showlegend=False`` so they don't clutter legend / hover UX.
-
-    Each scatter point's ``customdata`` is the HRF key so click
-    handlers can look it up; ``hovertext`` carries a short context
-    summary.
+    Mesh overlays have ``hoverinfo="skip"`` and ``showlegend=False``
+    so they don't clutter legend / hover UX. Each scatter point's
+    ``customdata`` is the HRF key for click + shift-hover handlers.
     """
     import plotly.graph_objects as go
 
@@ -727,7 +968,18 @@ def build_plotly_figure(
             go.Scatter3d(
                 x=hbo_x, y=hbo_y, z=hbo_z,
                 mode="markers",
-                marker=dict(size=4, color="#fb7185", opacity=0.85),
+                # HbO and HbR for the same optode pair share the exact 3D
+                # location (one source-detector → two measurements at one
+                # spot). Plotly Scatter3d draws traces in order, so without
+                # distinct symbols the second trace fully occludes the first.
+                # Distinct symbols + sizes keep both visible at the same xyz.
+                marker=dict(
+                    size=6,
+                    color="#fb7185",
+                    opacity=0.9,
+                    symbol="circle",
+                    line=dict(width=1, color="#7f1d1d"),
+                ),
                 name="HbO",
                 customdata=hbo_keys,
                 hovertext=hbo_hover,
@@ -739,13 +991,54 @@ def build_plotly_figure(
             go.Scatter3d(
                 x=hbr_x, y=hbr_y, z=hbr_z,
                 mode="markers",
-                marker=dict(size=4, color="#38bdf8", opacity=0.85),
+                marker=dict(
+                    size=4,
+                    color="#38bdf8",
+                    opacity=0.85,
+                    symbol="diamond",
+                    line=dict(width=1, color="#0c4a6e"),
+                ),
                 name="HbR",
                 customdata=hbr_keys,
                 hovertext=hbr_hover,
                 hoverinfo="text",
             )
         )
+
+    # ROI highlight — drawn LAST so the gold markers visually sit above
+    # the regular HbO/HbR scatter (same points still appear in the
+    # underlying trace; the ROI layer is an emphasis halo).
+    if roi_keys:
+        roi_x, roi_y, roi_z, roi_keys_list, roi_hover = [], [], [], [], []
+        for key in roi_keys:
+            hrf = hrfs.get(key)
+            if hrf is None:
+                continue
+            loc = hrf.get("location")
+            if loc is None or len(loc) < 3:
+                continue
+            roi_x.append(loc[0])
+            roi_y.append(loc[1])
+            roi_z.append(loc[2])
+            roi_keys_list.append(key)
+            roi_hover.append(_hover_text_for(key, hrf))
+        if roi_x:
+            traces.append(
+                go.Scatter3d(
+                    x=roi_x, y=roi_y, z=roi_z,
+                    mode="markers",
+                    marker=dict(
+                        size=8,
+                        color="#fbbf24",   # gold
+                        opacity=0.9,
+                        line=dict(width=1, color="#92400e"),
+                    ),
+                    name=f"ROI ({len(roi_x)})",
+                    customdata=roi_keys_list,
+                    hovertext=roi_hover,
+                    hoverinfo="text",
+                )
+            )
 
     fig = go.Figure(data=traces)
     fig.update_layout(
@@ -761,6 +1054,113 @@ def build_plotly_figure(
         plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
+
+
+def compute_roi_keys(
+    hrfs: Dict[str, Dict[str, Any]],
+    anchor: Optional[Dict[str, Any]],
+    radius_m: float,
+    painted: Optional[Any] = None,
+) -> "set":
+    """Return the set of HRF keys that belong to the current ROI.
+
+    Membership rules:
+    - If ``anchor`` is set and has a 3-element ``location``, every HRF
+      with the SAME ``oxygenation`` as the anchor whose Euclidean
+      distance to the anchor is ``<= radius_m`` is included.
+    - Every key in ``painted`` is included (filtered to the anchor's
+      oxygenation when an anchor is set, so a stray paint on the
+      wrong haemoglobin doesn't contaminate the average).
+
+    The anchor's own key is always part of the ROI when it's still in
+    ``hrfs`` (otherwise filtering away the anchor's neighbourhood
+    would be confusing).
+
+    Module-level so tests can hit it without spinning up the GUI.
+    """
+    out: set = set()
+    if anchor is None and not painted:
+        return out
+
+    anchor_loc = None
+    anchor_oxy = None
+    anchor_key = None
+    if anchor is not None:
+        anchor_loc = anchor.get("location")
+        anchor_oxy = anchor.get("oxygenation")
+        anchor_key = anchor.get("_key")
+        if anchor_key is not None and anchor_key in hrfs:
+            out.add(anchor_key)
+
+    if anchor_loc is not None and len(anchor_loc) >= 3 and radius_m > 0:
+        ax, ay, az = float(anchor_loc[0]), float(anchor_loc[1]), float(anchor_loc[2])
+        r2 = float(radius_m) * float(radius_m)
+        for key, hrf in hrfs.items():
+            loc = hrf.get("location")
+            if loc is None or len(loc) < 3:
+                continue
+            if anchor_oxy is not None and hrf.get("oxygenation") != anchor_oxy:
+                continue
+            dx, dy, dz = float(loc[0]) - ax, float(loc[1]) - ay, float(loc[2]) - az
+            if dx * dx + dy * dy + dz * dz <= r2:
+                out.add(key)
+
+    if painted:
+        for key in painted:
+            if key not in hrfs:
+                continue
+            if anchor_oxy is not None:
+                if hrfs[key].get("oxygenation") != anchor_oxy:
+                    continue
+            out.add(key)
+
+    return out
+
+
+def compute_roi_average(
+    hrfs: Dict[str, Dict[str, Any]],
+    roi_keys: Any,
+):
+    """Average the ``hrf_mean`` arrays of all HRFs in the ROI.
+
+    Returns ``(mean, std, n_used)`` numpy arrays + a count, or None if
+    fewer than 2 traces in the ROI are averageable.
+
+    Skips HRFs with empty / None / mismatched-length ``hrf_mean``.
+    Anchor's trace length is the canonical length; HRFs whose traces
+    don't match are skipped (we'd otherwise smear different durations
+    together silently).
+
+    Module-level so tests can call without a UI.
+    """
+    import numpy as np
+
+    traces = []
+    canonical_len: Optional[int] = None
+    for key in roi_keys:
+        hrf = hrfs.get(key)
+        if hrf is None:
+            continue
+        trace = hrf.get("hrf_mean")
+        if trace is None:
+            continue
+        try:
+            arr = np.asarray(trace, dtype=float)
+        except Exception:  # noqa: BLE001
+            continue
+        if arr.size == 0:
+            continue
+        if canonical_len is None:
+            canonical_len = arr.shape[0]
+        if arr.shape[0] != canonical_len:
+            continue
+        traces.append(arr)
+
+    if len(traces) < 2:
+        return None
+
+    stacked = np.vstack(traces)
+    return stacked.mean(axis=0), stacked.std(axis=0, ddof=0), len(traces)
 
 
 def _hover_text_for(key: str, hrf: Dict[str, Any]) -> str:

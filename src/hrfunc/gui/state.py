@@ -161,6 +161,29 @@ class AppState:
     # cortex-relative position is the scientifically meaningful one.
     library_show_brain: bool = True
     library_show_scalp: bool = True
+    # ROI selection on the /library viz. Two ways to add HRFs to the
+    # ROI, used in combination:
+    #
+    # 1. **Anchor + radius**: click an HRF and every same-oxygenation
+    #    HRF inside the sphere of radius ``library_roi_radius_m``
+    #    around it gets included. The clicked HRF is the same dict
+    #    as ``library_selected_hrf`` (anchor + detail-pane focus
+    #    share state).
+    # 2. **Shift-hover painting**: hold Shift and hover over HRFs.
+    #    Each hovered key is added to ``library_roi_painted`` and
+    #    joins the ROI regardless of radius. Lets researchers trace
+    #    a non-spherical region by mouse, like a lasso.
+    #
+    # The full ROI is the union of (in-radius set) and the painted
+    # set, filtered to the anchor's oxygenation. The averaged trace
+    # in the detail pane is computed from this union.
+    #
+    # Radius default 0.02 m (2 cm) — a typical fNIRS short-separation
+    # neighbourhood. ``library_roi_painted`` is cleared on every new
+    # anchor click so the painted carryover from a prior anchor
+    # doesn't follow into a fresh selection.
+    library_roi_radius_m: float = 0.02
+    library_roi_painted: set = field(default_factory=set)
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -238,6 +261,8 @@ class AppState:
         # context overlays when they re-enter the library page.
         self.library_show_brain = True
         self.library_show_scalp = True
+        self.library_roi_radius_m = 0.02
+        self.library_roi_painted.clear()
         self.hrf_selected_channel = None
 
 

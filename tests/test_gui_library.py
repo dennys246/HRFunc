@@ -410,6 +410,175 @@ class TestStateLibraryOverlays:
 
 
 # ---------------------------------------------------------------------------
+# Region-of-Interest selection
+# ---------------------------------------------------------------------------
+
+
+class TestComputeRoiKeys:
+    """``compute_roi_keys`` is the membership rule for the ROI: the
+    anchor's same-oxygenation neighbours within ``radius_m`` plus any
+    keys manually added via shift-hover paint."""
+
+    def _hrfs(self):
+        return {
+            "hbo:a": {"location": [0.00, 0.00, 0.00], "oxygenation": True},
+            "hbo:b": {"location": [0.01, 0.00, 0.00], "oxygenation": True},  # 1cm
+            "hbo:c": {"location": [0.05, 0.00, 0.00], "oxygenation": True},  # 5cm
+            "hbr:d": {"location": [0.00, 0.00, 0.00], "oxygenation": False},  # same loc, wrong oxy
+            "hbo:loc_less": {"oxygenation": True},  # no location
+        }
+
+    def test_no_anchor_no_painted_returns_empty(self):
+        hrfs = self._hrfs()
+        keys = library.compute_roi_keys(hrfs, None, 0.02, set())
+        assert keys == set()
+
+    def test_anchor_only_within_radius_same_oxygenation(self):
+        hrfs = self._hrfs()
+        anchor = {**hrfs["hbo:a"], "_key": "hbo:a"}
+        keys = library.compute_roi_keys(hrfs, anchor, 0.02, set())
+        # 2 cm radius → anchor + 1cm-away `b`. `c` at 5cm is excluded.
+        assert keys == {"hbo:a", "hbo:b"}
+
+    def test_excludes_different_oxygenation(self):
+        """``hbr:d`` sits at the same xyz as anchor but is HbR — must be
+        excluded even though it's distance-0. Averaging HbO with HbR is
+        scientifically wrong."""
+        hrfs = self._hrfs()
+        anchor = {**hrfs["hbo:a"], "_key": "hbo:a"}
+        keys = library.compute_roi_keys(hrfs, anchor, 0.02, set())
+        assert "hbr:d" not in keys
+
+    def test_widening_radius_picks_up_more(self):
+        hrfs = self._hrfs()
+        anchor = {**hrfs["hbo:a"], "_key": "hbo:a"}
+        # 10 cm radius → all HbO with locations (a, b, c) — not loc_less.
+        keys = library.compute_roi_keys(hrfs, anchor, 0.10, set())
+        assert keys == {"hbo:a", "hbo:b", "hbo:c"}
+
+    def test_painted_set_unions_into_roi(self):
+        hrfs = self._hrfs()
+        anchor = {**hrfs["hbo:a"], "_key": "hbo:a"}
+        # 0.5cm radius would leave only the anchor; painted "c" widens
+        # the ROI manually.
+        keys = library.compute_roi_keys(hrfs, anchor, 0.005, {"hbo:c"})
+        assert "hbo:c" in keys
+        assert "hbo:a" in keys
+
+    def test_painted_filtered_by_anchor_oxygenation(self):
+        """Even if the user paints an HbR HRF, anchor=HbO drops it from
+        the ROI so the average stays mono-haemoglobin."""
+        hrfs = self._hrfs()
+        anchor = {**hrfs["hbo:a"], "_key": "hbo:a"}
+        keys = library.compute_roi_keys(hrfs, anchor, 0.005, {"hbr:d"})
+        assert "hbr:d" not in keys
+
+
+class TestComputeRoiAverage:
+    def test_returns_none_with_fewer_than_two_traces(self):
+        hrfs = {
+            "a": {"hrf_mean": [1.0, 2.0, 3.0]},
+        }
+        assert library.compute_roi_average(hrfs, {"a"}) is None
+
+    def test_averages_same_length_traces(self):
+        import numpy as np
+        hrfs = {
+            "a": {"hrf_mean": [1.0, 2.0, 3.0]},
+            "b": {"hrf_mean": [3.0, 4.0, 5.0]},
+        }
+        result = library.compute_roi_average(hrfs, {"a", "b"})
+        assert result is not None
+        mean, std, n = result
+        assert n == 2
+        np.testing.assert_array_almost_equal(mean, [2.0, 3.0, 4.0])
+
+    def test_skips_mismatched_length_traces(self):
+        hrfs = {
+            "a": {"hrf_mean": [1.0, 2.0, 3.0]},
+            "b": {"hrf_mean": [1.0, 2.0]},  # different length → skip
+            "c": {"hrf_mean": [5.0, 6.0, 7.0]},
+        }
+        result = library.compute_roi_average(hrfs, {"a", "b", "c"})
+        assert result is not None
+        _, _, n = result
+        assert n == 2  # b was skipped
+
+    def test_skips_missing_hrfs_silently(self):
+        hrfs = {
+            "a": {"hrf_mean": [1.0, 2.0]},
+            "b": {"hrf_mean": [3.0, 4.0]},
+        }
+        # nonexistent-key in the ROI set should be tolerated
+        result = library.compute_roi_average(hrfs, {"a", "b", "ghost"})
+        assert result is not None
+        _, _, n = result
+        assert n == 2
+
+
+class TestStateLibraryROI:
+    def test_radius_default_is_2cm(self):
+        s = AppState()
+        assert s.library_roi_radius_m == 0.02
+
+    def test_painted_set_defaults_empty(self):
+        s = AppState()
+        assert s.library_roi_painted == set()
+
+    def test_reset_clears_painted_and_restores_radius(self):
+        s = AppState()
+        s.library_roi_radius_m = 0.07
+        s.library_roi_painted.add("some-key")
+        s.reset()
+        assert s.library_roi_radius_m == 0.02
+        assert s.library_roi_painted == set()
+
+
+class TestBuildFigureWithRoi:
+    def _hrfs(self):
+        return {
+            "hbo:a": {"location": [0.0, 0.0, 0.0], "oxygenation": True, "context": {}},
+            "hbo:b": {"location": [0.01, 0.0, 0.0], "oxygenation": True, "context": {}},
+            "hbr:c": {"location": [-0.01, 0.0, 0.0], "oxygenation": False, "context": {}},
+        }
+
+    def test_no_roi_keys_adds_no_roi_trace(self):
+        library._MESH_CACHE.clear()
+        fig = library.build_plotly_figure(self._hrfs(), roi_keys=None)
+        names = [t.name for t in fig.data]
+        assert all(not n.startswith("ROI") for n in names)
+
+    def test_roi_trace_added_with_count(self):
+        library._MESH_CACHE.clear()
+        fig = library.build_plotly_figure(
+            self._hrfs(), roi_keys={"hbo:a", "hbo:b"}
+        )
+        names = [t.name for t in fig.data]
+        assert any(n.startswith("ROI") for n in names)
+        roi_trace = next(t for t in fig.data if t.name.startswith("ROI"))
+        assert len(roi_trace.x) == 2
+
+    def test_roi_trace_is_last_drawn(self):
+        """ROI highlight should sit on top of the regular HbO/HbR markers."""
+        library._MESH_CACHE.clear()
+        fig = library.build_plotly_figure(
+            self._hrfs(), roi_keys={"hbo:a"}
+        )
+        # ROI trace must be the final element so it paints over scatter.
+        assert fig.data[-1].name.startswith("ROI")
+
+    def test_hbo_hbr_distinct_symbols(self):
+        """Regression for the co-located HbO+HbR occlusion bug — both
+        markers need distinct plotly symbols so they remain visible
+        when at the same 3D coordinates."""
+        library._MESH_CACHE.clear()
+        fig = library.build_plotly_figure(self._hrfs())
+        hbo = next(t for t in fig.data if t.name == "HbO")
+        hbr = next(t for t in fig.data if t.name == "HbR")
+        assert hbo.marker.symbol != hbr.marker.symbol
+
+
+# ---------------------------------------------------------------------------
 # Click extraction
 # ---------------------------------------------------------------------------
 
