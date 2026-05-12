@@ -158,6 +158,80 @@ class TestGatherLibraryHrfs:
         assert True in oxys
         assert False in oxys
 
+    def test_excludes_global_sentinel_entries(self):
+        """Regression: globals at sentinel location ~[360, 360, 360] were
+        dragging plotly's aspectmode=data axis range out 5000x and
+        compressing the real 0.07m HRF cluster to a single invisible
+        pixel. The user reported 'I only see 2 globals on the screen'.
+        gather_library_hrfs now skips any entry whose tree key starts
+        with 'global_'."""
+        s = AppState()
+        fake_hbo = type("FakeTree", (), {
+            "root": True,
+            "gather": lambda self, root: {
+                "s1_d1_hbo-temp": {"oxygenation": True, "location": [0.05, 0.05, 0.05]},
+                "global_hbo-temp": {"oxygenation": True, "location": [360, 360, 360]},
+            },
+        })()
+        s.library_hbo = fake_hbo
+        s.library_hbr = None
+
+        result = library.gather_library_hrfs(s)
+        keys = list(result.keys())
+        assert any("s1_d1_hbo" in k for k in keys), "real HRF should be present"
+        assert not any("global_" in k for k in keys), \
+            "global sentinel entries must be filtered out"
+        # And no entries with sentinel-scale locations
+        for hrf in result.values():
+            loc = hrf.get("location") or []
+            if len(loc) >= 3:
+                assert max(abs(c) for c in loc[:3]) < 1.0, \
+                    f"location {loc} looks like a sentinel; should have been filtered"
+
+    def test_namespaces_prefix_preserves_cross_file_collisions(self):
+        """Regression: the bundled HbO and HbR JSONs share at least one key
+        (e.g. ``s8_d4_hbr-temp`` appears in both). The previous plain
+        dict.update silently dropped one of the duplicates. Re-keying
+        with ``hbo:`` / ``hbr:`` prefixes preserves both."""
+        s = AppState()
+        shared = {"oxygenation": True, "location": [0.01, 0.02, 0.03]}
+        fake_hbo = type("FakeTree", (), {
+            "root": True,
+            "gather": lambda self, root: {"shared-key": shared},
+        })()
+        fake_hbr = type("FakeTree", (), {
+            "root": True,
+            "gather": lambda self, root: {
+                "shared-key": {**shared, "oxygenation": False},
+            },
+        })()
+        s.library_hbo = fake_hbo
+        s.library_hbr = fake_hbr
+
+        result = library.gather_library_hrfs(s)
+        # Both copies should survive, distinguished by namespace prefix
+        assert "hbo:shared-key" in result
+        assert "hbr:shared-key" in result
+        assert result["hbo:shared-key"]["oxygenation"] is True
+        assert result["hbr:shared-key"]["oxygenation"] is False
+
+    def test_bundled_library_no_sentinel_locations_reach_viz(self):
+        """End-to-end: after gather_library_hrfs filters globals, every
+        surviving HRF has an MNI-scale location (< 1 meter magnitude).
+        plotly's aspectmode=data won't blow up the axis range."""
+        s = AppState()
+        _silent(library._load_trees, s)
+        all_hrfs = _silent(library.gather_library_hrfs, s)
+        for key, hrf in all_hrfs.items():
+            loc = hrf.get("location") or []
+            if len(loc) >= 3:
+                max_coord = max(abs(c) for c in loc[:3])
+                assert max_coord < 1.0, (
+                    f"HRF {key} has location {loc} with coord {max_coord} m — "
+                    f"sentinel locations should have been filtered, real "
+                    f"optode locations should be on head scale (~0.1 m)."
+                )
+
 
 # ---------------------------------------------------------------------------
 # build_plotly_figure
