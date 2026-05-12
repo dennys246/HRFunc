@@ -1,4 +1,4 @@
-# HRFunc Known Issues
+# HRfunc Known Issues
 
 **Status as of:** 2026-04-14
 **Active work:** v1.2.0 correctness release (10 branches in flight, 6 merged to main, 4 pushed pending merge)

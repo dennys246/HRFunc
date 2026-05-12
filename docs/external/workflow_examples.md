@@ -1,6 +1,6 @@
-# HRFunc Workflow Examples
+# HRfunc Workflow Examples
 
-Practical end-to-end examples for the most common HRFunc workflows. Assumes you've already installed HRFunc and have a working MNE-Python environment.
+Practical end-to-end examples for the most common HRfunc workflows. Assumes you've already installed HRfunc and have a working MNE-Python environment.
 
 For reference-level documentation of each function, see [api_reference.md](api_reference.md).
 
@@ -22,7 +22,7 @@ import numpy as np
 
 ## Workflow 1 — Localize pre-trained HRFs to a new scan
 
-Use this when you don't have subject-specific HRF estimates and want to rely on HRFunc's bundled community library. The library is spatially indexed by optode location, so each channel gets the nearest match.
+Use this when you don't have subject-specific HRF estimates and want to rely on HRfunc's bundled community library. The library is spatially indexed by optode location, so each channel gets the nearest match.
 
 ```python
 # Load a scan
@@ -213,7 +213,7 @@ print(f"Canonical HbO at 10 Hz, 30 s: {len(canonical.trace)} samples")
 
 ## Units reminder
 
-HRFunc intentionally outputs HRF traces and deconvolved neural activity in **arbitrary units (a.u.)**, matching the fMRI BOLD analysis convention. Traces are z-score-normalized inputs and peak-normalized kernels; the absolute magnitude is not meaningful. Treat HRF shapes and activity traces as relative templates for comparison across conditions and subjects. See [api_reference.md](api_reference.md#units-convention) for the full rationale.
+HRfunc intentionally outputs HRF traces and deconvolved neural activity in **arbitrary units (a.u.)**, matching the fMRI BOLD analysis convention. Traces are z-score-normalized inputs and peak-normalized kernels; the absolute magnitude is not meaningful. Treat HRF shapes and activity traces as relative templates for comparison across conditions and subjects. See [api_reference.md](api_reference.md#units-convention) for the full rationale.
 
 ---
 
@@ -230,4 +230,4 @@ scan = mne.io.read_raw_nirx("path/to/nirx_directory")
 scan = mne.io.read_raw_fif("subject.fif")
 ```
 
-HRFunc accepts any `mne.io.Raw` object.
+HRfunc accepts any `mne.io.Raw` object.

@@ -1,6 +1,6 @@
-"""Cross-platform "install HRFunc to system menu" shortcut helpers.
+"""Cross-platform "install HRfunc to system menu" shortcut helpers.
 
-The HRFunc GUI is designed for fNIRS researchers who don't otherwise live
+The HRfunc GUI is designed for fNIRS researchers who don't otherwise live
 in a terminal. Requiring them to type ``hrfunc`` every time they want to
 analyze a scan defeats the point of shipping a GUI — so we install a
 system-level launcher (Spotlight on macOS, Start menu on Windows,
@@ -9,7 +9,7 @@ script.
 
 The heavy lifting is delegated to ``pyshortcuts`` (a small cross-platform
 shortcut-builder library that handles the per-OS file formats and icon
-conversions). HRFunc only contributes:
+conversions). HRfunc only contributes:
 
 - ``install_shortcut`` — the high-level entry point. Resolves the icon
   asset bundled inside ``hrfunc.assets``, dispatches to
@@ -38,7 +38,7 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 # The user-facing name that appears in Spotlight / Start menu / Activities.
-SHORTCUT_NAME = "HRFunc"
+SHORTCUT_NAME = "HRfunc"
 SHORTCUT_DESCRIPTION = (
     "fNIRS hemodynamic response function estimation "
     "and neural activity recovery"
@@ -160,7 +160,7 @@ def install_shortcut(
             locations=[],
             message=(
                 "Could not find the installed `hrfunc` console script. "
-                "Reinstall HRFunc with `pip install --force-reinstall "
+                "Reinstall HRfunc with `pip install --force-reinstall "
                 "hrfunc[gui]` and try again."
             ),
         )
@@ -200,7 +200,7 @@ def install_shortcut(
     if is_mac:
         moved = _move_mac_app_to_applications()
         if moved is not None:
-            logger.info("moved HRFunc.app to %s", moved)
+            logger.info("moved HRfunc.app to %s", moved)
 
     written = _discover_shortcuts()
     if not written:
@@ -218,12 +218,12 @@ def install_shortcut(
     return InstallResult(
         ok=True,
         locations=written,
-        message=f"HRFunc shortcut installed: {where}",
+        message=f"HRfunc shortcut installed: {where}",
     )
 
 
 def _move_mac_app_to_applications() -> Optional[Path]:
-    """Move ``~/Desktop/HRFunc.app`` to ``~/Applications/HRFunc.app``.
+    """Move ``~/Desktop/HRfunc.app`` to ``~/Applications/HRfunc.app``.
 
     pyshortcuts' macOS path always writes the .app bundle to Desktop.
     Spotlight will index it there (the home directory is included in
@@ -257,7 +257,7 @@ def _move_mac_app_to_applications() -> Optional[Path]:
 
 
 def uninstall_shortcut() -> UninstallResult:
-    """Delete any HRFunc shortcut files we can find.
+    """Delete any HRfunc shortcut files we can find.
 
     Walks the standard pyshortcuts output directories (Desktop +
     Applications / Start menu / Activities for the current OS) and
@@ -269,7 +269,7 @@ def uninstall_shortcut() -> UninstallResult:
         return UninstallResult(
             ok=True,
             removed=[],
-            message="No HRFunc shortcut found to remove.",
+            message="No HRfunc shortcut found to remove.",
         )
 
     removed: List[Path] = []
@@ -290,14 +290,14 @@ def uninstall_shortcut() -> UninstallResult:
             ok=False,
             removed=[],
             message=(
-                f"Could not remove HRFunc shortcuts: "
+                f"Could not remove HRfunc shortcuts: "
                 f"{', '.join(str(p) for p in failed)}"
             ),
         )
     return UninstallResult(
         ok=True,
         removed=removed,
-        message=f"Removed {len(removed)} HRFunc shortcut(s).",
+        message=f"Removed {len(removed)} HRfunc shortcut(s).",
     )
 
 
@@ -358,7 +358,7 @@ def _resolve_target_script() -> Optional[str]:
 
 
 def _discover_shortcuts() -> List[Path]:
-    """Return existing HRFunc shortcut files in the standard locations.
+    """Return existing HRfunc shortcut files in the standard locations.
 
     Walks pyshortcuts' get_folders() output plus a hardcoded
     ``~/Applications`` directory on macOS (where we post-move .app

@@ -1,4 +1,4 @@
-# HRFunc API Reference
+# HRfunc API Reference
 
 **Version:** 1.2.0 (correctness release, in flight)
 **Python:** ≥ 3.8
@@ -31,7 +31,7 @@ scan = hrf.preprocess_fnirs(scan)           # Preprocess fNIRS data
 
 ## Return-value capture pattern
 
-Several MNE NIRS preprocessing steps internally call `.copy().load_data()` and return a new object rather than mutating in place. HRFunc follows the same convention:
+Several MNE NIRS preprocessing steps internally call `.copy().load_data()` and return a new object rather than mutating in place. HRfunc follows the same convention:
 
 ```python
 # WRONG — scan is still unpreprocessed
@@ -275,7 +275,7 @@ except ValueError as e:
 
 ## `preprocess_fnirs(scan, deconvolution=False)`
 
-Preprocess a raw fNIRS scan using the standard HRFunc pipeline. Returns a **new** MNE Raw object — capture the return value.
+Preprocess a raw fNIRS scan using the standard HRfunc pipeline. Returns a **new** MNE Raw object — capture the return value.
 
 **Pipeline steps:**
 1. Convert to optical density
@@ -389,7 +389,7 @@ Context keys with `None` values are excluded from similarity comparisons. Pass c
 
 ## Units Convention
 
-**HRFunc outputs estimated HRFs and deconvolved neural activity in arbitrary units (a.u.)**, matching the fMRI BOLD analysis convention. Specifically:
+**HRfunc outputs estimated HRFs and deconvolved neural activity in arbitrary units (a.u.)**, matching the fMRI BOLD analysis convention. Specifically:
 
 - `estimate_hrf` z-scores the signal before the least-squares solve and does **not** denormalize back to absolute hemoglobin concentrations. Returned HRF traces are in z-score space.
 - `estimate_activity` peak-normalizes the HRF kernel before using it as a deconvolution template. Returned neural activity is a relative deviation from baseline, not an absolute metric.
@@ -413,7 +413,7 @@ This is intentional. Treat HRF shapes and neural activity traces as relative tem
 
 ## Supported fNIRS Formats
 
-HRFunc accepts any `mne.io.Raw` object. Load your data through MNE:
+HRfunc accepts any `mne.io.Raw` object. Load your data through MNE:
 
 ```python
 import mne

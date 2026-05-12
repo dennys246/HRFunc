@@ -218,7 +218,7 @@ async def test_workspace_empty_state_when_no_manifest(user: User):
 async def test_workspace_renders_toolbar(user: User):
     global_state.reset()
     await user.open("/workspace")
-    await user.should_see("HRFunc")
+    await user.should_see("HRfunc")
     await user.should_see("Back to welcome")
 
 

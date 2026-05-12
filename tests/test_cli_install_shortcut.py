@@ -154,7 +154,7 @@ class TestInstallShortcutSuccess:
         # Force the non-macOS path for cross-platform behavior testing
         monkeypatch.setattr(ish.platform, "system", lambda: "Linux")
 
-        fake_path = tmp_path / "HRFunc.desktop"
+        fake_path = tmp_path / "HRfunc.desktop"
         fake_path.write_text("[Desktop Entry]\n")
 
         called_with = {}
@@ -209,7 +209,7 @@ class TestInstallShortcutMacOS:
         assert called_with["startmenu"] is False
 
     def test_move_mac_app_to_applications(self, monkeypatch, tmp_path):
-        """The post-move helper relocates Desktop/HRFunc.app → Applications/HRFunc.app."""
+        """The post-move helper relocates Desktop/HRfunc.app → Applications/HRfunc.app."""
         # Fake home directory layout
         home = tmp_path
         desktop = home / "Desktop"
@@ -230,7 +230,7 @@ class TestInstallShortcutMacOS:
 
     def test_move_mac_app_no_op_when_source_missing(self, monkeypatch, tmp_path):
         monkeypatch.setattr(ish.Path, "home", classmethod(lambda cls: tmp_path))
-        # No Desktop/HRFunc.app to start with
+        # No Desktop/HRfunc.app to start with
         result = ish._move_mac_app_to_applications()
         assert result is None
 
@@ -295,11 +295,11 @@ class TestUninstallShortcut:
         result = ish.uninstall_shortcut()
         assert result.ok is True
         assert result.removed == []
-        assert "No HRFunc shortcut" in result.message
+        assert "No HRfunc shortcut" in result.message
 
     def test_removes_files_and_reports_count(self, monkeypatch, tmp_path):
-        a = tmp_path / "HRFunc.lnk"
-        b = tmp_path / "HRFunc.desktop"
+        a = tmp_path / "HRfunc.lnk"
+        b = tmp_path / "HRfunc.desktop"
         a.write_text("fake shortcut a")
         b.write_text("fake shortcut b")
         monkeypatch.setattr(ish, "_discover_shortcuts", lambda: [a, b])
@@ -309,11 +309,11 @@ class TestUninstallShortcut:
         assert set(result.removed) == {a, b}
         assert not a.exists()
         assert not b.exists()
-        assert "2 HRFunc shortcut(s)" in result.message
+        assert "2 HRfunc shortcut(s)" in result.message
 
     def test_removes_directory_bundle(self, monkeypatch, tmp_path):
         """macOS .app bundles are directories; verify we use rmtree."""
-        bundle = tmp_path / "HRFunc.app"
+        bundle = tmp_path / "HRfunc.app"
         bundle.mkdir()
         (bundle / "Contents").mkdir()
         (bundle / "Contents" / "Info.plist").write_text("<plist/>")

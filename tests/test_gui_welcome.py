@@ -176,7 +176,7 @@ gui_app._register_pages()
 @pytest.mark.asyncio
 async def test_welcome_page_shows_brand_header(user: User):
     await user.open("/")
-    await user.should_see("HRFunc")
+    await user.should_see("HRfunc")
     await user.should_see("fNIRS hemodynamic response estimation")
 
 

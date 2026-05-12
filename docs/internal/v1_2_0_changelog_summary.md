@@ -1,4 +1,4 @@
-# HRFunc v1.2.0 — Change Summary
+# HRfunc v1.2.0 — Change Summary
 
 **Release type:** Correctness release (minor version bump 1.1.2 → 1.2.0)
 **Strategy:** Fix every crash, silent-wrong-result, and input-validation hole without changing architecture. See [../plans/plan_v1_2_0.md](../plans/plan_v1_2_0.md) for the detailed plan.

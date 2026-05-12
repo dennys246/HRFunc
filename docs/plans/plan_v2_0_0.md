@@ -1,4 +1,4 @@
-# HRFunc v2.0.0 — Architectural Refactor Plan
+# HRfunc v2.0.0 — Architectural Refactor Plan
 
 **Release type:** Major version bump (1.2.0 → 2.0.0)
 **Prerequisite:** 1.2.0 shipped and validated in Denny's pipeline
@@ -520,7 +520,7 @@ Robustness guards that weren't critical enough for 1.2.0 but improve error messa
         with open(filename, 'r') as file:
             data = json.load(file)
     except FileNotFoundError:
-        raise FileNotFoundError(f"HRFunc montage file not found: {filename}")
+        raise FileNotFoundError(f"HRfunc montage file not found: {filename}")
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in {filename}: {e}")
     ```
@@ -628,7 +628,7 @@ To be written during `release/2.0.0`. Must cover:
 - **`estimate_activity` returns a `NeuralActivity` wrapper, not an `mne.io.Raw`**: `.save()` and `.get_data()` still work directly; for Raw-specific methods, access `.raw`. Rationale: disambiguates deconvolved neural activity from preprocessed HbO/HbR concentration data.
 - **All `print` output is now logging**: users who want the old verbose behavior call `logging.basicConfig(level=logging.DEBUG)`
 - **`estimate_hrf` performance improvement** — same results, much faster
-- **Type hints available** — downstream projects can now `mypy` HRFunc usages
+- **Type hints available** — downstream projects can now `mypy` HRfunc usages
 - Any other observable changes from the refactors
 
 ---

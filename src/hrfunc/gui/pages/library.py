@@ -2,7 +2,7 @@
 
 The /library route is the entry path for the **Browser** persona — a
 researcher who has no scan of their own but wants to explore the
-literature HRFs HRFunc bundles (``hbo_hrfs.json`` / ``hbr_hrfs.json``)
+literature HRFs HRfunc bundles (``hbo_hrfs.json`` / ``hbr_hrfs.json``)
 and the community-contributed entries that get merged in over time.
 
 Sprint 4.2 + 4.3 + 4.4 ship together as one combined branch because the

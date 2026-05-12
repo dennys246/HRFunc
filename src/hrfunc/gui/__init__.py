@@ -1,4 +1,4 @@
-"""HRFunc desktop GUI — NiceGUI-based interface for non-tech researchers.
+"""HRfunc desktop GUI — NiceGUI-based interface for non-tech researchers.
 
 The GUI is an optional install (`pip install hrfunc[gui]`) that adds NiceGUI,
 plotly, and pywebview. The `hrfunc` CLI entry point launches `hrfunc.gui.app.main`,
