@@ -79,7 +79,8 @@ The workspace exposes seven tabs that mirror the analysis pipeline:
    literature HRF database, with a context filter sidebar (task, doi,
    study, demographics, stimulus, conditions) and a per-HRF detail
    pane with trace preview.
-7. **Export** — placeholder, landing in Sprint 5.
+7. **Export** — saves preprocessed Raw, activity Raw, montage HRFs
+   JSON, per-channel HRF PNGs, and quality metrics CSV.
 
 A 3-pane workspace with a BIDS-aware dataset tree on the left, tabbed
 analysis surface in the middle, and a manifest summary on the right.

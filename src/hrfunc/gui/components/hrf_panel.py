@@ -104,6 +104,10 @@ def render(state: AppState) -> None:
     state.subscribe("scan_loaded", _refresh)
     state.subscribe("preprocess_done", _refresh)
     state.subscribe("hrf_estimated", _refresh)
+    # Dedicated event for gallery channel-pick refreshes — fires only the
+    # HRFs-tab body re-render, avoiding the 6-subscriber re-render
+    # cascade that republishing hrf_estimated would cause.
+    state.subscribe("hrf_selection_changed", _refresh)
 
     # Progress polling timer — refreshes the body every 0.5 s WHILE an
     # estimation is in flight, so the progress bar advances. The
@@ -556,22 +560,117 @@ def sorted_unique_annotation_descriptions(raw: "mne.io.BaseRaw") -> List[str]:
 def _render_hrf_preview(
     state: AppState, scan: ScanEntry, opts: EstimationOptions
 ) -> None:
-    """Render the matplotlib preview of the most-recent estimation result."""
+    """Render the most-recent estimation result.
+
+    Canonical mode: single SPM-style line plot.
+    Toeplitz mode (Sprint 5.1): clickable channel grid of mini-plots,
+    plus a per-channel detail panel below when the user picks a channel.
+    """
     result = state.montage
     if result is None:
         return
     if isinstance(result, _CanonicalResult):
         png = _render_canonical_preview_png(result)
-    else:
-        png = _render_toeplitz_preview_png(result)
-    if png is None:
-        ui.label("Preview unavailable.").classes("text-sm opacity-60")
+        if png is None:
+            ui.label("Preview unavailable.").classes("text-sm opacity-60")
+            return
+        ui.image(png).classes("max-w-3xl")
         return
-    ui.image(png).classes("max-w-3xl")
+
+    _render_toeplitz_gallery(state, result)
 
 
-def _render_toeplitz_preview_png(montage) -> Optional[str]:
-    """Overlay all channel HRF traces on a single matplotlib axes."""
+def _render_toeplitz_gallery(state: AppState, montage) -> None:
+    """Per-channel HRF gallery: clickable mini-plots + detail panel.
+
+    The mini-plots are rendered as base64 PNGs so they're inert (no plotly
+    state); clicks are wired through a ``ui.element`` wrapper around each
+    image that calls a closure setting ``state.hrf_selected_channel``. A
+    second ``@ui.refreshable`` block below the grid renders the full-size
+    plot for the currently-selected channel (with ±1 std shading).
+    """
+    channels = _gather_channel_traces(montage)
+    if not channels:
+        ui.label("No channel HRFs available.").classes("text-sm opacity-60")
+        return
+
+    if (
+        state.hrf_selected_channel is None
+        or state.hrf_selected_channel not in channels
+    ):
+        # Default-focus on the first channel so users see a detail view
+        # immediately rather than a blank "click one" prompt.
+        state.hrf_selected_channel = next(iter(channels))
+
+    # ── Grid of mini-plots
+    with ui.row().classes("flex-wrap gap-2 max-w-4xl"):
+        for ch_name in channels.keys():
+            png = _render_mini_hrf_png(channels[ch_name])
+            selected = ch_name == state.hrf_selected_channel
+            border = "border-primary border-2" if selected else "border border-slate-700"
+            with ui.element("div").classes(
+                f"cursor-pointer rounded p-1 {border}"
+            ).on(
+                "click", lambda c=ch_name: _on_channel_click(state, c)
+            ):
+                if png is not None:
+                    ui.image(png).classes("w-32 h-20")
+                ui.label(ch_name).classes(
+                    "text-xs font-mono opacity-80 text-center w-32"
+                )
+
+    # ── Detail panel for the selected channel
+    selected = state.hrf_selected_channel
+    if selected and selected in channels:
+        ui.separator()
+        ui.label(f"Channel detail — {selected}").classes(
+            "text-xs uppercase opacity-60 tracking-wide"
+        )
+        png = _render_detail_hrf_png(channels[selected], selected)
+        if png is not None:
+            ui.image(png).classes("max-w-2xl")
+
+
+def _on_channel_click(state: AppState, ch_name: str) -> None:
+    """Update the selected channel and publish the focused-refresh event.
+
+    Uses ``hrf_selection_changed`` (HRFs-tab-only) rather than
+    ``hrf_estimated`` (all 6 tab subscribers) so a click in the gallery
+    doesn't cause every other panel to re-render. The payload is the
+    new channel name so future subscribers can act on it without a
+    state lookup.
+    """
+    state.hrf_selected_channel = ch_name
+    state.publish("hrf_selection_changed", ch_name)
+
+
+def _gather_channel_traces(montage):
+    """Pull (ch_name → node) out of a Montage's channels, skipping empties.
+
+    Module-level so tests can call it directly. Filters out channels whose
+    ``trace`` attribute is missing, empty, or all-zeros — those would
+    render as blank plots and confuse the gallery UX.
+    """
+    import numpy as np
+
+    out = {}
+    channels = getattr(montage, "channels", {})
+    for ch_name, node in channels.items():
+        trace = getattr(node, "trace", None)
+        if trace is None:
+            continue
+        try:
+            arr = np.asarray(trace)
+            if arr.size == 0 or not np.any(np.abs(arr) > 0):
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        out[ch_name] = node
+    return out
+
+
+def _render_mini_hrf_png(node) -> Optional[str]:
+    """Render a tiny PNG for one channel's HRF — used in the gallery grid."""
     try:
         import matplotlib
         matplotlib.use("Agg", force=False)
@@ -580,34 +679,75 @@ def _render_toeplitz_preview_png(montage) -> Optional[str]:
         logger.warning("matplotlib unavailable: %s", exc)
         return None
 
+    trace = getattr(node, "trace", None)
+    if trace is None or len(trace) == 0:
+        return None
+
     fig = None
     try:
-        fig, ax = plt.subplots(1, 1, figsize=(8, 4))
-        channels = getattr(montage, "channels", {})
-        plotted = 0
-        for ch_name, node in channels.items():
-            trace = getattr(node, "trace", None)
-            if trace is None or len(trace) == 0:
-                continue
-            ax.plot(trace, lw=0.6, alpha=0.7, label=ch_name)
-            plotted += 1
-        if plotted == 0:
-            ax.text(
-                0.5, 0.5, "No channel HRFs available.",
-                ha="center", va="center", transform=ax.transAxes,
+        fig, ax = plt.subplots(1, 1, figsize=(1.6, 1.0))
+        ax.plot(trace, lw=0.8, color="#6366f1")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        fig.tight_layout(pad=0.1)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=80, bbox_inches="tight")
+        return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mini HRF render failed: %s", exc)
+        return None
+    finally:
+        if fig is not None:
+            plt.close(fig)
+
+
+def _render_detail_hrf_png(node, ch_name: str) -> Optional[str]:
+    """Render a full-size HRF plot for the currently-selected channel.
+
+    Shows the trace plus ±1 standard-deviation shading when ``trace_std``
+    is available. Time axis in seconds (computed from the node's sfreq).
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=False)
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("matplotlib unavailable: %s", exc)
+        return None
+
+    trace = getattr(node, "trace", None)
+    if trace is None or len(trace) == 0:
+        return None
+    sfreq = float(getattr(node, "sfreq", 1.0) or 1.0)
+    if sfreq <= 0:
+        sfreq = 1.0
+
+    fig = None
+    try:
+        t = np.arange(len(trace)) / sfreq
+        std = getattr(node, "trace_std", None)
+        fig, ax = plt.subplots(1, 1, figsize=(7, 3))
+        ax.plot(t, trace, lw=1.4, color="#6366f1", label=ch_name)
+        if std is not None and len(std) == len(trace):
+            arr = np.asarray(trace)
+            std_arr = np.asarray(std)
+            ax.fill_between(
+                t, arr - std_arr, arr + std_arr,
+                alpha=0.18, color="#6366f1",
+                label="±1 std",
             )
-        ax.set_title("Estimated HRFs (toeplitz deconvolution)")
-        ax.set_xlabel("samples")
+        ax.set_xlabel("time (s)")
         ax.set_ylabel("amplitude (a.u.)")
-        if plotted <= 24:
-            ax.legend(fontsize=6, loc="upper right")
+        ax.legend(fontsize=8, loc="upper right")
         fig.tight_layout()
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-        encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-        return f"data:image/png;base64,{encoded}"
+        return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
     except Exception as exc:  # noqa: BLE001
-        logger.warning("toeplitz preview render failed: %s", exc)
+        logger.warning("detail HRF render failed: %s", exc)
         return None
     finally:
         if fig is not None:

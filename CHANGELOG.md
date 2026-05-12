@@ -27,6 +27,13 @@
 - New: HRF Library page at `/library` — three-pane Browser-persona
   flow with Context Filter sidebar, plotly 3D HRtree viz, and per-HRF
   detail pane with trace preview
+- New: HRF gallery — HRFs-tab preview replaced by a clickable channel
+  grid (one mini-plot per channel) with a per-channel detail panel
+  showing full trace + ±1 std shading
+- New: Export tab — saves processed Raw (SNIRF/FIF), activity Raw
+  (SNIRF/FIF), montage HRFs (JSON via montage.save), per-channel HRF
+  plot PNGs to a folder, and quality metrics as a flat CSV (one row
+  per scan × stage)
 - New: Cross-component event bus (`scan_selected`, `scan_loaded`,
   `preprocess_done`, `hrf_estimated`, `activity_estimated`,
   `quality_computed`, `library_filter_changed`,

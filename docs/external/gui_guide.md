@@ -185,8 +185,11 @@ regardless of scan sampling rate), which deliberately differs from
 the library's internal `correlate_canonical` (sample-indexed, scan-rate
 dependent).
 
-After a successful run, all estimated HRF traces are overlaid on a
-single line plot in the preview.
+After a successful run, the gallery renders a **clickable channel
+grid** — one mini-plot per channel — and a detail panel below showing
+the currently-focused channel's full trace with ±1 standard-deviation
+shading. Click any mini-plot to focus a different channel; the grid
+highlights the active selection.
 
 ---
 
@@ -410,11 +413,44 @@ The matplotlib render failed (most often: the channel you picked was
 dropped during estimation and the deconvolved Raw has fewer channels
 than the processed Raw). Pick a different channel from the dropdown.
 
-### Export tab says "Coming in Sprint 5"
+### Export tab is empty after I clicked Save
 
-The Export panel (and HRF gallery, scheduled to merge alongside it) is
-the only remaining placeholder in v1.3.0. Tracking issues on the
-[HRFunc repository](https://github.com/dennys246/HRFunc).
+Each exporter only enables when its source data is in state. If the
+button is greyed out, the row's "italic hint" line tells you what to
+do next (e.g. "Run the HRFs tab in toeplitz mode first" or "Compute
+metrics in the Quality tab first"). The Save button is disabled, not
+hidden — so you can see all five exporters at a glance even when only
+one is ready.
+
+### Save dialog doesn't appear
+
+The Export panel uses `pywebview`'s native save/folder dialogs. Same
+fallback as the welcome-screen folder picker — if no native window is
+attached (e.g. launching via `python -m hrfunc.gui.app` instead of the
+`hrfunc` console script), the panel shows a NiceGUI toast telling you
+to launch in native mode.
+
+### SNIRF export of haemoglobin / activity data
+
+The Export panel writes whatever's in the source Raw to the chosen
+SNIRF file. For round-trip workflows (export → re-load in MNE), prefer
+`.fif` over `.snirf` when exporting **preprocessed** or **activity**
+data — FIF preserves the full MNE channel-type metadata (`hbo`, `hbr`,
+plus user-added types), whereas SNIRF's data-type indices may not
+round-trip the haemoglobin / neural-activity unit information cleanly.
+If you only need the data values (e.g. for analysis in software that
+re-derives types from channel names), SNIRF is fine.
+
+### "N channels dropped during deconvolution" in the activity-save toast
+
+`estimate_activity` silently drops channels whose Tikhonov-regularized
+lstsq solve fails or times out (default 30 s ceiling per channel). The
+exported activity Raw has these channels removed. The save-toast now
+surfaces the count so you know if the output has fewer channels than
+the preprocessed source. If the count is non-zero, check
+`state.last_error` and the underlying console output for which
+channels failed — typically caused by pathological lstsq matrices on
+all-bad-channel inputs.
 
 ### GUI crashes on launch with a port-binding error
 
