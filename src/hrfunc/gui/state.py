@@ -27,8 +27,16 @@ What lives here:
 - `last_error`           - last error message surfaced to the user, or None
 - `subscribers`          - event-bus dispatch table (Sprint 3.2); see
                            ``subscribe`` / ``publish``
+- `montage`              - most recently estimated Montage from the HRFs tab
+                           (Sprint 3.3); None until estimate_hrf runs at least
+                           once. Cleared on dataset reset; switching the
+                           selected scan does NOT clear it, so users can
+                           switch tabs and come back without losing results
+                           — but a new estimation overwrites the field
+                           regardless of which scan it came from. Sprint 3.4
+                           may upgrade to per-scan storage.
 
-Event bus (Sprint 3.2):
+Event bus (Sprint 3.2, extended in 3.3):
 The bus replaces the Sprint 2.3-era ``_inspect_refresh`` private attribute.
 Panels subscribe to named events and are called when other parts of the GUI
 publish. The bus is dict-of-lists, deliberately minimal — no priorities, no
@@ -42,6 +50,9 @@ async dispatch, no payload schemas. Defined events:
 - ``"preprocess_done"`` — payload: ``ScanEntry``. Published after a successful
   preprocess run; subscribers can read the processed Raw from
   ``state.processed_cache``.
+- ``"hrf_estimated"``   — payload: ``ScanEntry``. Published after a successful
+  ``estimate_hrf`` (or canonical HRF generation); subscribers can read the
+  resulting Montage from ``state.montage``.
 
 Subscribers are sync callables. Async handlers can dispatch via
 ``nicegui.background_tasks.create`` from inside their callback.
@@ -83,6 +94,10 @@ class AppState:
     estimation_progress: Optional[Tuple[int, int, str]] = None
     last_error: Optional[str] = None
     subscribers: Dict[str, List[EventCallback]] = field(default_factory=dict)
+    # Montage from the most recent HRF estimation (Sprint 3.3). Typed as Any to
+    # avoid pulling hrfunc.hrfunc into the GUI import graph at module load —
+    # the GUI must stay importable without MNE for tests that disable it.
+    montage: Optional[Any] = None
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -135,9 +150,8 @@ class AppState:
         Used when the user closes the current project / switches datasets.
         Drops cached Raws (both source and processed) so memory is released.
         The RawCache instances are kept (not reassigned) so any references
-        held elsewhere stay valid. Event subscribers are also cleared —
-        a fresh dataset is a clean slate and old subscribers may point at
-        widgets that no longer exist.
+        held elsewhere stay valid. Event subscribers and the estimated
+        Montage are also cleared — a fresh dataset is a clean slate.
         """
         self.manifest = None
         self.selected_scan = None
@@ -148,6 +162,7 @@ class AppState:
         self.estimation_progress = None
         self.last_error = None
         self.subscribers.clear()
+        self.montage = None
 
 
 # Module-level singleton. Page handlers and components import this directly.
