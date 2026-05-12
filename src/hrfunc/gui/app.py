@@ -112,7 +112,7 @@ def _launch_gui(argv: List[str]) -> int:
         reload=False,
         show=True,
         port=_find_free_port(),
-        show_welcome_message_on_startup=False,
+        show_welcome_message=False,
     )
     return 0
 
