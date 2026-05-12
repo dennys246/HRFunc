@@ -46,7 +46,7 @@ async def test_dialog_visible_when_not_yet_prompted(
         ish, "_marker_path", lambda: tmp_path / ".shortcut_prompted"
     )
     await user.open("/")
-    await user.should_see("Add HRFunc to your system menu?")
+    await user.should_see("Add HRfunc to your system menu?")
     await user.should_see("Yes, add it")
     await user.should_see("Not now")
     await user.should_see("Don't ask again")
@@ -63,7 +63,7 @@ async def test_dialog_hidden_when_already_prompted(
     await user.open("/")
     # The dialog title shouldn't appear
     with pytest.raises(AssertionError):
-        await user.should_see("Add HRFunc to your system menu?", retries=2)
+        await user.should_see("Add HRfunc to your system menu?", retries=2)
 
 
 async def test_yes_button_invokes_install_and_writes_marker(
@@ -80,7 +80,7 @@ async def test_yes_button_invokes_install_and_writes_marker(
         install_calls.append(1)
         return ish.InstallResult(
             ok=True,
-            locations=[Path("/tmp/HRFunc.app")],
+            locations=[Path("/tmp/HRfunc.app")],
             message="installed in Spotlight",
         )
 

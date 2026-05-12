@@ -912,7 +912,7 @@ class montage(tree):
     
     def _merge_montages(self, nirx_obj, verbose = False):
         """
-        Function to merge a NIRX object montage with the HRFunc montage.
+        Function to merge a NIRX object montage with the HRfunc montage.
         This function should only be used when initializing an empty
         montage or if merging nirx objects with the same NIRS montage layout
         and with different channel names (useful when dealing with multiple
@@ -980,7 +980,7 @@ class montage(tree):
     def _merge_trees(self, filename = 'tree_hrfs.json'):
         """
         Merge montage, HbO and HbR trees. This function is meant to be used
-        by the creators of HRFunc to merge submitted HRF estimates with the
+        by the creators of HRfunc to merge submitted HRF estimates with the
         HRF toolbox
 
         Arguments:

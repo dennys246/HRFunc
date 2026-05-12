@@ -1,4 +1,4 @@
-# HRFunc Desktop GUI — User Guide
+# HRfunc Desktop GUI — User Guide
 
 A point-and-click workflow for fNIRS HRF estimation and neural-activity
 recovery without writing Python.
@@ -43,7 +43,7 @@ added as positional commands.
 ### System menu integration
 
 After your first `hrfunc` launch, the welcome screen offers to add
-HRFunc to your system menu so you can open it without the terminal.
+HRfunc to your system menu so you can open it without the terminal.
 "Yes, add it" puts a clickable launcher in Spotlight (macOS), the
 Start menu (Windows), or Activities (Linux); "Not now" defers the
 question to the next launch; "Don't ask again" silences the prompt
@@ -52,7 +52,7 @@ without installing.
 You can also manage the shortcut from the command line at any time:
 
 ```bash
-hrfunc install-shortcut      # add HRFunc to your system menu
+hrfunc install-shortcut      # add HRfunc to your system menu
 hrfunc uninstall-shortcut    # remove the system menu entry
 ```
 
@@ -66,7 +66,7 @@ identical no matter which path you took.
 
 When the GUI opens with no folder pre-loaded, you see three paths:
 
-1. **Open my data** — pick a folder on disk. HRFunc scans for SNIRF,
+1. **Open my data** — pick a folder on disk. HRfunc scans for SNIRF,
    NIRx, and FIF files (with BIDS subject/session metadata if your
    folders follow the convention). Opens the workspace once the scan
    completes.
@@ -244,7 +244,7 @@ orange vertical lines.
 ## HRF Library
 
 The `/library` page is the **Browser** persona's entry point — a
-researcher who wants to explore HRFunc's bundled literature HRFs without
+researcher who wants to explore HRfunc's bundled literature HRFs without
 opening their own data. Reach it via the welcome screen's "Browse HRF
 library" card, or by navigating directly.
 
@@ -474,7 +474,7 @@ all-bad-channel inputs.
 
 ### GUI crashes on launch with a port-binding error
 
-NiceGUI defaults to port 8080, but HRFunc asks the OS to pick a free
+NiceGUI defaults to port 8080, but HRfunc asks the OS to pick a free
 loopback port at launch time, so the bound port should never collide
 with another service. If you still see a "port in use" error, the most
 likely cause is a host firewall blocking loopback ports — check that

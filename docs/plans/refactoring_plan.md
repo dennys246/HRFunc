@@ -1,4 +1,4 @@
-# HRFunc Refactoring Plan — Index
+# HRfunc Refactoring Plan — Index
 
 **Status:** This document was decomposed on 2026-04-14 into three cohesive plans. Use the documents below instead of this one.
 

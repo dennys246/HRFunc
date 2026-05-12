@@ -1,4 +1,4 @@
-"""Quasar / Tailwind theming for the HRFunc GUI.
+"""Quasar / Tailwind theming for the HRfunc GUI.
 
 NiceGUI ships Quasar (Vue) and Tailwind under the hood. This module sets the
 brand color tokens, default dark mode, and shared layout primitives so every
@@ -42,7 +42,7 @@ COLORS = {
 
 
 def apply_theme(dark: bool = True) -> None:
-    """Apply the HRFunc color palette and (optionally) enable dark mode.
+    """Apply the HRfunc color palette and (optionally) enable dark mode.
 
     Call once per page handler before constructing UI elements. Subsequent
     calls are idempotent — Quasar caches the colors and `ui.dark_mode` is a

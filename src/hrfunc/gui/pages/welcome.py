@@ -71,7 +71,7 @@ async def _render(state: AppState) -> None:
         _render_footer()
 
     # First-launch shortcut prompt — show a one-time dialog asking the
-    # user whether they want HRFunc added to their system menu
+    # user whether they want HRfunc added to their system menu
     # (Spotlight / Start menu / Activities). The XDG-cache marker means
     # this dialog appears at most once per machine.
     _maybe_show_shortcut_prompt()
@@ -105,11 +105,11 @@ def _maybe_show_shortcut_prompt() -> None:
         return
 
     with ui.dialog() as dialog, ui.card().classes("max-w-md"):
-        ui.label("Add HRFunc to your system menu?").classes(
+        ui.label("Add HRfunc to your system menu?").classes(
             "text-lg font-semibold"
         )
         ui.label(
-            "We can install a launcher so HRFunc appears in your system's "
+            "We can install a launcher so HRfunc appears in your system's "
             "app search (Spotlight on macOS, Start menu on Windows, "
             "Activities on Linux). You'll be able to open it like any "
             "other desktop app — no terminal needed."
@@ -151,7 +151,7 @@ def _maybe_show_shortcut_prompt() -> None:
 
 def _render_header() -> None:
     with ui.column().classes("w-full items-center mt-12 mb-8 gap-2"):
-        ui.label("HRFunc").classes("text-6xl font-bold tracking-tight")
+        ui.label("HRfunc").classes("text-6xl font-bold tracking-tight")
         ui.label("fNIRS hemodynamic response estimation").classes(
             "text-xl opacity-70"
         )

@@ -1,4 +1,4 @@
-# HRFunc Release Roadmap
+# HRfunc Release Roadmap
 
 **Current version:** 1.1.2
 **Next release:** 1.2.0 — Correctness Release (PyPI)
@@ -10,7 +10,7 @@
 
 ## Release Strategy
 
-HRFunc is a scientific library that researchers rely on for publishable data. We split refactoring into two releases with distinct goals:
+HRfunc is a scientific library that researchers rely on for publishable data. We split refactoring into two releases with distinct goals:
 
 ### **1.2.0 — Correctness Release**
 Every user-facing path works without crashes, silent wrong results, or data corruption. No architectural changes. No breaking API changes. This is a **minor version bump** so existing users can upgrade without code changes and gain stability. Detailed plan: [plan_v1_2_0.md](plan_v1_2_0.md).
@@ -24,7 +24,7 @@ Code cleanliness, performance, type safety, and breaking API improvements (notab
 
 ## Working Practices (Apply to Every Branch)
 
-Every branch in either release follows the review protocol defined in the "Working Practices for HRFunc Sessions" memory:
+Every branch in either release follows the review protocol defined in the "Working Practices for HRfunc Sessions" memory:
 
 1. **Feature-branch-per-change** — each branch addresses one cohesive fix or refactor, stacks on the previous branch in the dependency chain
 2. **Targeted unit tests** — add a `tests/test_<branch-name>.py` file exercising the specific behavior changed. Must run in under a few seconds and require no fNIRS data files

@@ -1,4 +1,4 @@
-# HRFunc v1.2.0 — Correctness Release Plan
+# HRfunc v1.2.0 — Correctness Release Plan
 
 **Release type:** Minor version bump (1.1.2 → 1.2.0)
 **Goal:** Every user-facing path works without crashes, silent wrong results, or data corruption. No breaking API changes. No architectural refactors. Ship to PyPI.
@@ -26,7 +26,7 @@
 - Test suite restructuring
 - Breaking API changes
 
-**Rule of thumb:** if a fix changes observable behavior for a scientist who's already using HRFunc correctly, it belongs in 2.0.0 unless the current behavior is scientifically wrong.
+**Rule of thumb:** if a fix changes observable behavior for a scientist who's already using HRfunc correctly, it belongs in 2.0.0 unless the current behavior is scientifically wrong.
 
 ---
 
@@ -463,7 +463,7 @@ Each branch stacks on the previous. Each gets its own targeted test file and the
 
 7. **Git tag and GitHub release:**
     ```bash
-    git tag -a v1.2.0 -m "HRFunc 1.2.0 — Correctness Release"
+    git tag -a v1.2.0 -m "HRfunc 1.2.0 — Correctness Release"
     git push origin v1.2.0
     gh release create v1.2.0 --notes-file CHANGELOG_1_2_0.md
     ```

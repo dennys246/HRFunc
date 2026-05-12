@@ -1,5 +1,5 @@
-# HRFunc
-HRFunc is a Python library for estimating hemodynamic response functions and neural activity from hemoglobin concentration in functional near infrared spectroscopy (fNIRS), through modeling hemodynamic response functions through the brain recorded from fNIRS signals and deconvolving neural activity. Toeplitz deconvolution with Tikhonov regularization is employed for HRF and neural activity estimation. For more guidance on using the HRfunc tool, visit www.hrfunc.org for in-depth guides and demo videos.
+# HRfunc
+HRfunc is a Python library for estimating hemodynamic response functions and neural activity from hemoglobin concentration in functional near infrared spectroscopy (fNIRS), through modeling hemodynamic response functions through the brain recorded from fNIRS signals and deconvolving neural activity. Toeplitz deconvolution with Tikhonov regularization is employed for HRF and neural activity estimation. For more guidance on using the HRfunc tool, visit www.hrfunc.org for in-depth guides and demo videos.
 
 ---
 
@@ -61,13 +61,13 @@ hrfunc /path/to/study           # preloads a folder of scans
 hrfunc subject_01.snirf         # preloads a single scan
 ```
 
-On first launch HRFunc offers to add itself to your system menu
+On first launch HRfunc offers to add itself to your system menu
 (Spotlight on macOS, Start menu on Windows, Activities on Linux) so
 you can open it without the terminal afterward. You can also run the
 install manually at any time:
 
 ```bash
-hrfunc install-shortcut         # add HRFunc to your system menu
+hrfunc install-shortcut         # add HRfunc to your system menu
 hrfunc uninstall-shortcut       # remove it
 ```
 

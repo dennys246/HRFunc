@@ -1,4 +1,4 @@
-"""HRFunc GUI entry point.
+"""HRfunc GUI entry point.
 
 ``hrfunc`` (the CLI command installed by ``pip install hrfunc[gui]``)
 calls ``main()``, which dispatches three classes of invocation:
@@ -10,7 +10,7 @@ calls ``main()``, which dispatches three classes of invocation:
    ``hrfunc uninstall-shortcut``. Adds or removes a system-level
    launcher (Spotlight on macOS, Start menu on Windows, Activities on
    Linux) via ``pyshortcuts``. Researchers who don't live in a terminal
-   only need to run this once and can then click HRFunc like any other
+   only need to run this once and can then click HRfunc like any other
    desktop app.
 3. **Help / version** — ``hrfunc --help``, ``hrfunc help``, or
    ``hrfunc --version``. Print and exit.
@@ -19,8 +19,8 @@ Usage:
     hrfunc                              # launch the GUI
     hrfunc /path/to/study               # launch with that folder preloaded
     hrfunc subject_01.snirf             # launch with a single file preloaded
-    hrfunc install-shortcut             # add HRFunc to your system menu
-    hrfunc uninstall-shortcut           # remove the HRFunc system menu entry
+    hrfunc install-shortcut             # add HRfunc to your system menu
+    hrfunc uninstall-shortcut           # remove the HRfunc system menu entry
     hrfunc --version                    # print version and exit
     hrfunc --help                       # show CLI help
     hrfunc help                         # alias for --help
@@ -106,7 +106,7 @@ def _launch_gui(argv: List[str]) -> int:
     _register_pages()
 
     ui.run(
-        title="HRFunc",
+        title="HRfunc",
         native=True,
         window_size=(1400, 900),
         reload=False,
@@ -121,16 +121,16 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hrfunc",
         description=(
-            "HRFunc — fNIRS hemodynamic response function estimation and "
+            "HRfunc — fNIRS hemodynamic response function estimation and "
             "neural activity recovery. Bare `hrfunc` launches the desktop "
-            "GUI; use `hrfunc install-shortcut` to add HRFunc to your "
+            "GUI; use `hrfunc install-shortcut` to add HRfunc to your "
             "system menu so you can launch it without the terminal."
         ),
         epilog=(
             "Subcommands:\n"
-            "  install-shortcut   Add HRFunc to system menu (Spotlight / "
+            "  install-shortcut   Add HRfunc to system menu (Spotlight / "
             "Start menu / Activities)\n"
-            "  uninstall-shortcut Remove the HRFunc system menu entry\n"
+            "  uninstall-shortcut Remove the HRfunc system menu entry\n"
             "  help               Show this help text (alias for --help)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,

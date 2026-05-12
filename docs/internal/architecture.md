@@ -1,4 +1,4 @@
-# HRFunc Internal Architecture
+# HRfunc Internal Architecture
 
 **Version:** 1.2.0 (correctness release in flight)
 **Last reviewed:** 2026-04-14
@@ -8,7 +8,7 @@
 
 ## Overview
 
-HRFunc estimates hemodynamic response functions (HRFs) and neural activity from fNIRS (functional near-infrared spectroscopy) brain imaging data. It wraps MNE-Python's Raw fNIRS objects and applies Toeplitz deconvolution with Tikhonov regularization to recover HRF shapes and neural activity timeseries.
+HRfunc estimates hemodynamic response functions (HRFs) and neural activity from fNIRS (functional near-infrared spectroscopy) brain imaging data. It wraps MNE-Python's Raw fNIRS objects and applies Toeplitz deconvolution with Tikhonov regularization to recover HRF shapes and neural activity timeseries.
 
 The library is used by neuroscientists to:
 1. Estimate channel-wise HRFs from event-related fNIRS scans
@@ -368,7 +368,7 @@ The `_flatten_context_value` helper bridges the gap between HRF context values (
 
 ## Units Convention (intentional)
 
-HRFunc intentionally outputs HRF traces and deconvolved neural activity in **arbitrary units (a.u.)**, matching the fMRI BOLD analysis convention:
+HRfunc intentionally outputs HRF traces and deconvolved neural activity in **arbitrary units (a.u.)**, matching the fMRI BOLD analysis convention:
 
 - `estimate_hrf` z-scores the input signal before the least-squares solve and does not denormalize back to absolute hemoglobin concentrations. Returned HRF traces are in z-score space.
 - `estimate_activity` peak-normalizes the HRF kernel (`hrf.trace / np.max(np.abs(hrf.trace))`) before using it as a deconvolution template. Returned activity is relative deviation from baseline.

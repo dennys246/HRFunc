@@ -3,7 +3,7 @@
 NiceGUI's ``nicegui.testing.User`` fixture needs a Python file it can import
 to bootstrap the app — the equivalent of a vanilla NiceGUI app's
 ``main.py``. This module exists solely to satisfy that contract: it imports
-the HRFunc gui package, registers all routes, and calls ``ui.run()``
+the HRfunc gui package, registers all routes, and calls ``ui.run()``
 (intercepted by the User fixture, so no real server starts).
 
 Not a pytest test file (name does not start with ``test_``) so pytest will

@@ -1,4 +1,4 @@
-"""Path-level I/O utilities for HRFunc — format detection, folder scanning,
+"""Path-level I/O utilities for HRfunc — format detection, folder scanning,
 and Raw caching for the v1.3.0 GUI.
 
 Public API:

@@ -1,4 +1,4 @@
-"""Reusable UI components for the HRFunc GUI.
+"""Reusable UI components for the HRfunc GUI.
 
 Each module here exports one component (or one closely related family) that
 pages compose. Components encapsulate rendering + event wiring; they do not

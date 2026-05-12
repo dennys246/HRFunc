@@ -29,7 +29,7 @@ class lens:
         # 3.9: self.sfreq was previously read by calc_snr without ever
         # being initialized anywhere in the class, raising AttributeError
         # on any direct SNR call before compare_subject. Initialize with
-        # a sensible default (~7.81 Hz is the HRFunc library default used
+        # a sensible default (~7.81 Hz is the HRfunc library default used
         # for bundled HRFs) and allow override via the constructor.
         self.sfreq = sfreq
         self.channels = []

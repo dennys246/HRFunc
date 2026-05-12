@@ -117,7 +117,7 @@ def _render_toolbar() -> None:
     ):
         with ui.row().classes("items-center gap-3"):
             ui.icon("psychology", size="2rem").classes("text-primary")
-            ui.label("HRFunc").classes("text-2xl font-semibold")
+            ui.label("HRfunc").classes("text-2xl font-semibold")
         with ui.row().classes("items-center gap-2"):
             ui.button(
                 "Back to welcome",
