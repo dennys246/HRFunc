@@ -41,7 +41,13 @@ from typing import TYPE_CHECKING, Optional
 
 from nicegui import background_tasks, ui
 
-from ..components import activity_panel, dataset_tree, hrf_panel, preprocess_panel
+from ..components import (
+    activity_panel,
+    dataset_tree,
+    hrf_panel,
+    preprocess_panel,
+    quality_panel,
+)
 from ..state import AppState, state as global_state
 from ..theme import apply_theme
 from ...io.manifest import ScanEntry
@@ -268,10 +274,12 @@ def _render_tab_panel(name: str, state: AppState) -> None:
     if name == "Activity":
         activity_panel.render(state)
         return
+    if name == "Quality":
+        quality_panel.render(state)
+        return
 
     # Map each placeholder tab to the sprint that fills it in.
     next_sprint = {
-        "Quality": "Sprint 4 (lens-module wrapper)",
         "HRtree": "Sprint 4 (plotly 3D explorer)",
         "Export": "Sprint 5 (export panel)",
     }.get(name, "a future sprint")
