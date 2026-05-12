@@ -49,14 +49,25 @@ class TestPackageImports:
     def test_importing_core_does_not_import_gui(self):
         """`import hrfunc` must NOT pull in NiceGUI. Users without [gui] extras
         should be able to use the library headlessly. Tested via sys.modules
-        after a fresh hrfunc import."""
+        after a fresh hrfunc import.
+
+        Saves and restores gui module entries so this test doesn't poison
+        subsequent tests in the gate (which import-bind to the same module
+        objects we'd otherwise replace)."""
         import sys
-        # Drop any cached gui modules
-        for key in list(sys.modules):
-            if key.startswith("hrfunc.gui"):
-                del sys.modules[key]
-        import hrfunc  # noqa: F401
-        assert "hrfunc.gui" not in sys.modules
+        saved_gui_modules = {
+            k: v for k, v in sys.modules.items() if k.startswith("hrfunc.gui")
+        }
+        try:
+            for key in list(sys.modules):
+                if key.startswith("hrfunc.gui"):
+                    del sys.modules[key]
+            import hrfunc  # noqa: F401
+            assert "hrfunc.gui" not in sys.modules
+        finally:
+            # Restore so test_gui_welcome and test_gui_workspace bind to
+            # the same state/page-registration objects they imported.
+            sys.modules.update(saved_gui_modules)
 
 
 # ---------------------------------------------------------------------------

@@ -102,29 +102,11 @@ def _register_pages() -> None:
     """
     from nicegui import ui
 
-    from .pages import welcome
+    from .pages import welcome, workspace
     from .theme import apply_theme, page_container
 
     welcome.register()
-
-    @ui.page("/workspace")
-    def _workspace_stub() -> None:
-        apply_theme()
-        from .state import state
-        with page_container():
-            ui.label("Workspace").classes("text-4xl font-bold")
-            if state.manifest is not None:
-                ui.label(
-                    f"Loaded {len(state.manifest.scans)} scans from {state.manifest.root}"
-                ).classes("text-lg opacity-80")
-            else:
-                ui.label("No dataset loaded.").classes("text-lg opacity-60")
-            ui.label("Full workspace UI lands in Sprint 2.3.").classes(
-                "text-sm opacity-50 mt-4"
-            )
-            ui.button("Back to welcome", on_click=lambda: ui.navigate.to("/")).props(
-                "flat color=primary"
-            )
+    workspace.register()
 
     @ui.page("/library")
     def _library_stub() -> None:
