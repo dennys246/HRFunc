@@ -52,7 +52,8 @@ When the GUI opens with no folder pre-loaded, you see three paths:
    completes.
 2. **Browse HRF library** — explore the bundled literature-derived HRF
    databases (`hbo_hrfs.json` / `hbr_hrfs.json`) without any of your own
-   data. *Coming in Sprint 4.*
+   data. Opens the `/library` page directly. See [HRF
+   Library](#hrf-library) below for the full walkthrough.
 3. **Recent projects** — re-open a folder you scanned previously. The
    scan manifest is cached on disk per the XDG cache convention
    (`~/Library/Caches/hrfunc/` on macOS, `~/.cache/hrfunc/` on Linux,
@@ -217,6 +218,91 @@ orange vertical lines.
 
 ---
 
+## HRF Library
+
+The `/library` page is the **Browser** persona's entry point — a
+researcher who wants to explore HRFunc's bundled literature HRFs without
+opening their own data. Reach it via the welcome screen's "Browse HRF
+library" card, or by navigating directly.
+
+Three resizable panes:
+
+```
+┌──────────────┬──────────────────────────────┬──────────────┐
+│  Filter      │  HRtree (plotly 3D)          │  Detail      │
+│  (context    │   - Points = HRF location    │  (selected   │
+│   form)      │   - Color = HbO / HbR        │   HRF info,  │
+│              │   - Hover for context        │   trace plot)│
+│              │   - Click to select          │              │
+└──────────────┴──────────────────────────────┴──────────────┘
+```
+
+The library loads two bundled databases on first visit — `hbo_hrfs.json`
+and `hbr_hrfs.json`, both shipped inside the `hrfunc` package — into
+their k-d tree containers. The trees stay in memory for the rest of the
+session.
+
+### Filter pane
+
+The left sidebar exposes six common context fields as text inputs:
+
+- **task** — e.g. `flanker`, `nback`, `rest`
+- **doi** — paper identifier or `temp` for not-yet-published entries
+- **study** — internal study name
+- **demographics** — e.g. `children`, `adults`, `women`
+- **stimulus** — visual / auditory / etc.
+- **conditions** — experiment condition names
+
+Matching is **case-insensitive substring**. Leave a field blank to
+ignore it. Click **Apply** to refresh the viz; **Reset** clears all
+fields. A live count below the buttons shows `N / M HRFs match` where M
+is the total bundled count.
+
+For context fields whose values in the database are lists (e.g.
+`conditions: ["congruent", "incongruent"]`), the filter matches if any
+list entry contains the needle.
+
+### HRtree viz pane (center)
+
+Plotly 3D scatter of HRFs positioned by their `(x, y, z)` optode
+coordinates. Two traces: HbO (red) and HbR (blue), so you can toggle
+oxygenation visibility from the plotly legend.
+
+- **Hover** — shows the HRF key plus its task / doi / study /
+  demographics for quick scanning.
+- **Click** — sets the selected HRF; the right pane updates with the
+  full context dict and a trace preview.
+- **Rotate / zoom / pan** — standard plotly 3D controls (drag to
+  rotate, scroll to zoom, shift-drag to pan).
+
+HRFs without a recorded 3D location are excluded from the viz rather
+than clustered at the origin (the spatial display only makes sense for
+HRFs with measured coordinates).
+
+### Detail pane (right)
+
+Empty until you click an HRF in the viz. Once selected, shows:
+
+- The HRF key (e.g. `s1_d1_hbo-doi/10.1234/abcd`)
+- Oxygenation (HbO / HbR), sampling rate, location, trace length
+- Full context dict — every non-None field from the database entry
+- A trace preview plot in seconds (with ±1 standard-deviation shading
+  when `hrf_std` is available)
+
+### Library limitations to know about
+
+- **Read-only** — v1.3.0 does not let you delete, insert, or merge
+  HRFs from the GUI. Use the `hrfunc.tree` Python API for those
+  operations.
+- **Filter is view-only** — applying a filter does not modify the
+  underlying tree on disk. Re-opening the page resets to "all HRFs
+  visible".
+- **No cross-reference with the workspace** — you cannot drag an HRF
+  from the library into your workspace's montage yet. Use
+  `hrfunc.localize_hrfs` in Python for that flow.
+
+---
+
 ## Caching behavior
 
 The GUI uses two LRU caches of size 3 (so up to 3 scans stay in memory
@@ -324,12 +410,11 @@ The matplotlib render failed (most often: the channel you picked was
 dropped during estimation and the deconvolved Raw has fewer channels
 than the processed Raw). Pick a different channel from the dropdown.
 
-### Library Browser / HRtree / Export / Quality tabs say "Coming in Sprint N"
+### Export tab says "Coming in Sprint 5"
 
-Those tabs are placeholders in v1.3.0. The Quality, HRtree, Context
-Filter, and Library Browser land in Sprint 4; HRF gallery and Export
-land in Sprint 5. Tracking issues on the [HRFunc
-repository](https://github.com/dennys246/HRFunc).
+The Export panel (and HRF gallery, scheduled to merge alongside it) is
+the only remaining placeholder in v1.3.0. Tracking issues on the
+[HRFunc repository](https://github.com/dennys246/HRFunc).
 
 ### GUI crashes on launch with a port-binding error
 

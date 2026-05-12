@@ -95,31 +95,16 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 def _register_pages() -> None:
     """Register all `@ui.page` handlers.
 
-    Sprint 2.2 ships the real welcome page at ``/`` plus minimal stubs for
-    ``/workspace`` (Sprint 2.3 replaces) and ``/library`` (Sprint 4 replaces).
-    Page modules are imported lazily so dev-mode reloading picks up changes
-    without restarting the NiceGUI server.
+    Welcome at ``/`` (Sprint 2.2), workspace at ``/workspace`` (Sprint 2.3+),
+    library at ``/library`` (Sprint 4.2-4.4). Page modules are imported
+    lazily so dev-mode reloading picks up changes without restarting the
+    NiceGUI server.
     """
-    from nicegui import ui
-
-    from .pages import welcome, workspace
-    from .theme import apply_theme, page_container
+    from .pages import library, welcome, workspace
 
     welcome.register()
     workspace.register()
-
-    @ui.page("/library")
-    def _library_stub() -> None:
-        apply_theme()
-        with page_container():
-            ui.label("HRF Library").classes("text-4xl font-bold")
-            ui.label(
-                "Browse the bundled literature-derived HRF databases. "
-                "Full library browser lands in Sprint 4."
-            ).classes("text-lg opacity-80")
-            ui.button("Back to welcome", on_click=lambda: ui.navigate.to("/")).props(
-                "flat color=primary"
-            )
+    library.register()
 
 
 def _find_free_port() -> int:

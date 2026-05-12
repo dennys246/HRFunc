@@ -21,9 +21,16 @@
 - New: Activity tab — toeplitz (reuses estimated HRFs) and canonical
   (uses bundled HRF library) modes; lens.plot_nirx-style overlay
   preview with event markers
+- New: Quality tab — per-scan SNR / skewness / kurtosis / SCI metrics
+  across raw / preprocessed / deconvolved stages plus a dataset-wide
+  aggregate that walks every scan in the manifest
+- New: HRF Library page at `/library` — three-pane Browser-persona
+  flow with Context Filter sidebar, plotly 3D HRtree viz, and per-HRF
+  detail pane with trace preview
 - New: Cross-component event bus (`scan_selected`, `scan_loaded`,
-  `preprocess_done`, `hrf_estimated`, `activity_estimated`) for panel
-  reactivity
+  `preprocess_done`, `hrf_estimated`, `activity_estimated`,
+  `quality_computed`, `library_filter_changed`,
+  `library_selection_changed`) for panel reactivity
 - New: Folder-scan I/O subsystem (`hrfunc.io.scan_folder`,
   `classify_path`, `RawCache`) reusable from the Python API
 - New: `progress_callback` kwarg added to `montage.estimate_hrf` and

@@ -73,8 +73,13 @@ The workspace exposes seven tabs that mirror the analysis pipeline:
 4. **Activity** — deconvolve neural-activity time series from the
    preprocessed scan using either your estimated HRFs or the bundled
    canonical library.
-5. **Quality / HRtree / Export** — placeholders, landing in Sprints 4
-   and 5.
+5. **Quality** — per-scan SNR / skewness / kurtosis / SCI metrics plus
+   a dataset-wide aggregate that walks the full manifest.
+6. **HRtree (`/library`)** — plotly 3D scatter of the bundled
+   literature HRF database, with a context filter sidebar (task, doi,
+   study, demographics, stimulus, conditions) and a per-HRF detail
+   pane with trace preview.
+7. **Export** — placeholder, landing in Sprint 5.
 
 A 3-pane workspace with a BIDS-aware dataset tree on the left, tabbed
 analysis surface in the middle, and a manifest summary on the right.
