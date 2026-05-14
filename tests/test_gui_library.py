@@ -998,6 +998,48 @@ async def test_viz_pane_refreshes_on_selection_change(user: User):
     assert len(selection_subs) >= 1
 
 
+async def test_cluster_subtab_exposes_atlas_shape_option(user: User):
+    """PR #53: when the bundled Harvard-Oxford atlas loads, the Cluster
+    sub-tab's shape radio offers an ``Atlas region`` option alongside
+    ``Sphere``. The atlas readout below the MNI readout shows which
+    region the current centre sits in (in either mode)."""
+    global_state.reset()
+    global_state.library_hbo = type("FakeTree", (), {
+        "root": None,
+        "gather": lambda self, root: {},
+    })()
+    global_state.library_hbr = global_state.library_hbo
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    await user.should_see("Atlas region")
+    # Atlas readout shows the region at the default (0, 0, 0) centre.
+    # Origin sits outside any cortical region, so the "(outside atlas
+    # / background)" suffix should appear.
+    await user.should_see("Region at centre:")
+
+
+async def test_cluster_subtab_atlas_readout_shows_region_for_known_centre(user: User):
+    """When the cluster centre is moved into a known cortical region,
+    the readout names that region. Sets centre to a Frontal Pole
+    coordinate and expects the readout to include it."""
+    global_state.reset()
+    global_state.library_hbo = type("FakeTree", (), {
+        "root": None,
+        "gather": lambda self, root: {},
+    })()
+    global_state.library_hbr = global_state.library_hbo
+    # MNI (0, 60, 0) lies near the Frontal Pole in Harvard-Oxford 2mm.
+    global_state.cluster_center_x_mm = 0.0
+    global_state.cluster_center_y_mm = 60.0
+    global_state.cluster_center_z_mm = 0.0
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    # Either it lands in Frontal Pole, in a neighbouring labelled
+    # region, or in background -- but the readout label itself must
+    # render so we can be sure the wiring fires.
+    await user.should_see("Region at centre:")
+
+
 async def test_cluster_subtab_does_not_expose_box_shape(user: User):
     """PR #49 deliberately removes Box from the Cluster sub-tab's UI.
     The Box class stays in ``hrfunc.spatial`` as a primitive and

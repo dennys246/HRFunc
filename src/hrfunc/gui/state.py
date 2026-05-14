@@ -228,6 +228,13 @@ class AppState:
     cluster_box_half_x_mm: float = 20.0
     cluster_box_half_y_mm: float = 20.0
     cluster_box_half_z_mm: float = 20.0
+    # Atlas-region mode (PR #53). When ``cluster_shape == "atlas_region"``,
+    # the Cluster sub-tab uses an atlas-defined mask instead of a
+    # sphere / box. ``cluster_atlas_label`` is the selected region
+    # name; ``None`` means "no region picked yet" and the save button
+    # disables. The atlas itself is loaded lazily on first atlas-mode
+    # render via ``hrfunc.spatial.load_harvard_oxford_cortical``.
+    cluster_atlas_label: Optional[str] = None
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -342,6 +349,7 @@ class AppState:
         self.cluster_box_half_x_mm = 20.0
         self.cluster_box_half_y_mm = 20.0
         self.cluster_box_half_z_mm = 20.0
+        self.cluster_atlas_label = None
         self.hrf_selected_channel = None
 
 

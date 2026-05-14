@@ -126,17 +126,34 @@ def save_roi_average(
         anchor.get("_key") if anchor is not None else None
     ) or None
 
-    # Compute the saved location:
-    # - With anchor: use anchor.location (meters; v1.2 schema).
-    # - Without anchor but with shape: use the shape centre converted
-    #   from mm to meters so downstream tree-loading code sees a value
-    #   in the same units as v1.2.
-    # - Otherwise: None (read-only output, won't round-trip into tree).
+    # Compute the saved location (in MNE meters, matching the v1.2
+    # schema so the JSON round-trips into ``hrfunc.tree.load_hrfs``):
+    #
+    # 1. With anchor: anchor.location wins (preserves v1.2 behaviour).
+    # 2. Without anchor, shape has ``center_mm``: convert mm -> meters.
+    # 3. Without anchor, shape is an :class:`AtlasRegion`: compute the
+    #    region's voxel centroid in MNI mm via the atlas affine, then
+    #    convert to meters. Gives users a sensible "location" field
+    #    for region ROIs that lack a clicked-anchor.
+    # 4. Otherwise: None (saved file won't round-trip into tree).
     if anchor is not None:
         location: Optional[list] = anchor.get("location")
     elif shape is not None and hasattr(shape, "center_mm"):
         cx, cy, cz = shape.center_mm
         location = [cx / 1000.0, cy / 1000.0, cz / 1000.0]
+    elif shape is not None and hasattr(shape, "region_name") and hasattr(shape, "atlas"):
+        try:
+            mask = shape.atlas.region_mask(shape.region_name)
+            if mask is not None and mask.any():
+                voxel_indices = np.argwhere(mask)
+                centroid_voxel = voxel_indices.mean(axis=0)
+                homo = np.append(centroid_voxel, 1.0)
+                centroid_mm = (shape.atlas.affine @ homo)[:3]
+                location = (centroid_mm / 1000.0).tolist()
+            else:
+                location = None
+        except Exception:  # noqa: BLE001
+            location = None
     else:
         location = None
 
@@ -172,6 +189,20 @@ def save_roi_average(
                 shape_descriptor["orientation_mm"] = (
                     np.asarray(shape.orientation_mm).tolist()
                 )
+        elif hasattr(shape, "region_name"):  # AtlasRegion
+            # PR #53: atlas-defined region. Capture the atlas name +
+            # region label so readers can reconstruct the same ROI
+            # against the bundled (or a compatible) atlas.
+            atlas_name = (
+                getattr(shape.atlas, "name", None)
+                if hasattr(shape, "atlas")
+                else None
+            )
+            shape_descriptor = {
+                "type": "atlas_region",
+                "atlas": atlas_name,
+                "region_name": shape.region_name,
+            }
         elif hasattr(shape, "radius_mm"):  # Sphere
             shape_descriptor = {
                 "type": "sphere",

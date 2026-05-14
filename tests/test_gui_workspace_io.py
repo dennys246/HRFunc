@@ -401,6 +401,97 @@ class TestSaveRoiAverageBoxOrientation:
         recovered = np.asarray(shape_desc["orientation_mm"])
         np.testing.assert_allclose(recovered, R)
 
+    def test_atlas_region_descriptor_records_atlas_and_region(self, tmp_path):
+        """PR #53: AtlasRegion shapes serialise their atlas name +
+        region label so readers can reconstruct the same ROI."""
+        import numpy as np
+        from hrfunc.spatial.atlas import Atlas
+        from hrfunc.spatial.shapes import AtlasRegion
+
+        volume = np.zeros((3, 3, 3), dtype=np.int64)
+        volume[:, 1, :] = 1
+        affine = np.diag([10.0, 10.0, 10.0, 1.0])
+        atlas = Atlas(
+            name="synthetic-test",
+            volume=volume,
+            affine=affine,
+            labels=["Background", "Region_A"],
+            background_label=0,
+        )
+        region = AtlasRegion(atlas, "Region_A")
+        out = save_roi_average(
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            shape=region,
+            oxygenation_filter=True,
+            workspace=tmp_path,
+        )
+        shape_desc = json.loads(out.read_text())["context"]["roi_shape"]
+        assert shape_desc["type"] == "atlas_region"
+        assert shape_desc["atlas"] == "synthetic-test"
+        assert shape_desc["region_name"] == "Region_A"
+
+    def test_atlas_region_location_uses_region_centroid(self, tmp_path):
+        """Free-floating atlas-region save (no anchor) records the
+        region's voxel-centroid in MNE meters as ``location``."""
+        import numpy as np
+        from hrfunc.spatial.atlas import Atlas
+        from hrfunc.spatial.shapes import AtlasRegion
+
+        # Build a tiny atlas where Region_A occupies the y=1 slab so
+        # its voxel centroid is at (1, 1, 1) -> MNI (10, 10, 10) mm
+        # -> 0.01 m on each axis.
+        volume = np.zeros((3, 3, 3), dtype=np.int64)
+        volume[:, 1, :] = 1
+        affine = np.diag([10.0, 10.0, 10.0, 1.0])
+        atlas = Atlas(
+            name="synth-centroid",
+            volume=volume,
+            affine=affine,
+            labels=["Background", "Region_A"],
+            background_label=0,
+        )
+        region = AtlasRegion(atlas, "Region_A")
+        out = save_roi_average(
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            shape=region,
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        # Region_A occupies voxels (i, 1, k) for i, k in [0, 3) -- the
+        # centroid is voxel (1, 1, 1) -> MNI (10, 10, 10) mm = 0.01 m.
+        loc = payload["location"]
+        assert loc == pytest.approx([0.01, 0.01, 0.01], abs=1e-9)
+
+    def test_atlas_region_filename_prefix(self, tmp_path):
+        """Free-floating atlas-region saves get a recognisable prefix."""
+        import numpy as np
+        from hrfunc.spatial.atlas import Atlas
+        from hrfunc.spatial.shapes import AtlasRegion
+
+        volume = np.zeros((3, 3, 3), dtype=np.int64)
+        volume[:, 1, :] = 1
+        atlas = Atlas(
+            name="synth",
+            volume=volume,
+            affine=np.diag([10.0, 10.0, 10.0, 1.0]),
+            labels=["Background", "Region_A"],
+        )
+        out = save_roi_average(
+            roi_keys=set(),
+            hrf_mean=[0.0],
+            hrf_std=[0.0],
+            sfreq=1.0,
+            shape=AtlasRegion(atlas, "Region_A"),
+            workspace=tmp_path,
+        )
+        assert "freefloat_atlas_region" in out.name
+
     def test_orientation_matrix_round_trips_to_box(self, tmp_path):
         """End-to-end: save a rotated box, reload the descriptor, build
         a Box from it, and confirm membership decisions match the
