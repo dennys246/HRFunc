@@ -854,10 +854,22 @@ def _render_viz_pane(state: AppState) -> None:
     # layout children of the splitter slot already, so no wrapper-
     # styling is needed — height propagates through the slot directly.
 
-    # Re-render the viz on filter change.
+    # Re-render the viz on both filter and selection change.
+    #
+    # Selection changes (clicking an HRF, shift-paint adding to the
+    # painted set) update both ``state.library_selected_hrf`` AND
+    # ``state.cluster_center_*_mm`` (the click handler seeds the
+    # cluster centre from the clicked HRF's location). Without the
+    # selection_changed subscription, the figure's shape overlay
+    # would stay at the old centre until the user happened to toggle
+    # something on the Filter sub-tab or the MNI overlay switches --
+    # confusing because the detail pane + Cluster sub-tab DO update
+    # immediately (both subscribe to selection_changed), so the user
+    # sees the readout update while the 3D shape stays put.
     def _refresh_viz(_payload=None) -> None:
         _viz_body.refresh()
     state.subscribe("hrtree_filter_changed", _refresh_viz)
+    state.subscribe("hrtree_selection_changed", _refresh_viz)
 
 
 def _extract_clicked_hrf_key(event) -> Optional[str]:

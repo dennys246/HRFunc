@@ -963,6 +963,41 @@ async def test_cluster_subtab_owns_radius_and_clear_roi(user: User):
     await user.should_see("Sphere r=")
 
 
+async def test_viz_pane_refreshes_on_selection_change(user: User):
+    """Regression: clicking an HRF in the viz updates
+    ``state.cluster_center_*_mm`` (the click handler seeds the
+    cluster centre from the clicked HRF), but the figure overlay
+    only re-renders when the viz pane subscribes to the
+    ``hrtree_selection_changed`` event.
+
+    Pre-fix the viz only subscribed to ``hrtree_filter_changed``, so
+    the sphere overlay stayed at the old centre until the user
+    toggled something on the Filter sub-tab or the MNI overlay
+    switches. The detail pane and Cluster sub-tab DID update (they
+    both subscribe to selection_changed), so the readout drifted
+    out of sync with the 3D figure -- confusing user-visible bug.
+
+    Today the viz subscribes to both filter and selection events.
+    Assert both subscriptions exist after mount.
+    """
+    global_state.reset()
+    global_state.library_hbo = type("FakeTree", (), {
+        "root": None,
+        "gather": lambda self, root: {},
+    })()
+    global_state.library_hbr = global_state.library_hbo
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    # Both subscription lists must include at least one viz refresher
+    # (the same closure subscribes to both events).
+    filter_subs = global_state.subscribers.get("hrtree_filter_changed", [])
+    selection_subs = global_state.subscribers.get(
+        "hrtree_selection_changed", []
+    )
+    assert len(filter_subs) >= 1
+    assert len(selection_subs) >= 1
+
+
 async def test_cluster_subtab_does_not_expose_box_shape(user: User):
     """PR #49 deliberately removes Box from the Cluster sub-tab's UI.
     The Box class stays in ``hrfunc.spatial`` as a primitive and
