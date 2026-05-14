@@ -339,3 +339,104 @@ class TestSaveRoiAverageWithShape:
         shape_desc = payload["context"]["roi_shape"]
         assert shape_desc["type"] == "sphere"
         assert shape_desc["radius_m"] == 0.02
+
+
+class TestSaveRoiAverageBoxOrientation:
+    """PR #52 added an optional ``orientation_mm`` field to the box
+    shape descriptor. For axis-aligned boxes the field is omitted so
+    pre-PR-#52 readers don't see schema noise; for rotated boxes the
+    rotation matrix is serialised as a nested list."""
+
+    def _anchor(self):
+        return {
+            "_key": "hbo:k",
+            "oxygenation": True,
+            "location": [0.01, 0.02, 0.03],
+            "context": {},
+        }
+
+    def test_axis_aligned_box_omits_orientation_field(self, tmp_path):
+        from hrfunc.spatial.shapes import Box
+        box = Box(center_mm=(0.0, 0.0, 0.0), half_extents_mm=(5.0, 5.0, 5.0))
+        out = save_roi_average(
+            anchor=self._anchor(),
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            shape=box,
+            workspace=tmp_path,
+        )
+        shape_desc = json.loads(out.read_text())["context"]["roi_shape"]
+        assert shape_desc["type"] == "box"
+        # Pre-PR-#52 readers parse this descriptor unchanged.
+        assert "orientation_mm" not in shape_desc
+
+    def test_rotated_box_includes_orientation_matrix(self, tmp_path):
+        import numpy as np
+        from hrfunc.spatial.shapes import Box
+        # 90 degrees about z.
+        R = np.array(
+            [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+        box = Box(
+            center_mm=(0.0, 0.0, 0.0),
+            half_extents_mm=(5.0, 5.0, 5.0),
+            orientation_mm=R,
+        )
+        out = save_roi_average(
+            anchor=self._anchor(),
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            shape=box,
+            workspace=tmp_path,
+        )
+        shape_desc = json.loads(out.read_text())["context"]["roi_shape"]
+        assert shape_desc["type"] == "box"
+        assert "orientation_mm" in shape_desc
+        # The matrix round-trips through json as a list-of-lists.
+        recovered = np.asarray(shape_desc["orientation_mm"])
+        np.testing.assert_allclose(recovered, R)
+
+    def test_orientation_matrix_round_trips_to_box(self, tmp_path):
+        """End-to-end: save a rotated box, reload the descriptor, build
+        a Box from it, and confirm membership decisions match the
+        original."""
+        import numpy as np
+        from hrfunc.spatial.shapes import Box
+
+        R = np.array(
+            [[np.cos(0.4), -np.sin(0.4), 0.0],
+             [np.sin(0.4), np.cos(0.4), 0.0],
+             [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+        original = Box(
+            center_mm=(2.0, 3.0, 4.0),
+            half_extents_mm=(5.0, 7.0, 9.0),
+            orientation_mm=R,
+        )
+        out = save_roi_average(
+            anchor=self._anchor(),
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            shape=original,
+            workspace=tmp_path,
+        )
+        shape_desc = json.loads(out.read_text())["context"]["roi_shape"]
+        rebuilt = Box(
+            center_mm=tuple(shape_desc["center_mm"]),
+            half_extents_mm=tuple(shape_desc["half_extents_mm"]),
+            orientation_mm=np.asarray(shape_desc["orientation_mm"]),
+        )
+        rng = np.random.default_rng(seed=13)
+        points = rng.uniform(-20, 20, size=(100, 3))
+        np.testing.assert_array_equal(
+            original.contains_batch(points),
+            rebuilt.contains_batch(points),
+        )

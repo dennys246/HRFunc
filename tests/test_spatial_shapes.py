@@ -230,3 +230,217 @@ class TestBoxCorners:
         for corner in corners:
             # Each corner sits at +/-1 from the centre on every axis.
             assert all(abs(c - centre) == 1.0 for c, centre in zip(corner, (10.0, 20.0, 30.0)))
+
+
+# ---------------------------------------------------------------------------
+# Box: oriented (PR #52 -- orientation refactor)
+# ---------------------------------------------------------------------------
+
+
+def _rot_z(theta_rad: float) -> np.ndarray:
+    """Rotation matrix for a counter-clockwise rotation about the z axis."""
+    c, s = np.cos(theta_rad), np.sin(theta_rad)
+    return np.array(
+        [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+
+
+def _rot_y(theta_rad: float) -> np.ndarray:
+    """Rotation matrix for a counter-clockwise rotation about the y axis."""
+    c, s = np.cos(theta_rad), np.sin(theta_rad)
+    return np.array(
+        [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]],
+        dtype=np.float64,
+    )
+
+
+class TestBoxOrientationDefaults:
+    """Identity orientation must produce bit-identical behaviour to the
+    pre-PR-#52 AABB implementation -- otherwise the existing 33 Box
+    tests would have failed. These tests pin that contract."""
+
+    def test_none_orientation_is_identity(self):
+        box = Box(center_mm=(0, 0, 0), half_extents_mm=(5, 5, 5))
+        np.testing.assert_array_equal(box.orientation_mm, np.eye(3))
+
+    def test_is_axis_aligned_true_for_default(self):
+        box = Box(center_mm=(0, 0, 0), half_extents_mm=(5, 5, 5))
+        assert box.is_axis_aligned() is True
+
+    def test_explicit_identity_matches_default(self):
+        a = Box(center_mm=(1, 2, 3), half_extents_mm=(5, 5, 5))
+        b = Box(
+            center_mm=(1, 2, 3),
+            half_extents_mm=(5, 5, 5),
+            orientation_mm=np.eye(3),
+        )
+        # Same membership decisions across a sweep of points.
+        rng = np.random.default_rng(seed=11)
+        points = rng.uniform(-20, 20, size=(50, 3))
+        np.testing.assert_array_equal(
+            a.contains_batch(points), b.contains_batch(points)
+        )
+
+    def test_repr_says_aabb_for_identity(self):
+        box = Box(center_mm=(0, 0, 0), half_extents_mm=(1, 1, 1))
+        assert "AABB" in repr(box)
+
+
+class TestBoxOrientationValidation:
+    def test_wrong_shape_rejected(self):
+        with pytest.raises(ValueError, match="3x3"):
+            Box(
+                center_mm=(0, 0, 0),
+                half_extents_mm=(5, 5, 5),
+                orientation_mm=np.eye(2),
+            )
+
+    def test_non_orthogonal_rejected(self):
+        """A scaled or sheared matrix would silently produce wrong
+        membership results -- reject at construction time."""
+        bad = np.array([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]])
+        with pytest.raises(ValueError, match="orthogonal"):
+            Box(
+                center_mm=(0, 0, 0),
+                half_extents_mm=(5, 5, 5),
+                orientation_mm=bad,
+            )
+
+    def test_pure_rotation_accepted(self):
+        """A canonical rotation matrix passes validation cleanly."""
+        Box(
+            center_mm=(0, 0, 0),
+            half_extents_mm=(5, 5, 5),
+            orientation_mm=_rot_z(np.pi / 4),
+        )
+
+    def test_reflection_accepted(self):
+        """Reflections are orthogonal too -- we accept them rather than
+        check determinant sign, because they produce geometrically
+        correct membership for a symmetric box."""
+        reflect_x = np.diag([-1.0, 1.0, 1.0])
+        Box(
+            center_mm=(0, 0, 0),
+            half_extents_mm=(5, 5, 5),
+            orientation_mm=reflect_x,
+        )
+
+
+class TestBoxOrientationContains:
+    """Rotation membership semantics. The key intuition: a point's
+    membership depends on its representation in the BOX'S LOCAL
+    frame after the box has been rotated; equivalently, rotating
+    the box by R is the same as rotating world points by R^T
+    before checking the AABB-equivalent extents."""
+
+    def test_90deg_z_long_box_excludes_world_x_axis_point(self):
+        """A long-along-x box rotated 90 degrees about z now points
+        along world y. A point at world (10, 0, 0) was inside the
+        unrotated long box; rotated, it's outside (lies along the
+        new short axis)."""
+        box = Box(
+            center_mm=(0, 0, 0),
+            half_extents_mm=(15.0, 5.0, 5.0),
+            orientation_mm=_rot_z(np.pi / 2),
+        )
+        assert box.contains((10.0, 0.0, 0.0)) is False
+
+    def test_90deg_z_long_box_includes_world_y_axis_point(self):
+        """Same box -- a point at world (0, 10, 0) sits along the
+        rotated long axis and is inside."""
+        box = Box(
+            center_mm=(0, 0, 0),
+            half_extents_mm=(15.0, 5.0, 5.0),
+            orientation_mm=_rot_z(np.pi / 2),
+        )
+        assert box.contains((0.0, 10.0, 0.0)) is True
+
+    def test_45deg_z_membership(self):
+        """At 45 degrees, world (5, 5, 0) is on the rotated +x axis at
+        distance sqrt(50) ~ 7.07; outside if extent_x is 5."""
+        box = Box(
+            center_mm=(0, 0, 0),
+            half_extents_mm=(5.0, 5.0, 5.0),
+            orientation_mm=_rot_z(np.pi / 4),
+        )
+        # The point (sqrt(2)*2, sqrt(2)*2, 0) ~= (2.83, 2.83, 0)
+        # sits at box-local (4.0, 0.0, 0.0) -- inside.
+        assert box.contains((2.828, 2.828, 0.0)) is True
+        # The point (5, 5, 0) sits at box-local (~7.07, 0, 0) -- outside.
+        assert box.contains((5.0, 5.0, 0.0)) is False
+
+    def test_offset_centre_with_rotation(self):
+        """Centre + rotation compose correctly. Box at (10, 0, 0)
+        rotated 90 degrees about z, half_extents (15, 5, 5): the
+        rotated long axis points along world +y from the centre."""
+        box = Box(
+            center_mm=(10.0, 0.0, 0.0),
+            half_extents_mm=(15.0, 5.0, 5.0),
+            orientation_mm=_rot_z(np.pi / 2),
+        )
+        # 10 units along world +y from the centre -- inside.
+        assert box.contains((10.0, 10.0, 0.0)) is True
+        # 20 units along world +x from the centre -- outside.
+        assert box.contains((30.0, 0.0, 0.0)) is False
+
+
+class TestBoxOrientationBatch:
+    def test_batch_matches_per_point_for_rotated(self):
+        rng = np.random.default_rng(seed=29)
+        points = rng.uniform(-30, 30, size=(200, 3))
+        box = Box(
+            center_mm=(5.0, -3.0, 1.0),
+            half_extents_mm=(8.0, 12.0, 6.0),
+            orientation_mm=_rot_z(np.pi / 6),
+        )
+        batch = box.contains_batch(points)
+        per_point = np.array([box.contains(p) for p in points])
+        np.testing.assert_array_equal(batch, per_point)
+
+
+class TestBoxOrientationCorners:
+    def test_corners_rotated_into_world(self):
+        """For a 90 degree rotation about z, an axis-aligned corner at
+        local (1, 0, 0) ends up at world (0, 1, 0)."""
+        box = Box(
+            center_mm=(0, 0, 0),
+            half_extents_mm=(1.0, 2.0, 3.0),
+            orientation_mm=_rot_z(np.pi / 2),
+        )
+        corners = box.corners_mm()
+        # Every world corner must equal R @ local_corner where local
+        # corners are the +/- combinations of half_extents.
+        R = _rot_z(np.pi / 2)
+        local_signs = np.array(
+            [[s1, s2, s3] for s1 in (-1, 1) for s2 in (-1, 1) for s3 in (-1, 1)],
+            dtype=np.float64,
+        )
+        # Sign order in our class is (-,-,-), (+,-,-), (-,+,-), ...
+        # We rebuild it explicitly for comparison.
+        expected_local_order = np.array(
+            [
+                [-1, -1, -1], [+1, -1, -1], [-1, +1, -1], [+1, +1, -1],
+                [-1, -1, +1], [+1, -1, +1], [-1, +1, +1], [+1, +1, +1],
+            ], dtype=np.float64,
+        )
+        expected_local = expected_local_order * np.array([1.0, 2.0, 3.0])
+        expected_world = expected_local @ R.T
+        np.testing.assert_allclose(corners, expected_world, atol=1e-12)
+
+    def test_corners_still_8_under_rotation(self):
+        box = Box(
+            center_mm=(10, 20, 30),
+            half_extents_mm=(5, 5, 5),
+            orientation_mm=_rot_y(np.pi / 3),
+        )
+        assert box.corners_mm().shape == (8, 3)
+
+    def test_is_axis_aligned_false_under_rotation(self):
+        box = Box(
+            center_mm=(0, 0, 0),
+            half_extents_mm=(5, 5, 5),
+            orientation_mm=_rot_z(np.pi / 7),
+        )
+        assert box.is_axis_aligned() is False
+        assert "oriented" in repr(box)
