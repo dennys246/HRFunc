@@ -379,51 +379,20 @@ def _render_left_pane(state: AppState) -> None:
 
 
 def _render_filter_subtab(state: AppState) -> None:
-    """The Filter sub-tab — ROI radius, oxygenation, then context inputs.
+    """The Filter sub-tab -- oxygenation + context inputs.
 
-    Section order matches the user's typical interaction flow: the ROI
-    radius and oxygenation are read-frequently / tweaked-while-clicking
-    controls that benefit from top placement; the context-filter inputs
-    are set-once / refine-slowly, so they sit below. Each FILTER_FIELDS
-    entry becomes a text input bound to
-    ``state.library_filter[field]`` — empty string = field not filtered.
-    "Apply" then refreshes the dependent viz + detail panes.
+    Filter sub-tab owns "what's visible" (oxygenation, context filters);
+    the Cluster sub-tab owns "what's in the ROI" (shape, radius, paint,
+    clear). PR #49 moved the radius slider + Clear ROI button to the
+    Cluster sub-tab so the two sub-tabs have clearly separated
+    responsibilities.
+
+    Each FILTER_FIELDS entry becomes a text input bound to
+    ``state.library_filter[field]`` -- empty string = field not
+    filtered. "Apply" then refreshes the dependent viz + detail panes.
     """
     with ui.column().classes("w-full gap-3"):
-        # ── ROI controls (top: frequently-tweaked while clicking anchors)
-        ui.label("ROI radius").classes(
-            "text-xs uppercase opacity-60 tracking-wide"
-        )
-        radius_label = ui.label(
-            f"{state.library_roi_radius_m * 100:.1f} cm"
-        ).classes("text-xs font-mono opacity-80")
-
-        def _on_radius_change(event) -> None:
-            # Slider is centimetres for human-readable steps; state
-            # stores metres so the geometric compute keeps MNI units.
-            cm = float(event.value)
-            state.library_roi_radius_m = cm / 100.0
-            radius_label.set_text(f"{cm:.1f} cm")
-            state.publish("hrtree_filter_changed", state.library_filter)
-
-        ui.slider(
-            min=0.5, max=10.0, step=0.1,
-            value=state.library_roi_radius_m * 100.0,
-            on_change=_on_radius_change,
-        ).props("dense")
-
-        def _on_clear_roi() -> None:
-            state.library_selected_hrf = None
-            state.library_roi_painted.clear()
-            state.publish("hrtree_selection_changed", None)
-            state.publish("hrtree_filter_changed", state.library_filter)
-
-        ui.button(
-            "Clear ROI", on_click=_on_clear_roi
-        ).props("flat dense")
-
-        # ── Oxygenation radio (also frequently toggled with ROI work)
-        ui.separator()
+        # -- Oxygenation radio (frequently toggled, top placement)
 
         def _on_oxygenation_change(event) -> None:
             state.library_oxygenation = event.value or "both"
@@ -493,27 +462,31 @@ def _render_filter_subtab(state: AppState) -> None:
 
 
 def _render_cluster_subtab(state: AppState) -> None:
-    """The Cluster sub-tab -- ROI shape selection + save action.
+    """The Cluster sub-tab -- ROI shape, sizing, and save action.
 
-    PR #49 expands this sub-tab from a single Save button into a full
-    shape selector:
+    Sphere-only for now (PR #49). The Box class lives in the spatial
+    layer as a primitive and the GUI's compute_roi_keys_by_shape /
+    save_roi_average paths already accept it, but the UI doesn't
+    expose Box mode -- an axis-aligned box has no anatomical fit for
+    cortex. Rotation-aware Box returns to the UI in v1.4 after the
+    PR #50 orientation refactor + the v1.4 drag-handle work.
 
-    - **Shape radio**: Sphere or Box. Sphere uses the radius slider on
-      the Filter sub-tab; Box gets its own per-axis half-extent
-      controls below.
+    Contents:
+
     - **Centre inputs**: three MNI-mm number inputs for x / y / z.
       Auto-populated when the user clicks an HRF in the viz; can be
       edited directly for free-floating selection.
+    - **Radius slider**: the ROI sphere radius. Moved here from the
+      Filter sub-tab so all ROI-shape controls live together.
+    - **Clear ROI button**: drops the anchor + painted set.
     - **MNI readout**: a copy-pasteable summary like
       ``"Centre: (-30.0, 22.0, 5.0) mm  ·  Sphere r=20.0 mm"`` -- the
       kind of line a researcher pastes into a methods section.
     - **Save ROI average**: writes the averaged trace + shape metadata
       to the workspace folder via :func:`save_roi_average`.
 
-    Future: this sub-tab is the natural home for clustering scripts
-    (k-means, hierarchical, atlas-region membership). Add buttons
-    here as scripts land. The atlas-region option lands in the
-    follow-up PR.
+    Future: free-draw lasso ROI (PR #52) and atlas-region membership
+    (PR #51) add buttons here as they land.
     """
 
     @ui.refreshable
@@ -523,23 +496,9 @@ def _render_cluster_subtab(state: AppState) -> None:
                 "text-xs uppercase opacity-60 tracking-wide"
             )
             ui.label(
-                "Pick the ROI shape and adjust its position in MNI mm. "
-                "Click an HRF in the viz to seed the centre, or type "
-                "coordinates directly."
+                "Place the ROI sphere in MNI mm. Click an HRF in the "
+                "viz to seed the centre, or type coordinates directly."
             ).classes("text-xs opacity-60")
-
-            # --- Shape radio -----------------------------------------
-            def _on_shape_change(event) -> None:
-                state.cluster_shape = (
-                    event.value if event.value in SHAPE_MODES else SHAPE_SPHERE
-                )
-                state.publish("hrtree_filter_changed", state.library_filter)
-
-            ui.radio(
-                {SHAPE_SPHERE: "Sphere", SHAPE_BOX: "Box"},
-                value=state.cluster_shape,
-                on_change=_on_shape_change,
-            ).props("inline dense")
 
             # --- Centre inputs (MNI mm) ------------------------------
             ui.label("Centre (MNI mm)").classes(
@@ -568,46 +527,38 @@ def _render_cluster_subtab(state: AppState) -> None:
                 _make_centre_input("y", "cluster_center_y_mm")
                 _make_centre_input("z", "cluster_center_z_mm")
 
-            # --- Box half-extents (only shown when box mode) ---------
-            if state.cluster_shape == SHAPE_BOX:
-                ui.label("Box half-extents (mm)").classes(
-                    "text-xs uppercase opacity-60 tracking-wide"
-                )
+            # --- ROI radius (moved from Filter sub-tab in PR #49) ----
+            ui.label("ROI radius").classes(
+                "text-xs uppercase opacity-60 tracking-wide"
+            )
+            radius_label = ui.label(
+                f"{state.library_roi_radius_m * 100:.1f} cm"
+            ).classes("text-xs font-mono opacity-80")
 
-                def _make_extent_input(axis: str, attr: str):
-                    def _on_change(event) -> None:
-                        try:
-                            value = float(event.value or 0.0)
-                        except (TypeError, ValueError):
-                            return
-                        if value < 0:
-                            value = 0.0
-                        setattr(state, attr, value)
-                        state.publish(
-                            "hrtree_filter_changed", state.library_filter
-                        )
+            def _on_radius_change(event) -> None:
+                # Slider is centimetres for human-readable steps; state
+                # stores metres so the geometric compute keeps MNI units.
+                cm = float(event.value)
+                state.library_roi_radius_m = cm / 100.0
+                radius_label.set_text(f"{cm:.1f} cm")
+                state.publish("hrtree_filter_changed", state.library_filter)
 
-                    return ui.number(
-                        label=axis,
-                        value=getattr(state, attr),
-                        step=1.0,
-                        min=0.0,
-                        format="%.1f",
-                        on_change=_on_change,
-                    ).props("dense").classes("w-20")
+            ui.slider(
+                min=0.5, max=10.0, step=0.1,
+                value=state.library_roi_radius_m * 100.0,
+                on_change=_on_radius_change,
+            ).props("dense")
 
-                with ui.row().classes("w-full gap-2"):
-                    _make_extent_input("x", "cluster_box_half_x_mm")
-                    _make_extent_input("y", "cluster_box_half_y_mm")
-                    _make_extent_input("z", "cluster_box_half_z_mm")
-            else:
-                # Sphere mode just consumes the radius slider on the
-                # Filter sub-tab. Surface a hint so users discover where
-                # to adjust it.
-                ui.label(
-                    f"Sphere radius: {state.library_roi_radius_m * 1000:.1f} mm "
-                    f"(adjust on the Filter sub-tab)."
-                ).classes("text-xs opacity-60 italic")
+            # --- Clear ROI button (moved from Filter sub-tab) --------
+            def _on_clear_roi() -> None:
+                state.library_selected_hrf = None
+                state.library_roi_painted.clear()
+                state.publish("hrtree_selection_changed", None)
+                state.publish("hrtree_filter_changed", state.library_filter)
+
+            ui.button(
+                "Clear ROI", on_click=_on_clear_roi
+            ).props("flat dense")
 
             # --- MNI readout (copy-pasteable methods-section line) ---
             ui.separator()
@@ -710,7 +661,14 @@ def _render_cluster_subtab(state: AppState) -> None:
 
 
 def _format_shape_readout(state: AppState) -> str:
-    """One-line summary of the current Cluster shape, suitable for copy-paste."""
+    """One-line summary of the current Cluster shape, suitable for copy-paste.
+
+    Branches on ``state.cluster_shape`` so when the box / lasso UIs
+    return in v1.4 / PR #52 this helper renders them too without
+    touching the call sites. Today (PR #49 sphere-only UI) the box
+    branch is unreachable from the GUI but stays here as the contract
+    for the spatial-layer ``cluster_shape`` field.
+    """
     cx, cy, cz = (
         state.cluster_center_x_mm,
         state.cluster_center_y_mm,

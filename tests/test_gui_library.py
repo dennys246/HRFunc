@@ -939,6 +939,56 @@ async def test_cluster_subtab_save_button_replaces_detail_pane_button(user: User
     await user.should_see("Save ROI average")
 
 
+async def test_cluster_subtab_owns_radius_and_clear_roi(user: User):
+    """PR #49: the ROI radius slider + Clear ROI button moved from the
+    Filter sub-tab to the Cluster sub-tab so all ROI-shape controls
+    live together. The Filter sub-tab is now purely "what's visible"
+    (oxygenation + context filters); the Cluster sub-tab owns "what's
+    in the ROI"."""
+    global_state.reset()
+    global_state.library_hbo = type("FakeTree", (), {
+        "root": None,
+        "gather": lambda self, root: {},
+    })()
+    global_state.library_hbr = global_state.library_hbo
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    # The default sub-tab is Filter, which no longer carries radius
+    # / Clear ROI. Switching to Cluster should reveal both.
+    await user.should_see("ROI radius")
+    await user.should_see("Clear ROI")
+    # The Centre (MNI mm) heading and the sphere-only readout confirm
+    # we're seeing the Cluster sub-tab's full body.
+    await user.should_see("Centre (MNI mm)")
+    await user.should_see("Sphere r=")
+
+
+async def test_cluster_subtab_does_not_expose_box_shape(user: User):
+    """PR #49 deliberately removes Box from the Cluster sub-tab's UI.
+    The Box class stays in ``hrfunc.spatial`` as a primitive and
+    ``compute_roi_keys_by_shape`` still accepts it, but no UI control
+    surfaces it -- an axis-aligned box has no anatomical fit for
+    cortex. Rotation-aware Box returns to the UI in v1.4 alongside
+    the drag-handle work.
+
+    The readout should always say "Sphere r=" while box UI is hidden;
+    even if ``state.cluster_shape`` somehow got set to ``"box"``, the
+    user has no way to make that happen from this version's UI."""
+    global_state.reset()
+    global_state.library_hbo = type("FakeTree", (), {
+        "root": None,
+        "gather": lambda self, root: {},
+    })()
+    global_state.library_hbr = global_state.library_hbo
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    # Sphere readout present, box dimension format absent.
+    await user.should_see("Sphere r=")
+    await user.should_not_see("Box half-extents")
+    # No half-extent inputs in the sub-tab body.
+    await user.should_not_see("half-extents (mm)")
+
+
 async def test_filter_count_annotates_missing_location_hrfs(user: User):
     """The match-count label should make it clear when some matched
     HRFs are excluded from the viz for lacking a 3D location — so the
