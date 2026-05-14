@@ -244,6 +244,35 @@ class TestNearestNeighborEmptyTree:
         assert result is a
         assert distance < 0.01
 
+    def test_rich_load_keeps_estimates(self, tmp_path):
+        """PR #54: ``Tree(path, rich=True)`` retains the per-subject
+        ``estimates`` and ``locations`` lists from the JSON. The
+        default ``rich=False`` strips them for memory savings."""
+        import json
+        from hrfunc.hrtree import tree
+        payload = {
+            "s1_d1 hbo-doi": {
+                "hrf_mean": [1.0, 2.0],
+                "hrf_std": [0.1, 0.2],
+                "sfreq": 7.81,
+                "location": [0.01, 0.02, 0.03],
+                "estimates": [[1.0, 2.0], [2.0, 3.0], [3.0, 4.0]],
+                "locations": [[0.01, 0.02, 0.03]] * 3,
+                "context": {"duration": 30.0, "doi": "doi"},
+            },
+        }
+        path = tmp_path / "rich.json"
+        path.write_text(json.dumps(payload))
+
+        default_tree = tree(str(path))
+        assert default_tree.root is not None
+        # rich=False (default) strips estimates / locations.
+        assert default_tree.root.estimates == []
+
+        rich_tree = tree(str(path), rich=True)
+        assert rich_tree.root is not None
+        assert len(rich_tree.root.estimates) == 3
+
     def test_verbose_with_no_match_does_not_crash(self):
         """Regression for the ``best[0].ch_name`` crash in the verbose
         print branch.

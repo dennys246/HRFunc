@@ -235,6 +235,40 @@ class AppState:
     # disables. The atlas itself is loaded lazily on first atlas-mode
     # render via ``hrfunc.spatial.load_harvard_oxford_cortical``.
     cluster_atlas_label: Optional[str] = None
+    # PR #54: cluster ROI active toggle (default off). When False, the
+    # cluster shape doesn't contribute to ROI membership at all -- the
+    # viz pane shows raw HRFs with no halo, the detail-pane ROI-average
+    # section stays hidden, and the save button is disabled. Researchers
+    # opt into ROI mode explicitly via the toggle at the top of the
+    # Cluster sub-tab. Pre-PR-#54 the ROI was always on which made the
+    # gold halo around the default-centre (0, 0, 0) appear as if the
+    # tool had pre-selected something.
+    cluster_roi_active: bool = False
+    # PR #54: HRF-coords-to-MNI alignment for atlas membership. Bundled
+    # library HRFs are stored in MNE head coordinates (origin near the
+    # auditory meatus); the Harvard-Oxford atlas is in MNI mm (origin
+    # at the brain centroid). Without alignment, every HRF maps to
+    # voxels outside the atlas volume -> atlas mode silently shows
+    # empty ROIs. ``cluster_atlas_alignment_affine`` is a 4x4
+    # homogeneous transform applied at the membership-check boundary
+    # (HRF coord -> MNI coord). Defaults to None (= no transform) so
+    # users with already-MNI HRFs aren't affected. Loadable from a
+    # JSON or .npy file via the alignment file picker in atlas mode.
+    cluster_atlas_alignment_affine: Optional[Any] = None
+    # PR #54: human-friendly atlas alignment offsets (mm). These are a
+    # shorthand for users without a full 4x4 affine -- they compose
+    # with ``cluster_atlas_alignment_affine`` to produce the full
+    # transform applied at lookup. Pure-translation corrections in
+    # MNE-head -> MNI mm space.
+    cluster_atlas_offset_x_mm: float = 0.0
+    cluster_atlas_offset_y_mm: float = 0.0
+    cluster_atlas_offset_z_mm: float = 0.0
+    # PR #54: persistent "saved to" feedback for the Cluster sub-tab's
+    # save action. ``ui.notify`` toasts vanish in seconds; storing the
+    # last-saved path lets the sub-tab render an always-visible label
+    # below the save button so users can confirm the file went out
+    # even after navigating away and back.
+    last_saved_roi_path: Optional[Path] = None
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -350,6 +384,12 @@ class AppState:
         self.cluster_box_half_y_mm = 20.0
         self.cluster_box_half_z_mm = 20.0
         self.cluster_atlas_label = None
+        self.cluster_roi_active = False
+        self.cluster_atlas_alignment_affine = None
+        self.cluster_atlas_offset_x_mm = 0.0
+        self.cluster_atlas_offset_y_mm = 0.0
+        self.cluster_atlas_offset_z_mm = 0.0
+        self.last_saved_roi_path = None
         self.hrf_selected_channel = None
 
 
