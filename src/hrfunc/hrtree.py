@@ -502,7 +502,17 @@ class tree:
         # Handle base cases
         if node is None:
             if best is not None:
-                if verbose: print(f"No further branch, returning running best {best[0].ch_name}")
+                # ``best`` may be the ``(None, inf)`` sentinel returned by a
+                # deeper-recursion empty-tree or no-match path, not a real
+                # ``(node, distance)`` tuple. Guard the verbose-print branch
+                # so it doesn't dereference ``ch_name`` on None — pre-fix
+                # this crashed ``test_localization.py`` at collection time
+                # whenever an optode had no in-radius match under verbose.
+                if verbose:
+                    if best[0] is not None:
+                        print(f"No further branch, returning running best {best[0].ch_name}")
+                    else:
+                        print("No further branch, propagating empty-result sentinel")
                 return best
             else:
                 if verbose: print("No further branch and no best yet")
