@@ -491,8 +491,9 @@ async def _pick_save_path(suggested: str, title: str) -> Optional[Path]:
     # versions return synchronously.
     import inspect
 
+    from .._webview_compat import dialog_kind
     result = window.create_file_dialog(
-        webview.SAVE_DIALOG,
+        dialog_kind(webview, "SAVE"),
         save_filename=suggested,
     )
     if inspect.isawaitable(result):
@@ -523,7 +524,8 @@ async def _pick_folder_path(title: str) -> Optional[Path]:
 
     import inspect
 
-    result = window.create_file_dialog(webview.FOLDER_DIALOG)
+    from .._webview_compat import dialog_kind
+    result = window.create_file_dialog(dialog_kind(webview, "FOLDER"))
     paths = await result if inspect.isawaitable(result) else result
     if not paths:
         return None

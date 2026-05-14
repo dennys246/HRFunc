@@ -204,7 +204,7 @@ async def test_panel_prompts_when_no_scan(user: User, tmp_path):
         scans=(ScanEntry(format="snirf", path=tmp_path / "a.snirf",
                          display_name="a"),),
     )
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Export")
     await user.should_see("Select a scan from the dataset tree")
 
@@ -218,7 +218,7 @@ async def test_panel_all_five_rows_visible(user: User, tmp_path):
     global_state.reset()
     global_state.manifest = Manifest(root=tmp_path, scans=(scan,))
     global_state.selected_scan = scan
-    await user.open("/workspace")
+    await user.open("/")
     # Each row's title appears as visible text
     await user.should_see("Processed Raw")
     await user.should_see("Activity Raw")
@@ -236,7 +236,7 @@ async def test_panel_processed_row_hint_when_unprocessed(
     global_state.reset()
     global_state.manifest = Manifest(root=tmp_path, scans=(scan,))
     global_state.selected_scan = scan
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Run the Preprocess tab first")
 
 
@@ -249,7 +249,7 @@ async def test_panel_subscribes_to_all_state_events(user: User, tmp_path):
         scans=(ScanEntry(format="snirf", path=tmp_path / "a.snirf",
                          display_name="a"),),
     )
-    await user.open("/workspace")
+    await user.open("/")
     # Each event has at least one subscriber from the Export panel +
     # other tabs.
     for event in (

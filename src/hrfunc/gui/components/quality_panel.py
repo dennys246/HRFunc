@@ -203,7 +203,7 @@ def _render_dataset_aggregate(state: AppState) -> None:
         )
         n_scans = len(state.manifest.scans) if state.manifest else 0
         ui.label(
-            f"Run metrics over all {n_scans} scans in the manifest. "
+            f"Run metrics over all {n_scans} scans in the project. "
             "Each scan is loaded, preprocessed with library defaults, "
             "and summarized. Re-running overwrites cached results."
         ).classes("text-sm opacity-70")
