@@ -216,6 +216,175 @@ class TestAppStateReset:
         assert len(s.raw_cache) == 0
 
 
+class TestClusterMultiROI:
+    """PR #55 introduced per-ROI state via ``cluster_rois: list[ROISlot]``.
+    The pre-existing ``cluster_*`` / ``library_roi_*`` field names now
+    proxy onto the active slot so existing panel bindings keep working.
+
+    These tests pin down the proxy semantics, list mutation helpers,
+    and reset behaviour.
+    """
+
+    def test_default_state_has_one_roi_slot(self):
+        from hrfunc.gui.state import AppState, ROISlot
+
+        s = AppState()
+        assert len(s.cluster_rois) == 1
+        assert s.cluster_active_index == 0
+        assert isinstance(s.cluster_rois[0], ROISlot)
+        # Default slot matches the pre-PR-#55 defaults so callers that
+        # never touch the multi-ROI helpers see the same starting state.
+        assert s.cluster_shape == "sphere"
+        assert s.cluster_center_x_mm == 0.0
+        assert s.cluster_box_half_x_mm == 20.0
+        assert s.library_roi_radius_m == 0.02
+        assert s.library_roi_painted == set()
+
+    def test_each_app_state_has_independent_roi_list(self):
+        """The list uses ``field(default_factory=...)`` so two AppStates
+        don't share the same list. Mirrors the raw_cache guarantee."""
+        from hrfunc.gui.state import AppState
+
+        a = AppState()
+        b = AppState()
+        assert a.cluster_rois is not b.cluster_rois
+        a.add_roi()
+        assert len(b.cluster_rois) == 1
+
+    def test_proxy_setter_writes_to_active_slot(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.cluster_center_x_mm = 12.5
+        s.cluster_shape = "atlas_region"
+        s.cluster_atlas_label = "Frontal Pole"
+        s.library_roi_radius_m = 0.03
+        s.library_roi_painted.add("hbo:s1_d1_hbo-temp")
+
+        slot = s.cluster_rois[0]
+        assert slot.center_x_mm == 12.5
+        assert slot.shape == "atlas_region"
+        assert slot.atlas_label == "Frontal Pole"
+        # Storage is in mm; the meters proxy converts at the boundary.
+        assert slot.radius_mm == 30.0
+        assert slot.painted == {"hbo:s1_d1_hbo-temp"}
+
+    def test_painted_set_returned_by_reference(self):
+        """Pre-PR-#55 panels did ``state.library_roi_painted.clear()``
+        and ``.add(...)`` -- the proxy must return the same set so those
+        mutations land on the active slot."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.library_roi_painted.add("k1")
+        assert s.library_roi_painted is s.cluster_rois[0].painted
+        s.library_roi_painted.clear()
+        assert s.cluster_rois[0].painted == set()
+
+    def test_add_roi_appends_and_activates(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.cluster_center_x_mm = 5.0
+        slot2 = s.add_roi()
+
+        assert len(s.cluster_rois) == 2
+        assert s.cluster_active_index == 1
+        assert slot2.name == "ROI 2"
+        # New slot starts at defaults -- not inheriting from the prior.
+        assert slot2.center_x_mm == 0.0
+        # The prior slot is unaffected by writes through the proxy.
+        s.cluster_center_x_mm = -3.0
+        assert s.cluster_rois[0].center_x_mm == 5.0
+        assert s.cluster_rois[1].center_x_mm == -3.0
+
+    def test_set_active_roi_switches_proxy_view(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.cluster_center_x_mm = 1.0
+        s.add_roi()
+        s.cluster_center_x_mm = 2.0
+
+        s.set_active_roi(0)
+        assert s.cluster_center_x_mm == 1.0
+        s.set_active_roi(1)
+        assert s.cluster_center_x_mm == 2.0
+
+    def test_set_active_roi_ignores_out_of_range(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.set_active_roi(99)  # should be a no-op, not raise
+        assert s.cluster_active_index == 0
+        s.set_active_roi(-1)
+        assert s.cluster_active_index == 0
+
+    def test_clear_active_roi_resets_last_slot(self):
+        """With only one ROI in the list, CLEAR ROI resets it in place
+        rather than removing it -- the proxy properties need at least
+        one slot to point at."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.cluster_shape = "atlas_region"
+        s.cluster_center_x_mm = 50.0
+        s.library_roi_painted.add("k1")
+
+        s.clear_active_roi()
+
+        assert len(s.cluster_rois) == 1
+        assert s.cluster_shape == "sphere"
+        assert s.cluster_center_x_mm == 0.0
+        assert s.library_roi_painted == set()
+
+    def test_clear_active_roi_drops_active_when_multiple(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.add_roi()
+        s.add_roi()
+        # 3 slots: ROI 1 / ROI 2 / ROI 3 (active is the last)
+        assert [r.name for r in s.cluster_rois] == ["ROI 1", "ROI 2", "ROI 3"]
+        assert s.cluster_active_index == 2
+
+        s.clear_active_roi()
+        # Drop the third -> 2 remaining, active falls back to index 1.
+        assert len(s.cluster_rois) == 2
+        assert s.cluster_active_index == 1
+        # Names re-stamped so the list stays "ROI 1 ... ROI N" in order.
+        assert [r.name for r in s.cluster_rois] == ["ROI 1", "ROI 2"]
+
+    def test_active_roi_recovers_from_out_of_range_index(self):
+        """Defensive: if external state lands the index out of range,
+        the property clamps to 0 rather than raising."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.cluster_active_index = 99
+        slot = s.active_roi
+        assert slot is s.cluster_rois[0]
+        assert s.cluster_active_index == 0
+
+    def test_reset_returns_to_one_default_slot(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.add_roi()
+        s.add_roi()
+        s.cluster_shape = "atlas_region"
+        s.cluster_atlas_label = "Frontal Pole"
+        s.cluster_roi_active = True
+
+        s.reset()
+
+        assert len(s.cluster_rois) == 1
+        assert s.cluster_active_index == 0
+        assert s.cluster_shape == "sphere"
+        assert s.cluster_atlas_label is None
+        assert s.cluster_roi_active is False
+
+
 class TestSetBusy:
     """``set_busy`` toggles the flag and publishes ``busy_changed``.
 
