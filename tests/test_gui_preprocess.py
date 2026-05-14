@@ -155,7 +155,7 @@ async def test_panel_prompts_when_no_scan_selected(user: User, tmp_path):
                          display_name="a"),),
     )
     # selected_scan stays None
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Preprocess")
     # Switch to the Preprocess tab — the panel only renders inside the tab
     # panel, but its content is in the DOM regardless of which tab is active
@@ -174,7 +174,7 @@ async def test_panel_shows_waiting_when_raw_not_cached(user: User, tmp_path):
     global_state.manifest = Manifest(root=tmp_path, scans=(scan,))
     global_state.selected_scan = scan
     # raw_cache stays empty
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Waiting for scan to load")
 
 
@@ -189,7 +189,7 @@ async def test_panel_shows_run_button_when_raw_cached(user: User, tmp_path):
     global_state.manifest = Manifest(root=tmp_path, scans=(scan,))
     global_state.selected_scan = scan
     global_state.raw_cache._cache[scan.path.resolve()] = _make_fake_raw()
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Run full pipeline")
     await user.should_see("Pipeline options")
 
@@ -206,7 +206,7 @@ async def test_panel_shows_before_after_when_processed(user: User, tmp_path):
     global_state.selected_scan = scan
     global_state.raw_cache._cache[scan.path.resolve()] = _make_fake_raw()
     global_state.processed_cache._cache[scan.path.resolve()] = _make_fake_raw()
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Before / after")
 
 
@@ -215,28 +215,36 @@ async def test_panel_shows_before_after_when_processed(user: User, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-async def test_workspace_render_clears_subscribers_before_subscribing(
+async def test_shell_render_preserves_external_subscribers(
     user: User, tmp_path
 ):
-    """Each workspace render starts with a clean subscriber list so tab
-    refreshables from a prior render don't accumulate dead handles."""
+    """v1.4 single-shell contract: a tab render does NOT clear the
+    subscriber list. The legacy /workspace route cleared it on every
+    render — that broke cross-tab subscriptions in the single-shell
+    model. Now subscribers survive across renders; clearing is a
+    project-switch operation only.
+    """
     global_state.reset()
     global_state.manifest = Manifest(
         root=tmp_path,
         scans=(ScanEntry(format="snirf", path=tmp_path / "a.snirf",
                          display_name="a"),),
     )
-    # Pre-load a junk subscriber that we expect to be cleared.
-    leaked_calls = []
-    global_state.subscribe("scan_selected", lambda _p: leaked_calls.append(1))
-    await user.open("/workspace")
-    # After workspace render, the pre-render subscriber should be gone,
-    # replaced by Inspect + Preprocess tabs' own subscribers.
+    # Pre-load an external subscriber — simulates another tab / component
+    # that registered before this render. It MUST survive.
+    external_calls = []
+    global_state.subscribe(
+        "scan_selected", lambda _p: external_calls.append(1)
+    )
+    await user.open("/")
+    # Confirm the external subscriber still fires.
     global_state.publish("scan_selected", None)
-    assert leaked_calls == []
-    # And the Inspect + Preprocess tab subscribers ARE registered
+    assert external_calls == [1], (
+        "External subscriber was cleared — would break cross-tab events."
+    )
+    # And the Inspect + Preprocess tab subscribers register alongside.
     assert "scan_selected" in global_state.subscribers
-    assert len(global_state.subscribers["scan_selected"]) >= 2
+    assert len(global_state.subscribers["scan_selected"]) >= 3
 
 
 # ---------------------------------------------------------------------------

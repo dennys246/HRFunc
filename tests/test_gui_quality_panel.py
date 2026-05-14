@@ -255,7 +255,7 @@ async def test_panel_prompts_when_no_scan_and_no_metrics(user: User, tmp_path):
         scans=(ScanEntry(format="snirf", path=tmp_path / "a.snirf",
                          display_name="a"),),
     )
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Quality")
     await user.should_see("Select a scan from the dataset tree")
 
@@ -268,7 +268,7 @@ async def test_panel_shows_run_button_when_processed(user: User, tmp_path):
     global_state.manifest = Manifest(root=tmp_path, scans=(scan,))
     global_state.selected_scan = scan
     global_state.processed_cache._cache[scan.path.resolve()] = _make_fake_raw()
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Compute metrics for this scan")
 
 
@@ -279,7 +279,7 @@ async def test_panel_shows_waiting_when_not_processed(user: User, tmp_path):
     global_state.reset()
     global_state.manifest = Manifest(root=tmp_path, scans=(scan,))
     global_state.selected_scan = scan
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Preprocess the scan first")
 
 
@@ -296,7 +296,7 @@ async def test_panel_shows_dataset_aggregate_card(user: User, tmp_path):
     global_state.reset()
     global_state.manifest = Manifest(root=tmp_path, scans=scans)
     global_state.selected_scan = scans[0]
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Dataset-wide aggregate")
     await user.should_see("Run on all scans")
 
@@ -320,7 +320,7 @@ async def test_panel_renders_metrics_table_when_computed(user: User, tmp_path):
             snr_mean=2.5, skew_mean=0.1, kurtosis_mean=3.0, n_channels=4,
         )
     }
-    await user.open("/workspace")
+    await user.open("/")
     # The "Compute metrics" run-button should be replaced by the table.
     # No longer prompts the user to run anything for this scan.
     # Just check that a manifest row got populated — the table emits its
@@ -340,5 +340,5 @@ async def test_workspace_subscribes_quality_panel(user: User, tmp_path):
         scans=(ScanEntry(format="snirf", path=tmp_path / "a.snirf",
                          display_name="a"),),
     )
-    await user.open("/workspace")
+    await user.open("/")
     assert "quality_computed" in global_state.subscribers

@@ -1,4 +1,5 @@
-"""Targeted unit tests for feat/gui-library-browser (v1.3.0 Sprint 4.2-4.4).
+"""Targeted unit tests for the HRtree panel (the v1.4 home of the
+Sprint 4.2-4.4 library-browser logic).
 
 Covers:
 
@@ -10,8 +11,15 @@ Covers:
 - ``build_plotly_figure`` — produces HbO + HbR traces, customdata is
   the HRF key (for click handling), missing/short locations are skipped.
 - ``_extract_clicked_hrf_key`` — pulls key from plotly event payload.
-- /library page render — toolbar visible, filter inputs present,
-  empty-data fallback (no library loaded).
+- HRtree panel render — filter pane visible, empty-data fallback.
+
+v1.4 migration note: the ``pages.library`` module was deleted in Phase 4.
+The pure helpers + render functions now live in
+``components.hrtree_panel``. Tests use the module alias
+``library = hrtree_panel`` so the bulk of the assertions read unchanged,
+but route-render tests mount ``hrtree_panel.render`` directly via a
+test-only ``@ui.page("/_test_hrtree")`` rather than the deleted
+``/library`` route.
 """
 
 from __future__ import annotations
@@ -24,15 +32,31 @@ import pytest
 
 pytest.importorskip("nicegui")
 
+from nicegui import ui  # noqa: E402
 from nicegui.testing import User  # noqa: E402
 
 pytest_plugins = ["nicegui.testing.user_plugin"]
 
 from hrfunc.gui import app as gui_app  # noqa: E402
-from hrfunc.gui.pages import library  # noqa: E402
+from hrfunc.gui.components import hrtree_panel as library  # noqa: E402
 from hrfunc.gui.state import AppState, state as global_state  # noqa: E402
 
 gui_app._register_pages()
+
+
+def _mount_hrtree_route() -> None:
+    """Register a ``/_test_hrtree`` route at call-time.
+
+    Inline ``@ui.page`` registrations have to happen INSIDE each test
+    function (after the ``user`` fixture has initialized) because
+    NiceGUI's User plugin resets the page registry per test. Tests call
+    this helper at the top instead of duplicating the route definition.
+    """
+    @ui.page("/_test_hrtree")
+    def _test_hrtree_page() -> None:
+        from hrfunc.gui.theme import apply_theme
+        apply_theme()
+        library.render(global_state)
 
 
 def _silent(fn, *args, **kwargs):
@@ -645,7 +669,12 @@ class TestExtractClickedHrfKey:
 # ---------------------------------------------------------------------------
 
 
-async def test_library_page_renders_toolbar(user: User):
+async def test_hrtree_panel_renders_filter_header(user: User):
+    """v1.4: the legacy ``HRF Library`` toolbar + ``Back to welcome``
+    button no longer exist (the shell owns the toolbar). The panel
+    itself just renders the three-pane explorer; we assert the Filter
+    pane header as the smallest stable proof-of-render signal.
+    """
     global_state.reset()
     # Force-empty trees so we don't load 22 HRFs in the test render
     global_state.library_hbo = type("FakeTree", (), {
@@ -653,21 +682,28 @@ async def test_library_page_renders_toolbar(user: User):
         "gather": lambda self, root: {},
     })()
     global_state.library_hbr = global_state.library_hbo
-    await user.open("/library")
-    await user.should_see("HRF Library")
-    await user.should_see("Back to welcome")
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    await user.should_see("Filter")
 
 
 async def test_library_page_shows_filter_pane(user: User):
+    """v1.4 Phase 6: the Filter description copy ("Narrow the visible
+    HRFs...") was removed as part of the no-scroll redesign. The
+    "Filter" sub-tab label remains as the section header. Confirm the
+    sub-tab label is visible plus one of the input field labels (which
+    can't be removed and prove the form rendered)."""
     global_state.reset()
     global_state.library_hbo = type("FakeTree", (), {
         "root": None,
         "gather": lambda self, root: {},
     })()
     global_state.library_hbr = global_state.library_hbo
-    await user.open("/library")
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
     await user.should_see("Filter")
-    await user.should_see("Narrow the visible HRFs")
+    # One of the context-input labels (proves the inputs rendered).
+    await user.should_see("task")
 
 
 async def test_library_page_shows_empty_state_when_no_data(user: User):
@@ -679,19 +715,27 @@ async def test_library_page_shows_empty_state_when_no_data(user: User):
         "gather": lambda self, root: {},
     })()
     global_state.library_hbr = global_state.library_hbo
-    await user.open("/library")
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
     await user.should_see("Library trees not loaded")
 
 
 async def test_library_page_renders_with_real_data(user: User):
-    """End-to-end: real bundled HRFs load + filter + viz."""
+    """End-to-end: real bundled HRFs load + filter + viz.
+
+    v1.4 Phase 6: the legacy "HRtree — N HRFs shown" viz header was
+    shortened to just "N HRFs shown" (the wordmark lives in the left
+    pane now, so the header repetition was redundant). The HR_tree_
+    Brand wordmark is the cross-pane identity.
+    """
     global_state.reset()
     _silent(library._load_trees, global_state)
-    await user.open("/library")
-    # The match-count label below the filter form should report the totals
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    # Match-count label below the filter form reports totals.
     await user.should_see("HRFs match")
-    # And the HRtree header in the center pane
-    await user.should_see("HRtree")
+    # HR_tree_ wordmark in the left pane.
+    await user.should_see(content="HR<em>tree</em>")
 
 
 async def test_library_detail_pane_prompt_when_no_selection(user: User):
@@ -701,33 +745,83 @@ async def test_library_detail_pane_prompt_when_no_selection(user: User):
         "gather": lambda self, root: {},
     })()
     global_state.library_hbr = global_state.library_hbo
-    await user.open("/library")
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
     await user.should_see("Click an HRF in the viz to inspect")
 
 
-async def test_library_render_clears_subscribers(user: User):
-    """Repeated page renders should not accumulate dead refreshable
-    handles. _render clears state.subscribers at the top, matching
-    workspace's pattern."""
+async def test_hrtree_panel_does_not_clear_subscribers(user: User):
+    """The HRtree panel deliberately does NOT clear ``state.subscribers``
+    on render (Phase 1 architectural change vs the legacy ``/library``
+    route handler). The single-shell GUI shares one subscriber list
+    across all tabs; clearing on tab switch would nuke other tabs'
+    refreshables. Subscriber cleanup is a project-switch operation
+    (Phase 3+), not a render-time operation.
+
+    Regression guard: pre-existing external subscribers should survive
+    a panel render. The panel's own subscribers register alongside.
+    """
     global_state.reset()
     global_state.library_hbo = type("FakeTree", (), {
         "root": None,
         "gather": lambda self, root: {},
     })()
     global_state.library_hbr = global_state.library_hbo
-    # Pre-load a junk subscriber that would survive a non-clearing render
-    leaked_calls = []
+    # Pre-load an external subscriber — simulates another tab's
+    # event-bus consumer that must survive.
+    external_calls = []
     global_state.subscribe(
-        "library_filter_changed", lambda _p: leaked_calls.append(1)
+        "hrtree_filter_changed", lambda _p: external_calls.append(1)
     )
-    await user.open("/library")
-    # After render, the pre-render subscriber should be gone (replaced
-    # by the library page's own subscribers).
-    global_state.publish("library_filter_changed", {})
-    assert leaked_calls == []
-    # And the library page's own subscribers are present
-    assert "library_filter_changed" in global_state.subscribers
-    assert len(global_state.subscribers["library_filter_changed"]) >= 1
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    # After render, the pre-existing subscriber MUST still fire.
+    global_state.publish("hrtree_filter_changed", {})
+    assert external_calls == [1], (
+        "External subscriber was cleared — this would break other tabs."
+    )
+    # Plus the panel's own subscribers are also present (count >= 2 now).
+    assert (
+        len(global_state.subscribers["hrtree_filter_changed"]) >= 2
+    )
+
+
+async def test_left_pane_renders_hrtree_wordmark_and_subtabs(user: User):
+    """v1.4 Phase 6 redesign: the HR_tree_ Brand wordmark + Filter /
+    Cluster sub-tabs live inside the left pane (not the shell). The
+    wordmark is rendered as raw HTML ``HR<em>tree</em>`` via the Brand
+    component."""
+    global_state.reset()
+    global_state.library_hbo = type("FakeTree", (), {
+        "root": None,
+        "gather": lambda self, root: {},
+    })()
+    global_state.library_hbr = global_state.library_hbo
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    # Wordmark
+    await user.should_see(content="HR<em>tree</em>")
+    # Both sub-tab labels visible
+    await user.should_see("Filter")
+    await user.should_see("Cluster")
+
+
+async def test_cluster_subtab_save_button_replaces_detail_pane_button(user: User):
+    """The Save-ROI-average button was moved from the detail pane to the
+    Cluster sub-tab so the left pane owns actions and the right pane
+    stays read-only."""
+    global_state.reset()
+    global_state.library_hbo = type("FakeTree", (), {
+        "root": None,
+        "gather": lambda self, root: {},
+    })()
+    global_state.library_hbr = global_state.library_hbo
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    # Cluster sub-tab renders the save button (disabled at this stage —
+    # no anchor set, so the ROI is empty; the button shows but is
+    # disabled per Phase 6 contract).
+    await user.should_see("Save ROI average")
 
 
 async def test_filter_count_annotates_missing_location_hrfs(user: User):
@@ -758,6 +852,7 @@ async def test_filter_count_annotates_missing_location_hrfs(user: User):
         "root": None,
         "gather": lambda self, root: {},
     })()
-    await user.open("/library")
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
     # Both HRFs match the (empty) filter; one lacks location.
     await user.should_see("not visualizable: missing location")

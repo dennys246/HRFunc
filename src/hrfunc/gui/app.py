@@ -105,6 +105,11 @@ def _launch_gui(argv: List[str]) -> int:
 
     _register_pages()
 
+    # Resolve the bundled executable icon to use as the favicon — same
+    # PNG that powers the OS-level shortcut so the in-app and out-of-app
+    # branding match. Falls back to NiceGUI's default when missing.
+    favicon = _resolve_favicon()
+
     ui.run(
         title="HRfunc",
         native=True,
@@ -113,8 +118,27 @@ def _launch_gui(argv: List[str]) -> int:
         show=True,
         port=_find_free_port(),
         show_welcome_message=False,
+        favicon=favicon,
     )
     return 0
+
+
+def _resolve_favicon() -> Optional[str]:
+    """Return the bundled executable PNG path for ``ui.run(favicon=...)``.
+
+    Returns ``None`` on any resolution failure (broken install, asset
+    missing); NiceGUI then uses its default favicon. Keeping this
+    fail-safe means a broken asset bundle never blocks GUI startup.
+    """
+    try:
+        from importlib import resources
+
+        ref = resources.files("hrfunc.assets") / "executable_icon.png"
+        with resources.as_file(ref) as path:
+            return str(path)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("favicon unavailable: %s", exc)
+        return None
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -156,16 +180,17 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 def _register_pages() -> None:
     """Register all `@ui.page` handlers.
 
-    Welcome at ``/`` (Sprint 2.2), workspace at ``/workspace`` (Sprint 2.3+),
-    library at ``/library`` (Sprint 4.2-4.4). Page modules are imported
-    lazily so dev-mode reloading picks up changes without restarting the
-    NiceGUI server.
+    v1.4 single-shell layout: the tabbed shell at ``/`` is the only
+    route. Tabs: HRtree, Inspect, Preprocess, Estimate, Activity,
+    Quality, Export. The legacy ``welcome.py`` / ``library.py`` /
+    ``workspace.py`` modules were deleted across Phases 4-5 — the
+    HRtree tab subsumes the old Library route, Inspect was reinstated
+    as a tab (Phase 5), and the workspace's three-pane layout is
+    superseded by the per-tab dataset-tree + content split.
     """
-    from .pages import library, welcome, workspace
+    from .pages import shell
 
-    welcome.register()
-    workspace.register()
-    library.register()
+    shell.register()
 
 
 def _find_free_port() -> int:

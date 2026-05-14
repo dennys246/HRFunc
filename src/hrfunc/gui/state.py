@@ -65,6 +65,14 @@ async dispatch, no payload schemas. Defined events:
   after a Quality-panel metrics computation finishes (per-scan: ScanEntry;
   dataset-wide aggregate: None). Subscribers can read
   ``state.quality_metrics`` for the results.
+- ``"project_changed"`` — payload: ``Manifest`` or ``None``. Published by
+  ``set_manifest`` when the active project swaps (load new, switch, or
+  close). Panels with persistent refreshables subscribe to blank or
+  rebuild their views before reading the new manifest.
+- ``"busy_changed"`` — payload: ``bool`` (the new busy value). Published
+  by ``set_busy`` when a background worker starts (True) or completes
+  (False). The project picker subscribes to disable Open / Close while
+  busy so a switch can't strand a half-finished run on the new project.
 
 Subscribers are sync callables. Async handlers can dispatch via
 ``nicegui.background_tasks.create`` from inside their callback.
@@ -234,6 +242,33 @@ class AppState:
                     "Subscriber %r raised on event %r: %s",
                     callback, event, exc,
                 )
+
+    def set_busy(self, value: bool) -> None:
+        """Toggle the busy flag and notify subscribers.
+
+        ``workers.run_in_background`` calls this with ``True`` before
+        dispatching the worker thread and ``False`` after it returns
+        (success or failure). The project picker subscribes to
+        ``busy_changed`` to disable Open / Close menu items while a
+        long task is running — without this, switching projects mid-
+        estimate would silently land the result on the new project.
+        """
+        if self.busy == value:
+            return
+        self.busy = value
+        self.publish("busy_changed", value)
+
+    def set_manifest(self, manifest: Optional[Manifest]) -> None:
+        """Swap the active project manifest and notify subscribers.
+
+        Pass ``None`` to clear. The ``project_changed`` event fires AFTER the
+        manifest field is updated so subscribers reading ``state.manifest``
+        from inside their callback see the new value. Subscribers themselves
+        are not cleared — panels stay subscribed across project switches in
+        the single-shell GUI; their handlers re-read state and refresh.
+        """
+        self.manifest = manifest
+        self.publish("project_changed", manifest)
 
     def reset(self) -> None:
         """Return to the welcome-screen state.

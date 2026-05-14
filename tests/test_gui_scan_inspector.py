@@ -1,21 +1,24 @@
-"""Targeted unit tests for feat/gui-scan-inspector (v1.3.0 Sprint 3.1).
+"""Targeted unit tests for the v1.4 scan-inspect path.
 
-Covers:
+Covers (post-v1.4 module homes):
 
 - ``dataset_tree.build_nodes`` filter — case-insensitive substring match
   against display_name + path; subjects/sessions with zero matching scans
   pruned.
-- ``dataset_tree.render`` — search input renders above the tree, empty-
-  match shows "No scans match filter" rather than blank.
-- ``workspace._render_inspect_body`` — three rendering states: no scan,
-  scan selected but Raw not yet cached (loading), scan selected and Raw
+- ``inspect_panel._render_body`` — three rendering states: no scan, scan
+  selected but Raw not yet cached (loading), scan selected and Raw
   cached (channels/probe/events visible).
-- ``workspace._load_scan_raw`` — async helper inserts loaded Raw into
-  state.raw_cache and refreshes only if the user is still on the same
-  scan (compared by path, not identity).
+- ``shell._load_scan_raw`` — async helper inserts loaded Raw into
+  state.raw_cache and publishes ``scan_loaded`` only when the user is
+  still on the same scan (compared by path, not identity).
 
-Rendering tests use NiceGUI's User fixture; state-isolation tests don't
-need NiceGUI bootstrap.
+v1.4 migration note: the rendering-state and load helpers were in
+``pages.workspace`` through v1.3. Phase 5 moved them into
+``components.inspect_panel`` and ``pages.shell`` respectively. Tests
+that used to render the Inspect via ``await user.open("/")``
+now use the shell root at ``"/"`` — its tab panels are eagerly
+mounted so the Inspect tab's body is in the DOM regardless of the
+active tab.
 """
 
 from __future__ import annotations
@@ -34,8 +37,8 @@ from nicegui.testing import User  # noqa: E402
 pytest_plugins = ["nicegui.testing.user_plugin"]
 
 from hrfunc.gui import app as gui_app  # noqa: E402
-from hrfunc.gui.components import dataset_tree  # noqa: E402
-from hrfunc.gui.pages import workspace  # noqa: E402
+from hrfunc.gui.components import dataset_tree, inspect_panel  # noqa: E402
+from hrfunc.gui.pages import shell  # noqa: E402
 from hrfunc.gui.state import state as global_state  # noqa: E402
 from hrfunc.io.manifest import Manifest, ScanEntry  # noqa: E402
 
@@ -187,7 +190,7 @@ async def test_dataset_tree_renders_filter_input(user: User, tmp_path):
                       display_name="alpha"),
         ),
     )
-    await user.open("/workspace")
+    await user.open("/")
     # Filter input is a placeholder — NiceGUI's User fixture matches it via
     # the placeholder text. The trailing ellipsis is a Unicode character;
     # match the prefix to stay robust.
@@ -213,7 +216,7 @@ async def test_workspace_recording_section_shows_loading_when_uncached(
     )
     global_state.selected_scan = scan
 
-    await user.open("/workspace")
+    await user.open("/")
     # The "Recording" header always renders when a scan is selected;
     # combined with "Loading recording…" it confirms the uncached branch.
     await user.should_see("Recording")
@@ -246,7 +249,7 @@ async def test_workspace_recording_section_shows_channels_when_cached(
     )
     global_state.raw_cache._cache[scan.path.resolve()] = raw
 
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Recording")
     # Channels expansion label includes the channel count
     await user.should_see("Channels (2)")
@@ -257,7 +260,7 @@ async def test_workspace_recording_section_shows_channels_when_cached(
 
 
 # ---------------------------------------------------------------------------
-# workspace._load_scan_raw — async load + post-load refresh gating
+# shell._load_scan_raw — async load + post-load refresh gating
 # ---------------------------------------------------------------------------
 
 
@@ -290,7 +293,7 @@ class TestLoadScanRaw:
         published = []
         state.subscribe("scan_loaded", lambda payload: published.append(payload))
 
-        asyncio.run(workspace._load_scan_raw(state, scan))
+        asyncio.run(shell._load_scan_raw(state, scan))
 
         assert scan in state.raw_cache
         assert len(published) == 1
@@ -329,7 +332,7 @@ class TestLoadScanRaw:
         published = []
         state.subscribe("scan_loaded", lambda payload: published.append(payload))
 
-        asyncio.run(workspace._load_scan_raw(state, scan_a))
+        asyncio.run(shell._load_scan_raw(state, scan_a))
 
         # Load completed but user is on scan_b now → no stale event for A.
         assert published == []
@@ -360,7 +363,7 @@ class TestLoadScanRaw:
         published = []
         state.subscribe("scan_loaded", lambda payload: published.append(payload))
 
-        asyncio.run(workspace._load_scan_raw(state, scan))
+        asyncio.run(shell._load_scan_raw(state, scan))
 
         # Path matches even though objects differ → event fires.
         assert len(published) == 1
@@ -382,7 +385,7 @@ class TestLoadScanRaw:
         published = []
         state.subscribe("scan_loaded", lambda payload: published.append(payload))
 
-        asyncio.run(workspace._load_scan_raw(state, scan))
+        asyncio.run(shell._load_scan_raw(state, scan))
 
         assert state.last_error is not None
         assert "FileNotFoundError" in state.last_error
@@ -401,6 +404,6 @@ class TestInspectBodyContracts:
         """Sprint 3.1 extracted the body from inside _render_inspect_tab so
         tests and future panels can call it directly. Regression guard."""
         import inspect as inspect_mod
-        assert callable(workspace._render_inspect_body)
-        sig = inspect_mod.signature(workspace._render_inspect_body)
+        assert callable(inspect_panel._render_body)
+        sig = inspect_mod.signature(inspect_panel._render_body)
         assert list(sig.parameters) == ["state"]

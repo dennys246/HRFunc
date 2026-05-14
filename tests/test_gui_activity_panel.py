@@ -324,7 +324,7 @@ async def test_panel_toeplitz_rejects_cross_scan_montage(
     global_state.montage = object()  # Stand-in for a real Montage
     global_state.montage_source_scan = scan_a
 
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("estimated from scan_a")
 
 
@@ -340,7 +340,7 @@ async def test_panel_prompts_when_no_scan(user: User, tmp_path):
         scans=(ScanEntry(format="snirf", path=tmp_path / "a.snirf",
                          display_name="a"),),
     )
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Activity")
     await user.should_see("Select a scan from the dataset tree")
 
@@ -355,7 +355,7 @@ async def test_panel_shows_waiting_when_not_preprocessed(user: User, tmp_path):
     global_state.reset()
     global_state.manifest = Manifest(root=tmp_path, scans=(scan,))
     global_state.selected_scan = scan
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Waiting for preprocess output")
 
 
@@ -372,7 +372,7 @@ async def test_panel_toeplitz_needs_hrfs_first(user: User, tmp_path):
     global_state.selected_scan = scan
     global_state.processed_cache._cache[scan.path.resolve()] = raw
     # No montage set → toeplitz mode should prompt for HRFs first
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Toeplitz mode requires estimated HRFs")
 
 
@@ -393,7 +393,7 @@ async def test_panel_toeplitz_rejects_canonical_result_montage(
     global_state.montage = hrf_panel._CanonicalResult(
         canonical_trace=np.zeros(10), duration=30.0, sfreq=10.0
     )
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Toeplitz mode requires real per-channel HRFs")
 
 
@@ -406,7 +406,7 @@ async def test_panel_shows_lambda_control(user: User, tmp_path):
     global_state.manifest = Manifest(root=tmp_path, scans=(scan,))
     global_state.selected_scan = scan
     global_state.processed_cache._cache[scan.path.resolve()] = raw
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Regularization")
 
 
@@ -422,7 +422,7 @@ async def test_workspace_subscribes_activity_panel(user: User, tmp_path):
         scans=(ScanEntry(format="snirf", path=tmp_path / "a.snirf",
                          display_name="a"),),
     )
-    await user.open("/workspace")
+    await user.open("/")
     assert "activity_estimated" in global_state.subscribers
     assert "hrf_estimated" in global_state.subscribers
     # hrf_estimated has both HRFs tab + Activity tab subscribers

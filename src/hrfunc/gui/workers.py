@@ -85,7 +85,7 @@ async def run_in_background(
         )
         return None
 
-    state.busy = True
+    state.set_busy(True)
     state.last_error = None
     result: Any = None
     try:
@@ -100,7 +100,7 @@ async def run_in_background(
         logger.exception("Background worker failed: %s", exc)
         return None
     finally:
-        state.busy = False
+        state.set_busy(False)
         state.estimation_progress = None
 
     if on_done is not None:

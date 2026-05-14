@@ -328,7 +328,7 @@ async def test_panel_prompts_when_no_scan(user: User, tmp_path):
         scans=(ScanEntry(format="snirf", path=tmp_path / "a.snirf",
                          display_name="a"),),
     )
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("HRFs")
     await user.should_see("Select a scan from the dataset tree")
 
@@ -346,7 +346,7 @@ async def test_panel_shows_waiting_when_no_processed_raw(user: User, tmp_path):
     global_state.manifest = Manifest(root=tmp_path, scans=(scan,))
     global_state.selected_scan = scan
     # Neither raw_cache nor processed_cache has the scan
-    await user.open("/workspace")
+    await user.open("/")
     await user.should_see("Preprocess the scan first")
 
 
@@ -368,7 +368,7 @@ async def test_panel_shows_event_picker_when_preprocessed(user: User, tmp_path):
     global_state.processed_cache._cache[scan.path.resolve()] = raw
     global_state.raw_cache._cache[scan.path.resolve()] = raw
 
-    await user.open("/workspace")
+    await user.open("/")
     # Event names should appear as checkbox labels.
     await user.should_see("stim_a")
     await user.should_see("stim_b")
@@ -390,7 +390,7 @@ async def test_panel_canonical_note_when_canonical_mode(user: User, tmp_path):
     global_state.selected_scan = scan
     global_state.raw_cache._cache[scan.path.resolve()] = raw
 
-    await user.open("/workspace")
+    await user.open("/")
     # Default is toeplitz; canonical-only label not visible yet.
     # Just verify the toeplitz/canonical radio is rendered.
     await user.should_see("toeplitz")
@@ -411,7 +411,7 @@ async def test_workspace_subscribes_hrf_panel_to_events(user: User, tmp_path):
         scans=(ScanEntry(format="snirf", path=tmp_path / "a.snirf",
                          display_name="a"),),
     )
-    await user.open("/workspace")
+    await user.open("/")
     # All three events the panel subscribes to should be present in the
     # bus. Each event has at least one subscriber (Inspect + Preprocess +
     # HRFs).

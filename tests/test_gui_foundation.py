@@ -216,6 +216,113 @@ class TestAppStateReset:
         assert len(s.raw_cache) == 0
 
 
+class TestSetBusy:
+    """``set_busy`` toggles the flag and publishes ``busy_changed``.
+
+    Used by the v1.4 project picker dropdown to disable Open / Close
+    while a long task is running. The event mechanism (vs polling) lets
+    UI components subscribe to the change without re-checking the flag
+    on every render.
+    """
+
+    def test_set_busy_updates_field(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        assert s.busy is False
+        s.set_busy(True)
+        assert s.busy is True
+
+    def test_set_busy_publishes_event(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        received = []
+        s.subscribe("busy_changed", lambda v: received.append(v))
+
+        s.set_busy(True)
+        s.set_busy(False)
+        assert received == [True, False]
+
+    def test_set_busy_no_op_when_value_unchanged(self):
+        """Setting the same value twice should NOT publish a duplicate
+        event — the picker would refresh its menu twice for nothing."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        received = []
+        s.subscribe("busy_changed", lambda v: received.append(v))
+
+        s.set_busy(True)
+        s.set_busy(True)
+        assert received == [True]
+
+
+class TestSetManifest:
+    """``set_manifest`` swaps the active project and fires ``project_changed``.
+
+    Used by the v1.4 single-shell GUI's project picker dropdown. Subscribers
+    blank or rebuild their refreshables when the manifest changes underneath
+    them.
+    """
+
+    def test_set_manifest_updates_field(self, tmp_path):
+        from hrfunc.gui.state import AppState
+        from hrfunc.io.manifest import Manifest
+
+        s = AppState()
+        m = Manifest(root=tmp_path)
+        s.set_manifest(m)
+        assert s.manifest is m
+
+    def test_set_manifest_publishes_project_changed(self, tmp_path):
+        from hrfunc.gui.state import AppState
+        from hrfunc.io.manifest import Manifest
+
+        s = AppState()
+        received = []
+        s.subscribe("project_changed", lambda m: received.append(m))
+
+        m = Manifest(root=tmp_path)
+        s.set_manifest(m)
+        assert received == [m]
+
+    def test_set_manifest_none_clears_and_publishes(self, tmp_path):
+        """Passing None clears the manifest and notifies subscribers with
+        None — the contract for project-close from the picker dropdown."""
+        from hrfunc.gui.state import AppState
+        from hrfunc.io.manifest import Manifest
+
+        s = AppState()
+        s.manifest = Manifest(root=tmp_path)
+        received = []
+        s.subscribe("project_changed", lambda m: received.append(m))
+
+        s.set_manifest(None)
+        assert s.manifest is None
+        assert received == [None]
+
+    def test_project_changed_fires_after_field_assignment(self, tmp_path):
+        """Subscribers reading ``state.manifest`` from inside their callback
+        must see the NEW value, not the pre-swap one. This is the contract
+        that lets a panel's refreshable rebuild against the new manifest
+        directly in the event handler."""
+        from hrfunc.gui.state import AppState
+        from hrfunc.io.manifest import Manifest
+
+        s = AppState()
+        observed = []
+
+        def reader(payload):
+            observed.append(s.manifest)  # read live state, ignore payload
+
+        s.subscribe("project_changed", reader)
+
+        m = Manifest(root=tmp_path)
+        s.set_manifest(m)
+        assert observed == [m]
+
+
 # ---------------------------------------------------------------------------
 # Theme: callable without crashing
 # ---------------------------------------------------------------------------
