@@ -38,6 +38,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 from nicegui import ui
 
+from ...spatial.coords import meters_to_mm
+from ...spatial.shapes import Sphere
+from ...viz.brain_scene import make_surface_trace
+from ...viz.meshes import MESH_CACHE as _MESH_CACHE
+from ...viz.meshes import MESH_FILENAMES as _MESH_FILENAMES
+from ...viz.meshes import load_brain_mesh, load_mesh
 from . import brand
 from ..state import AppState
 
@@ -46,22 +52,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-# Cached MNI head + brain meshes. Both are bundled in the wheel as decimated
-# fsaverage surfaces (~2.5k verts / 5k tris each, MNI-meter coords).
-# Loaded lazily on first toggle-on and reused for every subsequent render.
-#
-# Two layers (researchers find both useful and they show different things):
-#   - "pial"  → fsaverage lh.pial + rh.pial, stitched. The cortical surface.
-#   - "scalp" → fsaverage bem/outer_skin.surf. The head's outer skin —
-#               where forehead-mounted optodes physically sit, so HRF
-#               points overlay this surface anatomically correctly.
-_MESH_CACHE: Dict[str, Optional[Tuple["np.ndarray", "np.ndarray"]]] = {}
-
-_MESH_FILENAMES = {
-    "pial": "fsaverage_pial_lowpoly.npz",
-    "scalp": "fsaverage_scalp_lowpoly.npz",
-}
+# Mesh loaders were moved to :mod:`hrfunc.viz.meshes` during the v1.3
+# spatial/viz compartmentalization refactor. The names are re-exported
+# here so existing callers (``library.load_mesh``, ``library.load_brain_mesh``,
+# ``library._MESH_CACHE``, ``library._MESH_FILENAMES``) and the v1.3.0
+# test suite continue to work without import-path churn. New code should
+# import from ``hrfunc.viz.meshes`` directly.
+__all__ = (
+    "load_mesh",
+    "load_brain_mesh",
+    "_MESH_CACHE",
+    "_MESH_FILENAMES",
+)
 
 
 # Subset of context fields exposed as filter controls. The library tree
@@ -699,58 +701,6 @@ def _render_viz_pane(state: AppState) -> None:
     state.subscribe("hrtree_filter_changed", _refresh_viz)
 
 
-def load_mesh(layer: str) -> Optional[Tuple["np.ndarray", "np.ndarray"]]:
-    """Return a bundled MNI anatomical mesh as ``(vertices, faces)``.
-
-    Args:
-        layer: ``"pial"`` for the cortical surface (fsaverage lh.pial +
-            rh.pial stitched) or ``"scalp"`` for the outer-skin head
-            surface (fsaverage bem/outer_skin.surf). Anything else
-            returns None.
-
-    Both meshes are pre-decimated to ~2.5k verts / 5k triangles in
-    MNI-meter coordinates so they overlay directly on bundled HRF
-    locations without any transform. Results are cached per-layer at
-    module scope; the first call per layer pays the .npz load cost.
-
-    Returns None if the asset is missing, numpy can't be imported, or
-    the requested layer is unknown. Callers fall back to no-overlay
-    rendering rather than crashing.
-    """
-    if layer in _MESH_CACHE:
-        cached = _MESH_CACHE[layer]
-        return cached
-    filename = _MESH_FILENAMES.get(layer)
-    if filename is None:
-        logger.warning("load_mesh: unknown layer %r", layer)
-        _MESH_CACHE[layer] = None
-        return None
-    try:
-        import numpy as np
-        from importlib import resources
-
-        ref = resources.files("hrfunc.assets") / filename
-        with resources.as_file(ref) as path:
-            data = np.load(path)
-            verts = data["vertices"]
-            faces = data["faces"]
-        _MESH_CACHE[layer] = (verts, faces)
-        return _MESH_CACHE[layer]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("mesh load failed for layer=%r: %s", layer, exc)
-        _MESH_CACHE[layer] = None
-        return None
-
-
-# Back-compat alias for the original Sprint 4 single-mesh loader. Kept so
-# external callers (and the test suite) that imported ``load_brain_mesh``
-# don't break. Defaults to the scalp layer because that's the new visible
-# default in the GUI.
-def load_brain_mesh() -> Optional[Tuple["np.ndarray", "np.ndarray"]]:
-    """Deprecated alias for ``load_mesh("scalp")``."""
-    return load_mesh("scalp")
-
-
 def _extract_clicked_hrf_key(event) -> Optional[str]:
     """Pull the clicked HRF's key from a plotly click event payload."""
     try:
@@ -1117,15 +1067,12 @@ def build_plotly_figure(
         if mesh is not None:
             verts, faces = mesh
             traces.append(
-                go.Mesh3d(
-                    x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
-                    i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+                make_surface_trace(
+                    verts, faces,
                     color="#c4b5a0",  # warm skin tone
                     opacity=0.12,
                     name="MNI head",
-                    hoverinfo="skip",
-                    showlegend=False,
-                    lighting=dict(ambient=0.6, diffuse=0.5),
+                    ambient=0.6, diffuse=0.5,
                 )
             )
     if show_brain:
@@ -1133,15 +1080,12 @@ def build_plotly_figure(
         if mesh is not None:
             verts, faces = mesh
             traces.append(
-                go.Mesh3d(
-                    x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
-                    i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+                make_surface_trace(
+                    verts, faces,
                     color="#9ca3af",  # cool grey for cortex
                     opacity=0.30,
                     name="MNI brain",
-                    hoverinfo="skip",
-                    showlegend=False,
-                    lighting=dict(ambient=0.5, diffuse=0.6),
+                    ambient=0.5, diffuse=0.6,
                 )
             )
 
@@ -1258,6 +1202,14 @@ def compute_roi_keys(
     ``hrfs`` (otherwise filtering away the anchor's neighbourhood would
     be confusing).
 
+    The radius check is delegated to :class:`hrfunc.spatial.shapes.Sphere`.
+    HRF locations are stored in meters internally; the spatial layer
+    works in mm per the v1.3 compartmentalization convention, so this
+    function converts both the anchor and each candidate location to mm
+    before asking the sphere. The result is bit-identical to the
+    pre-refactor Euclidean check (``loc * 1000`` is exact for the
+    head-scale magnitudes here in float64).
+
     Module-level so tests can hit it without spinning up the GUI.
     """
     out: set = set()
@@ -1267,24 +1219,28 @@ def compute_roi_keys(
     anchor_loc = None
     anchor_oxy = None
     anchor_key = None
+    sphere: Optional[Sphere] = None
     if anchor is not None:
         anchor_loc = anchor.get("location")
         anchor_oxy = anchor.get("oxygenation")
         anchor_key = anchor.get("_key")
         if anchor_key is not None and anchor_key in hrfs:
             out.add(anchor_key)
+        if anchor_loc is not None and len(anchor_loc) >= 3 and radius_m > 0:
+            sphere = Sphere(
+                center_mm=meters_to_mm(anchor_loc[:3]).tolist(),
+                radius_mm=float(meters_to_mm(radius_m)),
+            )
 
-    if anchor_loc is not None and len(anchor_loc) >= 3 and radius_m > 0:
-        ax, ay, az = float(anchor_loc[0]), float(anchor_loc[1]), float(anchor_loc[2])
-        r2 = float(radius_m) * float(radius_m)
+    if sphere is not None:
         for key, hrf in hrfs.items():
             loc = hrf.get("location")
             if loc is None or len(loc) < 3:
                 continue
             if anchor_oxy is not None and hrf.get("oxygenation") != anchor_oxy:
                 continue
-            dx, dy, dz = float(loc[0]) - ax, float(loc[1]) - ay, float(loc[2]) - az
-            if dx * dx + dy * dy + dz * dz <= r2:
+            loc_mm = meters_to_mm(loc[:3]).tolist()
+            if sphere.contains(loc_mm):
                 out.add(key)
 
     if painted:

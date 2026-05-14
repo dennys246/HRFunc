@@ -638,6 +638,71 @@ class tree:
         }
         return hrfs
 
+    def to_hrf_points(self, modality_tag = "fnirs"):
+        """Yield modality-agnostic HRFPoint instances for every HRF in the tree.
+
+        Bridges the fNIRS-specific kd-tree to the modality-agnostic
+        :mod:`hrfunc.spatial` layer used by spatial selection shapes,
+        the GUI's 3D viz, and (in the future) a parallel fMRI HRF
+        pipeline. Internal coordinates are stored in meters; HRFPoints
+        live in MNI millimeters per the spatial-layer convention, so
+        coordinates are converted here at the boundary.
+
+        fNIRS-specific fields that don't fit the generic schema
+        (``oxygenation``, ``ch_name``, ``doi``) ride in
+        ``HRFPoint.context`` alongside the existing study/task/etc.
+        metadata. Consumers that don't care about them ignore the
+        extra keys; consumers that do (e.g. an HbO/HbR-grouped viz)
+        read them from context.
+
+        Skips HRFs that lack a usable 3-element location — those
+        can't be placed in MNI space and have no business in a
+        spatial pipeline.
+
+        Arguments:
+            modality_tag (str) - Tag used to identify the source
+                pipeline. Defaults to ``"fnirs"``; reserved for a
+                future fMRI tree to override.
+
+        Yields:
+            HRFPoint - One per traversable HRF node.
+        """
+        from .spatial.point import HRFPoint
+
+        if self.root is None:
+            return
+
+        nodes = self.gather(self.root)
+        for key, payload in nodes.items():
+            loc = payload.get("location")
+            if loc is None or len(loc) < 3:
+                continue
+            ctx = dict(payload.get("context") or {})
+            # Carry the fNIRS-specific bits and the tree's own key so
+            # spatial-layer consumers can route by oxygenation / look
+            # the source HRF back up without re-walking the tree.
+            ctx.setdefault("oxygenation", payload.get("oxygenation"))
+            ctx.setdefault("hrf_key", key)
+            hrf_mean = np.asarray(payload.get("hrf_mean") or [], dtype=np.float64)
+            std_raw = payload.get("hrf_std")
+            hrf_std = (
+                np.asarray(std_raw, dtype=np.float64)
+                if std_raw is not None and len(std_raw) > 0
+                else None
+            )
+            yield HRFPoint(
+                xyz_mm=(
+                    float(loc[0]) * 1000.0,
+                    float(loc[1]) * 1000.0,
+                    float(loc[2]) * 1000.0,
+                ),
+                hrf_mean=hrf_mean,
+                hrf_std=hrf_std,
+                sfreq=float(payload.get("sfreq") or 1.0),
+                context=ctx,
+                modality_tag=modality_tag,
+            )
+
     def save(self, filename = 'tree_hrfs.json'):
         hrfs = self.gather(self.root)
         # Save to a JSON file
