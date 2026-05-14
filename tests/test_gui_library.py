@@ -598,6 +598,121 @@ class TestStateLibraryROI:
         assert s.library_roi_painted == set()
 
 
+class TestStateClusterShape:
+    """PR #49 (v1.3): the Cluster sub-tab gains a shape selector. Each
+    field below defaults to a sensible MNI-mm starting point so a fresh
+    AppState renders a coherent free-floating shape without the user
+    typing anything."""
+
+    def test_defaults(self):
+        s = AppState()
+        assert s.cluster_shape == "sphere"
+        assert s.cluster_center_x_mm == 0.0
+        assert s.cluster_center_y_mm == 0.0
+        assert s.cluster_center_z_mm == 0.0
+        # 20 mm half-extent -> 40 mm box on each axis, comparable to
+        # the default 20 mm sphere radius by linear scale.
+        assert s.cluster_box_half_x_mm == 20.0
+        assert s.cluster_box_half_y_mm == 20.0
+        assert s.cluster_box_half_z_mm == 20.0
+
+    def test_reset_restores_defaults(self):
+        s = AppState()
+        s.cluster_shape = "box"
+        s.cluster_center_x_mm = -30.0
+        s.cluster_center_y_mm = 22.0
+        s.cluster_center_z_mm = 5.0
+        s.cluster_box_half_x_mm = 10.0
+        s.cluster_box_half_y_mm = 15.0
+        s.cluster_box_half_z_mm = 25.0
+        s.reset()
+        assert s.cluster_shape == "sphere"
+        assert s.cluster_center_x_mm == 0.0
+        assert s.cluster_center_y_mm == 0.0
+        assert s.cluster_center_z_mm == 0.0
+        assert s.cluster_box_half_x_mm == 20.0
+        assert s.cluster_box_half_y_mm == 20.0
+        assert s.cluster_box_half_z_mm == 20.0
+
+
+class TestComputeRoiKeysByShape:
+    """Shape-based ROI membership for free-floating Box/Sphere modes."""
+
+    def _hrfs(self):
+        # Coordinates in meters (matching the HRF storage convention);
+        # shape boundaries below are in mm.
+        return {
+            "hbo:a": {"location": [0.000, 0.000, 0.000], "oxygenation": True},
+            "hbo:b": {"location": [0.010, 0.000, 0.000], "oxygenation": True},  # 10 mm
+            "hbo:c": {"location": [0.050, 0.000, 0.000], "oxygenation": True},  # 50 mm
+            "hbr:d": {"location": [0.000, 0.000, 0.000], "oxygenation": False},
+            "hbo:loc_less": {"oxygenation": True},
+        }
+
+    def test_no_shape_no_painted_returns_empty(self):
+        hrfs = self._hrfs()
+        keys = library.compute_roi_keys_by_shape(hrfs, None, set())
+        assert keys == set()
+
+    def test_sphere_at_origin_radius_20mm(self):
+        from hrfunc.spatial.shapes import Sphere
+        hrfs = self._hrfs()
+        sphere = Sphere(center_mm=(0.0, 0.0, 0.0), radius_mm=20.0)
+        keys = library.compute_roi_keys_by_shape(hrfs, sphere)
+        # 20 mm radius -> a (0mm) and b (10mm) but not c (50mm).
+        # Also picks up hbr:d at distance 0 because no oxygenation filter.
+        assert "hbo:a" in keys
+        assert "hbo:b" in keys
+        assert "hbo:c" not in keys
+        assert "hbr:d" in keys
+        assert "hbo:loc_less" not in keys  # missing location skipped
+
+    def test_box_axis_aligned(self):
+        """Box that excludes b on the x axis while including a."""
+        from hrfunc.spatial.shapes import Box
+        hrfs = self._hrfs()
+        box = Box(center_mm=(0.0, 0.0, 0.0), half_extents_mm=(5.0, 50.0, 50.0))
+        keys = library.compute_roi_keys_by_shape(hrfs, box)
+        # x half-extent 5 mm -> a (0mm) and d (0mm) in; b (10mm) and c (50mm) out.
+        assert "hbo:a" in keys
+        assert "hbo:b" not in keys
+        assert "hbo:c" not in keys
+        assert "hbr:d" in keys
+
+    def test_oxygenation_filter_hbo(self):
+        from hrfunc.spatial.shapes import Sphere
+        hrfs = self._hrfs()
+        sphere = Sphere(center_mm=(0.0, 0.0, 0.0), radius_mm=20.0)
+        keys = library.compute_roi_keys_by_shape(
+            hrfs, sphere, oxygenation_filter=True,
+        )
+        # HbR points must be excluded by the filter.
+        assert "hbo:a" in keys
+        assert "hbo:b" in keys
+        assert "hbr:d" not in keys
+
+    def test_painted_unions_into_roi(self):
+        from hrfunc.spatial.shapes import Sphere
+        hrfs = self._hrfs()
+        sphere = Sphere(center_mm=(0.0, 0.0, 0.0), radius_mm=1.0)  # tiny
+        # Sphere alone matches only a (distance 0). Painting c adds it.
+        keys = library.compute_roi_keys_by_shape(
+            hrfs, sphere, painted={"hbo:c"},
+        )
+        assert "hbo:a" in keys
+        assert "hbo:c" in keys
+
+    def test_painted_respects_oxygenation_filter(self):
+        from hrfunc.spatial.shapes import Sphere
+        hrfs = self._hrfs()
+        sphere = Sphere(center_mm=(0.0, 0.0, 0.0), radius_mm=1.0)
+        # Even though hbr:d is in painted, the HbO filter drops it.
+        keys = library.compute_roi_keys_by_shape(
+            hrfs, sphere, painted={"hbr:d"}, oxygenation_filter=True,
+        )
+        assert "hbr:d" not in keys
+
+
 class TestBuildFigureWithRoi:
     def _hrfs(self):
         return {

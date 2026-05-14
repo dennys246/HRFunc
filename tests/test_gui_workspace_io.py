@@ -197,3 +197,145 @@ class TestSaveRoiAverage:
         )
         payload = json.loads(out.read_text())
         assert payload["context"]["roi_member_keys"] == ["hbo:a", "hbo:m", "hbo:z"]
+
+
+# ---------------------------------------------------------------------------
+# save_roi_average (PR #49): shape descriptor + free-floating ROIs
+# ---------------------------------------------------------------------------
+
+
+class TestSaveRoiAverageWithShape:
+    """PR #49 expanded ``save_roi_average`` to accept an optional shape
+    descriptor and made the anchor optional. These tests pin down the
+    extended schema."""
+
+    def _anchor(self):
+        return {
+            "_key": "hbo:s1_d1_hbo-temp",
+            "oxygenation": True,
+            "location": [0.01, 0.02, 0.03],
+            "context": {"task": "flanker"},
+        }
+
+    def test_box_shape_recorded_in_descriptor(self, tmp_path):
+        from hrfunc.spatial.shapes import Box
+        box = Box(center_mm=(10.0, 20.0, 30.0), half_extents_mm=(5.0, 5.0, 5.0))
+        out = save_roi_average(
+            anchor=self._anchor(),
+            roi_keys={"hbo:a", "hbo:b"},
+            hrf_mean=[1.0, 2.0],
+            hrf_std=[0.1, 0.2],
+            sfreq=10.0,
+            shape=box,
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        shape_desc = payload["context"]["roi_shape"]
+        assert shape_desc["type"] == "box"
+        assert shape_desc["center_mm"] == [10.0, 20.0, 30.0]
+        assert shape_desc["half_extents_mm"] == [5.0, 5.0, 5.0]
+
+    def test_sphere_shape_recorded_in_descriptor(self, tmp_path):
+        from hrfunc.spatial.shapes import Sphere
+        sphere = Sphere(center_mm=(0.0, 0.0, 0.0), radius_mm=15.0)
+        out = save_roi_average(
+            anchor=self._anchor(),
+            roi_keys={"hbo:a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            shape=sphere,
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        shape_desc = payload["context"]["roi_shape"]
+        assert shape_desc["type"] == "sphere"
+        assert shape_desc["center_mm"] == [0.0, 0.0, 0.0]
+        assert shape_desc["radius_mm"] == 15.0
+        # The legacy roi_radius_m key still appears for back-compat audit scripts.
+        assert payload["context"]["roi_radius_m"] == 0.015
+
+    def test_free_floating_no_anchor_uses_shape_centre_as_location(self, tmp_path):
+        """When the user has not clicked an anchor, the shape centre
+        stands in as the saved ``location`` -- converted from mm back
+        to meters so the saved JSON round-trips into ``hrfunc.tree``
+        without unit fixups."""
+        from hrfunc.spatial.shapes import Box
+        box = Box(center_mm=(15.0, 25.0, 35.0), half_extents_mm=(5.0, 5.0, 5.0))
+        out = save_roi_average(
+            roi_keys={"hbo:a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            shape=box,
+            oxygenation_filter=True,
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        # Centre 15 mm -> 0.015 m (matching v1.2 meter convention).
+        assert payload["location"] == [0.015, 0.025, 0.035]
+        # Oxygenation falls back to the explicit filter when no anchor.
+        assert payload["oxygenation"] is True
+
+    def test_free_floating_filename_prefix(self, tmp_path):
+        """Free-floating saves should still have a recognisable filename
+        prefix even without an anchor key to derive one from."""
+        from hrfunc.spatial.shapes import Box
+        out = save_roi_average(
+            roi_keys=set(),
+            hrf_mean=[0.0],
+            hrf_std=[0.0],
+            sfreq=1.0,
+            shape=Box(center_mm=(0.0, 0.0, 0.0), half_extents_mm=(1.0, 1.0, 1.0)),
+            workspace=tmp_path,
+        )
+        assert "freefloat_box" in out.name
+
+    def test_anchor_key_is_none_in_context_when_no_anchor(self, tmp_path):
+        from hrfunc.spatial.shapes import Sphere
+        sphere = Sphere(center_mm=(0.0, 0.0, 0.0), radius_mm=10.0)
+        out = save_roi_average(
+            roi_keys={"hbo:a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            shape=sphere,
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        assert payload["context"]["roi_anchor_key"] is None
+
+    def test_oxygenation_filter_none_means_mixed(self, tmp_path):
+        """When neither anchor nor oxygenation_filter is set, the saved
+        ``oxygenation`` is None -- signalling a mixed-haemoglobin ROI."""
+        from hrfunc.spatial.shapes import Box
+        box = Box(center_mm=(0.0, 0.0, 0.0), half_extents_mm=(5.0, 5.0, 5.0))
+        out = save_roi_average(
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            shape=box,
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        assert payload["oxygenation"] is None
+
+    def test_legacy_radius_m_only_call_still_works(self, tmp_path):
+        """v1.2 call sites that pass ``radius_m`` without ``shape`` keep
+        working unchanged; the saved JSON gets a synthetic sphere
+        descriptor + the ``roi_radius_m`` legacy key."""
+        out = save_roi_average(
+            anchor=self._anchor(),
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            radius_m=0.02,
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        assert payload["context"]["roi_radius_m"] == 0.02
+        shape_desc = payload["context"]["roi_shape"]
+        assert shape_desc["type"] == "sphere"
+        assert shape_desc["radius_m"] == 0.02

@@ -197,6 +197,37 @@ class AppState:
     # doesn't follow into a fresh selection.
     library_roi_radius_m: float = 0.02
     library_roi_painted: set = field(default_factory=set)
+    # Cluster sub-tab shape selection (PR #49, v1.3 spatial/viz arc).
+    #
+    # The Cluster sub-tab supports two ROI-shape modes:
+    #
+    # - ``"sphere"`` (default) -- the existing anchor + radius workflow.
+    #   ``library_roi_radius_m`` is the sphere's radius; when an anchor
+    #   HRF is clicked, the sphere centres on it. When no anchor is
+    #   clicked, the sphere centres on ``cluster_center_*_mm`` for free-
+    #   floating selection.
+    # - ``"box"`` -- an axis-aligned bounding box with independent half-
+    #   extents on each axis. Always free-floating: the box's centre is
+    #   ``cluster_center_*_mm`` (seedable by clicking an HRF or typed
+    #   directly), and ``cluster_box_half_*_mm`` controls the dimensions.
+    #
+    # All cluster spatial state is in MNI mm (the spatial-layer
+    # convention from PR #46) -- the conversion from MNE-meter HRF
+    # locations happens once at the membership-check boundary.
+    cluster_shape: str = "sphere"
+    # Free-floating shape centre, MNI mm. Three separate fields so each
+    # binds cleanly to its own ``ui.number`` input; tuple-construct at
+    # use sites. Defaults to MNI origin (0, 0, 0); seeded by clicking
+    # an HRF in the viz pane.
+    cluster_center_x_mm: float = 0.0
+    cluster_center_y_mm: float = 0.0
+    cluster_center_z_mm: float = 0.0
+    # Box half-extents, MNI mm. Default 20 mm on each axis produces a
+    # 40 mm cube -- comparable to a 2 cm radius sphere by volume and
+    # in line with typical fNIRS short-separation neighbourhood sizes.
+    cluster_box_half_x_mm: float = 20.0
+    cluster_box_half_y_mm: float = 20.0
+    cluster_box_half_z_mm: float = 20.0
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -304,6 +335,13 @@ class AppState:
         self.library_oxygenation = "both"
         self.library_roi_radius_m = 0.02
         self.library_roi_painted.clear()
+        self.cluster_shape = "sphere"
+        self.cluster_center_x_mm = 0.0
+        self.cluster_center_y_mm = 0.0
+        self.cluster_center_z_mm = 0.0
+        self.cluster_box_half_x_mm = 20.0
+        self.cluster_box_half_y_mm = 20.0
+        self.cluster_box_half_z_mm = 20.0
         self.hrf_selected_channel = None
 
 

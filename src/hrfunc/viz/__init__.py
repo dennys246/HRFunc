@@ -22,7 +22,11 @@ Public surface:
   anatomical-NIfTI viewer.
 """
 
-from .brain_scene import make_surface_trace
+from .brain_scene import (
+    make_box_overlay_trace,
+    make_sphere_overlay_trace,
+    make_surface_trace,
+)
 from .meshes import (
     MESH_CACHE,
     MESH_FILENAMES,
@@ -35,5 +39,7 @@ __all__ = [
     "MESH_FILENAMES",
     "load_brain_mesh",
     "load_mesh",
+    "make_box_overlay_trace",
+    "make_sphere_overlay_trace",
     "make_surface_trace",
 ]
