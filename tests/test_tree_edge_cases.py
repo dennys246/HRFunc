@@ -243,3 +243,38 @@ class TestNearestNeighborEmptyTree:
         result, distance = t.nearest_neighbor(near_probe, max_distance=0.01)
         assert result is a
         assert distance < 0.01
+
+    def test_verbose_with_no_match_does_not_crash(self):
+        """Regression for the ``best[0].ch_name`` crash in the verbose
+        print branch.
+
+        When recursion bottoms out with no real best (e.g. every
+        candidate node fails the oxygenation match), the inner call
+        returns the ``(None, inf)`` sentinel. The outer call then hits
+        the ``node is None`` base case with a *non-None tuple* whose
+        first element IS None, and the verbose-print at the old
+        line 505 dereferenced ``best[0].ch_name`` and crashed with
+        ``AttributeError: 'NoneType' object has no attribute 'ch_name'``.
+
+        The user-visible impact was that ``test_localization.py``
+        couldn't even *collect* — its top-level code calls
+        ``localize_hrfs`` with ``verbose=True`` and hits this path
+        whenever a probe has no in-radius match.
+
+        This test reproduces the failure shape (oxygenation-mismatched
+        single-node tree under ``verbose=True``) and proves the guard
+        on the verbose-print path prevents the crash.
+        """
+        from hrfunc.hrtree import tree
+        t = tree()
+        # Insert an HbR node; probe is HbO, so oxygenation will mismatch
+        # at every node visited and ``best`` stays the ``(None, inf)``
+        # sentinel through the recursion.
+        t.insert(_hrf('a', 0.0, 0.0, 0.0, oxygenation=False))
+        hbo_probe = _hrf('probe', 0.001, 0.001, 0.001, oxygenation=True)
+        # Should not raise — the verbose-print path is now guarded.
+        result, distance = t.nearest_neighbor(
+            hbo_probe, max_distance=0.001, verbose=True,
+        )
+        assert result is None
+        assert distance == float('inf')
