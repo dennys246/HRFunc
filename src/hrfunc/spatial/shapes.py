@@ -10,11 +10,13 @@ Currently shipped:
 
 - :class:`Sphere` — closed-ball membership, used by the existing
   radius-based ROI selection in the HRtree panel.
-- :class:`Box` — axis-aligned bounding box, used by the v1.3
-  Cluster sub-tab's box-mode ROI selection. Rotation is intentionally
-  excluded: it adds significant UX complexity (slider-based 3D
-  rotation is a usability trap) for negligible scientific benefit
-  (fNIRS publications axis-align to MNI by convention).
+- :class:`Box` — oriented bounding box (OBB). Defaults to axis-
+  aligned (identity orientation) for back-compat with the v1.3
+  Cluster sub-tab and the saved-ROI JSON schema. The orientation
+  parameter exists in the spatial-layer API so future UIs
+  (rotatable-box drag handles, atlas-region oriented patches) can
+  use it without retrofitting; the GUI's Cluster sub-tab doesn't
+  yet expose rotation controls.
 
 Atlas-region membership lands in a follow-up PR with the Harvard-
 Oxford atlas integration.
@@ -23,7 +25,7 @@ Oxford atlas integration.
 from __future__ import annotations
 
 import abc
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -101,28 +103,48 @@ class Sphere(Shape):
 
 
 class Box(Shape):
-    """An axis-aligned bounding box defined by centre + half-extents in mm.
+    """An oriented bounding box (OBB) defined by centre + half-extents + rotation.
 
-    Membership is closed on all three axes: a point is inside iff
-    ``|x - cx| <= hx`` and ``|y - cy| <= hy`` and ``|z - cz| <= hz``.
-    Closed semantics match :class:`Sphere` so boundary points behave
-    consistently across shape types -- which is the principle of
-    least surprise for researchers comparing ROIs.
+    Defaults to axis-aligned: when ``orientation_mm`` is ``None`` or
+    the identity matrix, the box is an AABB and behaviour is bit-
+    identical to a pure axis-aligned implementation. The orientation
+    parameter exists so future UIs (rotatable-box drag handles,
+    oriented atlas patches) can construct rotated boxes without a
+    second shape class.
 
-    Rotation is intentionally out of scope. fNIRS publication
-    conventions report ROIs in MNI axes (L/R, A/P, S/I); allowing
-    rotation would invite users to slip into non-standard reference
-    frames without realising it, and the slider-based 3D rotation UX
-    is itself a usability trap. Researchers who need rotated regions
-    are better served by atlas-defined regions (a follow-up PR).
+    Membership semantics:
+        A world-space point is inside iff its representation in the
+        box-local frame -- ``R^T (p - c)`` where ``R`` is the
+        orientation matrix and ``c`` is the centre -- has every
+        component within ``+/-`` half_extents. Closed on every axis,
+        matching :class:`Sphere`'s closed-ball semantics so boundary
+        points behave consistently across shape types.
+
+    Coordinate convention:
+        ``orientation_mm`` is a column-vector rotation matrix:
+        ``world_vec = R @ local_vec``. Columns of ``R`` are the
+        box's local x / y / z axes expressed in world coordinates.
+        The transpose (= inverse, since R is orthogonal) takes a
+        world point into the box-local frame.
+
+    Validation:
+        ``orientation_mm`` is checked for orthogonality
+        (``R @ R.T ≈ I``) so passing a scaled or sheared matrix
+        raises rather than silently producing wrong-region results.
+        Determinant sign is NOT enforced -- a reflection still
+        produces correct membership (the box is symmetric across
+        all three axes), it just flips the corner order in
+        :meth:`corners_mm`. Acceptable for AABB-equivalent reasoning;
+        callers that care about handedness validate themselves.
     """
 
-    __slots__ = ("center_mm", "half_extents_mm")
+    __slots__ = ("center_mm", "half_extents_mm", "orientation_mm")
 
     def __init__(
         self,
         center_mm: Sequence[float],
         half_extents_mm: Sequence[float],
+        orientation_mm: Optional[np.ndarray] = None,
     ):
         center = tuple(float(c) for c in center_mm)
         if len(center) != 3:
@@ -136,16 +158,46 @@ class Box(Shape):
             raise ValueError(
                 f"half_extents_mm must all be non-negative, got {extents}"
             )
+
+        # Orientation: None or identity -> AABB fast path; otherwise
+        # validate orthogonality so callers can't silently pass a
+        # scaled / sheared matrix and get geometrically wrong results.
+        if orientation_mm is None:
+            orientation = np.eye(3, dtype=np.float64)
+        else:
+            orientation = np.asarray(orientation_mm, dtype=np.float64)
+            if orientation.shape != (3, 3):
+                raise ValueError(
+                    f"orientation_mm must be a 3x3 matrix, got shape "
+                    f"{orientation.shape}"
+                )
+            if not np.allclose(
+                orientation @ orientation.T, np.eye(3), atol=1e-6
+            ):
+                raise ValueError(
+                    "orientation_mm must be orthogonal (a valid rotation "
+                    "or rotoreflection matrix)"
+                )
+
         self.center_mm: Tuple[float, float, float] = center
         self.half_extents_mm: Tuple[float, float, float] = extents
+        self.orientation_mm: np.ndarray = orientation
 
     def contains(self, xyz_mm: Sequence[float]) -> bool:
-        cx, cy, cz = self.center_mm
+        # Translate to box origin, rotate into box-local frame, then
+        # check half-extents on every axis. For identity orientation
+        # the rotation is a no-op (result == translated point) and
+        # the math collapses to the AABB form.
+        offset = np.asarray(xyz_mm, dtype=np.float64) - np.asarray(
+            self.center_mm, dtype=np.float64
+        )
+        local = self.orientation_mm.T @ offset
         hx, hy, hz = self.half_extents_mm
-        dx = abs(float(xyz_mm[0]) - cx)
-        dy = abs(float(xyz_mm[1]) - cy)
-        dz = abs(float(xyz_mm[2]) - cz)
-        return dx <= hx and dy <= hy and dz <= hz
+        return (
+            abs(float(local[0])) <= hx
+            and abs(float(local[1])) <= hy
+            and abs(float(local[2])) <= hz
+        )
 
     def contains_batch(self, points_mm: np.ndarray) -> np.ndarray:
         points = np.asarray(points_mm, dtype=np.float64)
@@ -155,7 +207,11 @@ class Box(Shape):
             )
         center = np.asarray(self.center_mm, dtype=np.float64)
         extents = np.asarray(self.half_extents_mm, dtype=np.float64)
-        return np.all(np.abs(points - center) <= extents, axis=1)
+        # (N, 3) @ R = (N, 3) where row i is R^T @ row_i.
+        # Use the identity ``points @ R == (R^T @ points^T)^T`` to keep
+        # the multiplication in (N, 3) shape without an explicit transpose.
+        local = (points - center) @ self.orientation_mm
+        return np.all(np.abs(local) <= extents, axis=1)
 
     def corners_mm(self) -> np.ndarray:
         """Return the 8 corner vertices of the box as an ``(8, 3)`` array.
@@ -165,9 +221,12 @@ class Box(Shape):
         ``(-x, -y, -z), (+x, -y, -z), (-x, +y, -z), (+x, +y, -z), ...``
         so consumers can deterministically pick the right vertex when
         building face triangles.
+
+        For a rotated box, the local-frame corners are first computed
+        in canonical sign-flip order, then rotated into world space.
+        Identity orientation collapses this to the AABB form (corners
+        sit at ``center +/- extents``).
         """
-        cx, cy, cz = self.center_mm
-        hx, hy, hz = self.half_extents_mm
         signs = np.array(
             [
                 [-1, -1, -1],
@@ -181,14 +240,31 @@ class Box(Shape):
             ],
             dtype=np.float64,
         )
-        extents = np.array([hx, hy, hz], dtype=np.float64)
-        center = np.array([cx, cy, cz], dtype=np.float64)
-        return center + signs * extents
+        extents = np.asarray(self.half_extents_mm, dtype=np.float64)
+        center = np.asarray(self.center_mm, dtype=np.float64)
+        local_corners = signs * extents  # (8, 3)
+        # Rotate local corners to world: world = R @ local (per-vertex).
+        # Vectorised as (8, 3) @ R.T == (R @ local.T).T.
+        world_corners = local_corners @ self.orientation_mm.T
+        return center + world_corners
+
+    def is_axis_aligned(self) -> bool:
+        """True iff the orientation matrix is the identity (within tolerance).
+
+        Used by callers (workspace_io, the viz layer) that want to
+        emit a simpler representation for the common AABB case and
+        only carry the orientation matrix when it actually differs
+        from identity.
+        """
+        return bool(
+            np.allclose(self.orientation_mm, np.eye(3), atol=1e-9)
+        )
 
     def __repr__(self) -> str:
         cx, cy, cz = self.center_mm
         hx, hy, hz = self.half_extents_mm
+        aligned = "AABB" if self.is_axis_aligned() else "oriented"
         return (
             f"Box(center_mm=({cx:.2f}, {cy:.2f}, {cz:.2f}), "
-            f"half_extents_mm=({hx:.2f}, {hy:.2f}, {hz:.2f}))"
+            f"half_extents_mm=({hx:.2f}, {hy:.2f}, {hz:.2f}), {aligned})"
         )

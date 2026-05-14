@@ -150,6 +150,13 @@ def save_roi_average(
 
     # Shape descriptor for the saved JSON. Captures enough that a
     # downstream reader can reconstruct the geometry exactly.
+    #
+    # PR #52 extended the box descriptor with an optional
+    # ``orientation_mm`` field. To keep the schema clean for the
+    # common (axis-aligned) case we only emit the orientation when
+    # the box's matrix differs from identity -- readers that pre-date
+    # PR #52 simply don't see the new field and treat the box as
+    # axis-aligned, which matches their assumption.
     shape_descriptor: Optional[Dict[str, Any]] = None
     if shape is not None:
         if hasattr(shape, "half_extents_mm"):  # Box
@@ -158,6 +165,13 @@ def save_roi_average(
                 "center_mm": list(shape.center_mm),
                 "half_extents_mm": list(shape.half_extents_mm),
             }
+            is_aligned = getattr(shape, "is_axis_aligned", None)
+            if callable(is_aligned) and not is_aligned():
+                # Non-identity orientation: include the rotation matrix
+                # as a nested list so it round-trips through json.
+                shape_descriptor["orientation_mm"] = (
+                    np.asarray(shape.orientation_mm).tolist()
+                )
         elif hasattr(shape, "radius_mm"):  # Sphere
             shape_descriptor = {
                 "type": "sphere",
