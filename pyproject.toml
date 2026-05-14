@@ -57,6 +57,8 @@ packages = [
     "hrfunc.gui",
     "hrfunc.gui.components",
     "hrfunc.gui.pages",
+    "hrfunc.spatial",
+    "hrfunc.viz",
     ]
 include-package-data = true
 
