@@ -65,13 +65,29 @@ def _safe_filename_fragment(name: str) -> str:
 
 def save_roi_average(
     *,
-    anchor: Dict[str, Any],
     roi_keys: Iterable[str],
     hrf_mean: Any,
     hrf_std: Any,
     sfreq: float,
-    radius_m: float,
+    # Anchor is optional in PR #49 to support free-floating shape ROIs.
+    # When a click-anchor IS set, its location / oxygenation / context
+    # ride into the saved JSON so the file matches the v1.2 schema and
+    # can still be re-loaded into ``hrfunc.tree``. When the anchor is
+    # None, the ROI's shape centre stands in as the saved location and
+    # the saved oxygenation comes from ``oxygenation_filter``.
+    anchor: Optional[Dict[str, Any]] = None,
+    # Spatial-layer Shape describing the ROI extent. Defaults to None
+    # to keep the v1.2 anchor + radius_m call sites compatible.
+    shape: Optional[Any] = None,
+    # Pre-PR-#49 legacy field. When the new ``shape`` is provided this
+    # is ignored for geometry but still recorded in the JSON as the
+    # ``roi_radius_m`` context key (v1.2 audit scripts read it).
+    radius_m: Optional[float] = None,
     library_filter: Optional[Dict[str, Any]] = None,
+    # Oxygenation that the membership computation filtered on (True for
+    # HbO, False for HbR, None for mixed). Used to set the saved
+    # ``oxygenation`` field when there's no anchor.
+    oxygenation_filter: Optional[bool] = None,
     workspace: Optional[Path] = None,
 ) -> Path:
     """Save an ROI-averaged HRF to the workspace folder.
@@ -80,14 +96,20 @@ def save_roi_average(
     be re-loaded into ``hrfunc.tree`` if desired) with ROI provenance
     fields so a researcher can audit what went into the average:
 
-    - ``hrf_mean`` / ``hrf_std`` — the averaged trace + per-sample std
-    - ``sfreq`` — sampling rate (same as the anchor)
-    - ``oxygenation`` — anchor's oxygenation (HbO or HbR)
-    - ``location`` — anchor's location (the spatial center of the ROI)
-    - ``context`` — extended with ROI metadata: anchor key, radius,
-      member keys, library filter that was active
+    - ``hrf_mean`` / ``hrf_std`` -- the averaged trace + per-sample std
+    - ``sfreq`` -- sampling rate
+    - ``oxygenation`` -- anchor's oxygenation when present; otherwise
+      the explicit ``oxygenation_filter``; falls back to ``None``
+      when neither is available.
+    - ``location`` -- anchor's location when present; otherwise the
+      shape's centre (converted from MNI mm into MNE-meter coords so
+      the saved JSON round-trips back into ``hrfunc.tree`` without
+      unit fixups).
+    - ``context`` -- extended with ROI metadata: anchor key (or
+      ``None`` for free-floating), shape descriptor, member keys,
+      library filter that was active.
 
-    File name: ``roi_<anchor_key_sanitized>_<YYYYMMDDTHHMMSSZ>.json``,
+    File name: ``roi_<anchor_or_shape_key>_<YYYYMMDDTHHMMSSZ>.json``,
     placed in the workspace folder. Returns the absolute Path.
 
     Module-level so tests can call it without the GUI.
@@ -100,26 +122,101 @@ def save_roi_average(
     mean_list = np.asarray(hrf_mean).tolist()
     std_list = np.asarray(hrf_std).tolist()
 
-    anchor_key = anchor.get("_key") or "unknown"
+    anchor_key: Optional[str] = (
+        anchor.get("_key") if anchor is not None else None
+    ) or None
+
+    # Compute the saved location:
+    # - With anchor: use anchor.location (meters; v1.2 schema).
+    # - Without anchor but with shape: use the shape centre converted
+    #   from mm to meters so downstream tree-loading code sees a value
+    #   in the same units as v1.2.
+    # - Otherwise: None (read-only output, won't round-trip into tree).
+    if anchor is not None:
+        location: Optional[list] = anchor.get("location")
+    elif shape is not None and hasattr(shape, "center_mm"):
+        cx, cy, cz = shape.center_mm
+        location = [cx / 1000.0, cy / 1000.0, cz / 1000.0]
+    else:
+        location = None
+
+    # Resolve oxygenation: anchor wins, then explicit filter, then None.
+    if anchor is not None and anchor.get("oxygenation") is not None:
+        oxygenation: Optional[bool] = bool(anchor.get("oxygenation"))
+    elif oxygenation_filter is not None:
+        oxygenation = bool(oxygenation_filter)
+    else:
+        oxygenation = None
+
+    # Shape descriptor for the saved JSON. Captures enough that a
+    # downstream reader can reconstruct the geometry exactly.
+    shape_descriptor: Optional[Dict[str, Any]] = None
+    if shape is not None:
+        if hasattr(shape, "half_extents_mm"):  # Box
+            shape_descriptor = {
+                "type": "box",
+                "center_mm": list(shape.center_mm),
+                "half_extents_mm": list(shape.half_extents_mm),
+            }
+        elif hasattr(shape, "radius_mm"):  # Sphere
+            shape_descriptor = {
+                "type": "sphere",
+                "center_mm": list(shape.center_mm),
+                "radius_mm": float(shape.radius_mm),
+            }
+    elif radius_m is not None:
+        # Legacy v1.2 call site (no shape passed). Record the radius as
+        # a sphere descriptor for forward-compat with v1.3+ readers.
+        shape_descriptor = {
+            "type": "sphere",
+            "radius_m": float(radius_m),
+        }
+
+    context_extra: Dict[str, Any] = {
+        "roi_average": True,
+        "roi_anchor_key": anchor_key,
+        "roi_shape": shape_descriptor,
+        "roi_member_keys": sorted(roi_keys),
+        "roi_library_filter": dict(library_filter or {}),
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Preserve the v1.2 ``roi_radius_m`` key when the call site is the
+    # legacy radius-based path, or when the new path uses a sphere.
+    # v1.2 audit scripts grep for this exact key; emit it whenever
+    # possible to keep them working.
+    if radius_m is not None:
+        context_extra["roi_radius_m"] = float(radius_m)
+    elif (
+        shape is not None
+        and hasattr(shape, "radius_mm")
+        and not hasattr(shape, "half_extents_mm")
+    ):
+        context_extra["roi_radius_m"] = float(shape.radius_mm) / 1000.0
+
     payload: Dict[str, Any] = {
         "hrf_mean": mean_list,
         "hrf_std": std_list,
         "sfreq": float(sfreq),
-        "oxygenation": bool(anchor.get("oxygenation")),
-        "location": anchor.get("location"),
+        "oxygenation": oxygenation,
+        "location": location,
         "context": {
-            **(anchor.get("context") or {}),
-            "roi_average": True,
-            "roi_anchor_key": anchor_key,
-            "roi_radius_m": float(radius_m),
-            "roi_member_keys": sorted(roi_keys),
-            "roi_library_filter": dict(library_filter or {}),
-            "saved_at": datetime.now(timezone.utc).isoformat(),
+            **((anchor or {}).get("context") or {}),
+            **context_extra,
         },
     }
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    fragment = _safe_filename_fragment(anchor_key)
+    # Filename fragment: anchor key first (v1.2 convention), else a
+    # shape-derived stand-in so free-floating saves still have a
+    # human-recognisable prefix.
+    if anchor_key:
+        fragment = _safe_filename_fragment(anchor_key)
+    elif shape_descriptor is not None:
+        fragment = _safe_filename_fragment(
+            f"freefloat_{shape_descriptor.get('type', 'shape')}"
+        )
+    else:
+        fragment = "freefloat_unknown"
     out_path = workspace / f"roi_{fragment}_{timestamp}.json"
 
     with open(out_path, "w", encoding="utf-8") as fh:

@@ -31,9 +31,10 @@ Public surface:
 from .affine import apply_affine, identity_affine
 from .coords import meters_to_mm, mm_to_meters
 from .point import HRFPoint
-from .shapes import Shape, Sphere
+from .shapes import Box, Shape, Sphere
 
 __all__ = [
+    "Box",
     "HRFPoint",
     "Shape",
     "Sphere",

@@ -39,8 +39,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 from nicegui import ui
 
 from ...spatial.coords import meters_to_mm
-from ...spatial.shapes import Sphere
-from ...viz.brain_scene import make_surface_trace
+from ...spatial.shapes import Box, Shape, Sphere
+from ...viz.brain_scene import (
+    make_box_overlay_trace,
+    make_sphere_overlay_trace,
+    make_surface_trace,
+)
 from ...viz.meshes import MESH_CACHE as _MESH_CACHE
 from ...viz.meshes import MESH_FILENAMES as _MESH_FILENAMES
 from ...viz.meshes import load_brain_mesh, load_mesh
@@ -78,6 +82,84 @@ FILTER_FIELDS = (
     "stimulus",
     "conditions",
 )
+
+
+# Available shape modes for the Cluster sub-tab's ROI selector.
+SHAPE_SPHERE = "sphere"
+SHAPE_BOX = "box"
+SHAPE_MODES = (SHAPE_SPHERE, SHAPE_BOX)
+
+
+def _resolve_cluster_oxygenation(state: AppState) -> Optional[bool]:
+    """Pick the oxygenation filter the Cluster sub-tab should apply.
+
+    Returns ``True`` to keep HbO only, ``False`` to keep HbR only,
+    ``None`` to skip oxygenation filtering and let mixed-haemoglobin
+    HRFs into the ROI.
+
+    Precedence (matches the v1.2 anchor+radius behaviour and extends
+    it for free-floating modes):
+
+    1. If a click-anchor is set, use the anchor's oxygenation.
+       Averaging mixed-haemoglobin traces is scientifically wrong --
+       same rationale as the original ``compute_roi_keys`` behaviour.
+    2. Else if the filter sub-tab's oxygenation is ``"hbo"`` or
+       ``"hbr"``, route the binary through.
+    3. Else (filter is ``"both"`` with no anchor), return None --
+       the user has explicitly opted into mixed visibility, and
+       silently filtering would surprise them.
+    """
+    anchor = state.library_selected_hrf
+    if anchor is not None and anchor.get("oxygenation") is not None:
+        return bool(anchor.get("oxygenation"))
+    if state.library_oxygenation == "hbo":
+        return True
+    if state.library_oxygenation == "hbr":
+        return False
+    return None
+
+
+def _build_current_shape(state: AppState) -> Optional[Shape]:
+    """Build the spatial-layer :class:`Shape` for the current Cluster mode.
+
+    Sphere mode:
+        Centre = ``(cluster_center_*_mm)``. Radius =
+        ``library_roi_radius_m * 1000``. Note that the cluster centre
+        is normally seeded from a clicked HRF (see the viz pane's
+        click handler), so in the legacy "click and adjust radius"
+        workflow the resulting sphere matches the v1.2 anchor-based
+        sphere.
+
+    Box mode:
+        Centre = ``(cluster_center_*_mm)``. Half-extents =
+        ``(cluster_box_half_*_mm)``. Always free-floating.
+
+    Returns None for unknown shape modes (defensive -- a stale state
+    value from a future / legacy build shouldn't crash the render).
+    """
+    if state.cluster_shape == SHAPE_BOX:
+        return Box(
+            center_mm=(
+                state.cluster_center_x_mm,
+                state.cluster_center_y_mm,
+                state.cluster_center_z_mm,
+            ),
+            half_extents_mm=(
+                state.cluster_box_half_x_mm,
+                state.cluster_box_half_y_mm,
+                state.cluster_box_half_z_mm,
+            ),
+        )
+    if state.cluster_shape == SHAPE_SPHERE:
+        return Sphere(
+            center_mm=(
+                state.cluster_center_x_mm,
+                state.cluster_center_y_mm,
+                state.cluster_center_z_mm,
+            ),
+            radius_mm=float(meters_to_mm(state.library_roi_radius_m)),
+        )
+    return None
 
 
 DataSource = Literal["library", "project", "both"]
@@ -411,21 +493,27 @@ def _render_filter_subtab(state: AppState) -> None:
 
 
 def _render_cluster_subtab(state: AppState) -> None:
-    """The Cluster sub-tab — commit-the-current-ROI actions.
+    """The Cluster sub-tab -- ROI shape selection + save action.
 
-    Today: one action, ``Save ROI average to workspace``. The Save
-    button used to live inside the detail pane's ROI-average section;
-    moved here in Phase 6 so the left pane owns actions and the right
-    pane is read-only "what am I looking at" content.
+    PR #49 expands this sub-tab from a single Save button into a full
+    shape selector:
 
-    Future: this tab is the natural home for clustering scripts
-    (k-means, hierarchical, etc.) that operate on the current ROI or
-    the visible filtered set. Add buttons here as scripts land.
+    - **Shape radio**: Sphere or Box. Sphere uses the radius slider on
+      the Filter sub-tab; Box gets its own per-axis half-extent
+      controls below.
+    - **Centre inputs**: three MNI-mm number inputs for x / y / z.
+      Auto-populated when the user clicks an HRF in the viz; can be
+      edited directly for free-floating selection.
+    - **MNI readout**: a copy-pasteable summary like
+      ``"Centre: (-30.0, 22.0, 5.0) mm  ·  Sphere r=20.0 mm"`` -- the
+      kind of line a researcher pastes into a methods section.
+    - **Save ROI average**: writes the averaged trace + shape metadata
+      to the workspace folder via :func:`save_roi_average`.
 
-    The Save button is enabled only when there's an ROI with at least
-    2 averageable same-oxygenation HRFs (otherwise there's nothing
-    meaningful to save). The match status updates via
-    ``hrtree_selection_changed`` and ``hrtree_filter_changed``.
+    Future: this sub-tab is the natural home for clustering scripts
+    (k-means, hierarchical, atlas-region membership). Add buttons
+    here as scripts land. The atlas-region option lands in the
+    follow-up PR.
     """
 
     @ui.refreshable
@@ -435,34 +523,118 @@ def _render_cluster_subtab(state: AppState) -> None:
                 "text-xs uppercase opacity-60 tracking-wide"
             )
             ui.label(
-                "Run cluster actions on the current ROI. Set the anchor "
-                "and radius in the Filter sub-tab first."
+                "Pick the ROI shape and adjust its position in MNI mm. "
+                "Click an HRF in the viz to seed the centre, or type "
+                "coordinates directly."
             ).classes("text-xs opacity-60")
 
-            anchor = state.library_selected_hrf
+            # --- Shape radio -----------------------------------------
+            def _on_shape_change(event) -> None:
+                state.cluster_shape = (
+                    event.value if event.value in SHAPE_MODES else SHAPE_SPHERE
+                )
+                state.publish("hrtree_filter_changed", state.library_filter)
+
+            ui.radio(
+                {SHAPE_SPHERE: "Sphere", SHAPE_BOX: "Box"},
+                value=state.cluster_shape,
+                on_change=_on_shape_change,
+            ).props("inline dense")
+
+            # --- Centre inputs (MNI mm) ------------------------------
+            ui.label("Centre (MNI mm)").classes(
+                "text-xs uppercase opacity-60 tracking-wide"
+            )
+
+            def _make_centre_input(axis: str, attr: str):
+                def _on_change(event) -> None:
+                    try:
+                        value = float(event.value or 0.0)
+                    except (TypeError, ValueError):
+                        return
+                    setattr(state, attr, value)
+                    state.publish("hrtree_filter_changed", state.library_filter)
+
+                return ui.number(
+                    label=axis,
+                    value=getattr(state, attr),
+                    step=1.0,
+                    format="%.1f",
+                    on_change=_on_change,
+                ).props("dense").classes("w-20")
+
+            with ui.row().classes("w-full gap-2"):
+                _make_centre_input("x", "cluster_center_x_mm")
+                _make_centre_input("y", "cluster_center_y_mm")
+                _make_centre_input("z", "cluster_center_z_mm")
+
+            # --- Box half-extents (only shown when box mode) ---------
+            if state.cluster_shape == SHAPE_BOX:
+                ui.label("Box half-extents (mm)").classes(
+                    "text-xs uppercase opacity-60 tracking-wide"
+                )
+
+                def _make_extent_input(axis: str, attr: str):
+                    def _on_change(event) -> None:
+                        try:
+                            value = float(event.value or 0.0)
+                        except (TypeError, ValueError):
+                            return
+                        if value < 0:
+                            value = 0.0
+                        setattr(state, attr, value)
+                        state.publish(
+                            "hrtree_filter_changed", state.library_filter
+                        )
+
+                    return ui.number(
+                        label=axis,
+                        value=getattr(state, attr),
+                        step=1.0,
+                        min=0.0,
+                        format="%.1f",
+                        on_change=_on_change,
+                    ).props("dense").classes("w-20")
+
+                with ui.row().classes("w-full gap-2"):
+                    _make_extent_input("x", "cluster_box_half_x_mm")
+                    _make_extent_input("y", "cluster_box_half_y_mm")
+                    _make_extent_input("z", "cluster_box_half_z_mm")
+            else:
+                # Sphere mode just consumes the radius slider on the
+                # Filter sub-tab. Surface a hint so users discover where
+                # to adjust it.
+                ui.label(
+                    f"Sphere radius: {state.library_roi_radius_m * 1000:.1f} mm "
+                    f"(adjust on the Filter sub-tab)."
+                ).classes("text-xs opacity-60 italic")
+
+            # --- MNI readout (copy-pasteable methods-section line) ---
+            ui.separator()
+            ui.label(_format_shape_readout(state)).classes(
+                "text-xs font-mono opacity-80 break-all"
+            )
+
+            # --- ROI status + Save button ----------------------------
             all_hrfs = gather_library_hrfs(state)
             matched = filter_by_oxygenation(
                 apply_filter(all_hrfs, state.library_filter),
                 state.library_oxygenation,
             )
-            roi_keys = compute_roi_keys(
-                matched,
-                anchor,
-                state.library_roi_radius_m,
-                state.library_roi_painted,
+            shape = _build_current_shape(state)
+            oxy_filter = _resolve_cluster_oxygenation(state)
+            roi_keys = compute_roi_keys_by_shape(
+                matched, shape, state.library_roi_painted,
+                oxygenation_filter=oxy_filter,
             )
             roi_result = compute_roi_average(matched, roi_keys)
-            can_save = anchor is not None and roi_result is not None
+            can_save = roi_result is not None
 
-            if anchor is None:
-                ui.label("No ROI anchor selected.").classes(
-                    "text-xs opacity-60 italic"
-                )
-            elif roi_result is None:
+            if roi_result is None:
                 ui.label(
-                    "ROI has fewer than 2 averageable HRFs at the "
-                    "current radius — widen the radius or paint more "
-                    "neighbors."
+                    "ROI has fewer than 2 averageable HRFs in the "
+                    "current shape -- widen the shape, paint more "
+                    "neighbours, or seed a different centre."
                 ).classes("text-xs opacity-60 italic")
             else:
                 _, _, n_used = roi_result
@@ -471,21 +643,19 @@ def _render_cluster_subtab(state: AppState) -> None:
                 ).classes("text-xs opacity-70")
 
             def _on_save_roi() -> None:
-                # Recompute at click-time so we save whatever the user
-                # sees right now (anchor + radius may have changed
-                # between mount and click).
-                _anchor = state.library_selected_hrf
-                if _anchor is None:
-                    ui.notify("No ROI anchor selected.", type="warning")
-                    return
+                # Recompute at click time so we save what the user sees
+                # right now (state may have changed between mount and
+                # click).
                 _matched = filter_by_oxygenation(
                     apply_filter(gather_library_hrfs(state),
                                  state.library_filter),
                     state.library_oxygenation,
                 )
-                _roi_keys = compute_roi_keys(
-                    _matched, _anchor, state.library_roi_radius_m,
-                    state.library_roi_painted,
+                _shape = _build_current_shape(state)
+                _oxy = _resolve_cluster_oxygenation(state)
+                _roi_keys = compute_roi_keys_by_shape(
+                    _matched, _shape, state.library_roi_painted,
+                    oxygenation_filter=_oxy,
                 )
                 _result = compute_roi_average(_matched, _roi_keys)
                 if _result is None:
@@ -495,20 +665,20 @@ def _render_cluster_subtab(state: AppState) -> None:
                     )
                     return
                 _mean, _std, _ = _result
-                _sfreq = float(_anchor.get("sfreq") or 1.0)
-                if _sfreq <= 0:
-                    _sfreq = 1.0
+                _anchor = state.library_selected_hrf
+                _sfreq = _resolve_roi_sfreq(_anchor, _matched, _roi_keys)
 
                 from ..workspace_io import save_roi_average, workspace_dir
                 try:
                     out_path = save_roi_average(
-                        anchor=_anchor,
                         roi_keys=_roi_keys,
                         hrf_mean=_mean,
                         hrf_std=_std,
                         sfreq=_sfreq,
-                        radius_m=state.library_roi_radius_m,
+                        shape=_shape,
+                        anchor=_anchor,
                         library_filter=state.library_filter,
+                        oxygenation_filter=_oxy,
                     )
                     ui.notify(
                         f"Saved ROI average to {out_path.name} "
@@ -537,6 +707,24 @@ def _render_cluster_subtab(state: AppState) -> None:
 
     state.subscribe("hrtree_selection_changed", _refresh)
     state.subscribe("hrtree_filter_changed", _refresh)
+
+
+def _format_shape_readout(state: AppState) -> str:
+    """One-line summary of the current Cluster shape, suitable for copy-paste."""
+    cx, cy, cz = (
+        state.cluster_center_x_mm,
+        state.cluster_center_y_mm,
+        state.cluster_center_z_mm,
+    )
+    centre = f"Centre: ({cx:.1f}, {cy:.1f}, {cz:.1f}) mm"
+    if state.cluster_shape == SHAPE_BOX:
+        hx = state.cluster_box_half_x_mm
+        hy = state.cluster_box_half_y_mm
+        hz = state.cluster_box_half_z_mm
+        dims = f"Box {hx * 2:.1f}x{hy * 2:.1f}x{hz * 2:.1f} mm"
+        return f"{centre}  ·  {dims}"
+    radius_mm = state.library_roi_radius_m * 1000.0
+    return f"{centre}  ·  Sphere r={radius_mm:.1f} mm"
 
 
 # ---------------------------------------------------------------------------
@@ -584,12 +772,13 @@ def _render_viz_pane(state: AppState) -> None:
         with ui.column().classes("w-full h-full p-3 gap-2 flex flex-col"):
             # Compute ROI keys now so the figure draws the highlight
             # halo and the label can report the count.
-            anchor = state.library_selected_hrf
-            roi_keys = compute_roi_keys(
+            shape = _build_current_shape(state)
+            oxy_filter = _resolve_cluster_oxygenation(state)
+            roi_keys = compute_roi_keys_by_shape(
                 matched,
-                anchor,
-                state.library_roi_radius_m,
+                shape,
                 state.library_roi_painted,
+                oxygenation_filter=oxy_filter,
             )
             roi_status = ""
             if roi_keys:
@@ -602,6 +791,7 @@ def _render_viz_pane(state: AppState) -> None:
                 show_brain=state.library_show_brain,
                 show_scalp=state.library_show_scalp,
                 roi_keys=roi_keys,
+                roi_shape=shape,
             )
             plot = ui.plotly(fig).classes("w-full flex-1 min-h-0")
 
@@ -616,10 +806,21 @@ def _render_viz_pane(state: AppState) -> None:
                 if hrf is None:
                     return
                 # Stash the key on the dict so the detail pane can show it.
-                # A plain click also resets the painted set — the user is
+                # A plain click also resets the painted set -- the user is
                 # picking a fresh anchor, so accumulated shift-hover paint
                 # from a prior anchor shouldn't carry over.
                 state.library_selected_hrf = {**hrf, "_key": hrf_key}
+                # Seed the Cluster sub-tab's shape centre from the clicked
+                # HRF so sphere mode's behaviour matches the v1.2 "click
+                # an HRF, sphere centres on it" workflow even though the
+                # spatial layer now drives the centre from state. Box mode
+                # uses the same centre so a click also re-centres the box.
+                # HRF locations are stored in meters; spatial layer is mm.
+                loc = hrf.get("location") or [0, 0, 0]
+                if len(loc) >= 3:
+                    state.cluster_center_x_mm = float(loc[0]) * 1000.0
+                    state.cluster_center_y_mm = float(loc[1]) * 1000.0
+                    state.cluster_center_z_mm = float(loc[2]) * 1000.0
                 state.library_roi_painted.clear()
                 state.publish("hrtree_selection_changed", hrf_key)
 
@@ -802,28 +1003,32 @@ def _render_roi_average(state: AppState) -> None:
     member count. The Save-to-workspace action lives in the Cluster
     sub-tab on the left (Phase 6); the detail pane is for viewing,
     not for committing state to disk.
+
+    Uses the Cluster sub-tab's current Shape (box or sphere) plus
+    the visible-filter context to compute ROI membership, so this
+    panel stays in sync with the cluster shape even when the user
+    has no anchor HRF clicked.
     """
-    anchor = state.library_selected_hrf
-    if anchor is None:
-        return
     all_hrfs = gather_library_hrfs(state)
     matched = filter_by_oxygenation(
         apply_filter(all_hrfs, state.library_filter),
         state.library_oxygenation,
     )
-    roi_keys = compute_roi_keys(
-        matched,
-        anchor,
-        state.library_roi_radius_m,
-        state.library_roi_painted,
+    shape = _build_current_shape(state)
+    oxy_filter = _resolve_cluster_oxygenation(state)
+    roi_keys = compute_roi_keys_by_shape(
+        matched, shape, state.library_roi_painted,
+        oxygenation_filter=oxy_filter,
     )
     result = compute_roi_average(matched, roi_keys)
     if result is None:
         return
     mean, std, n = result
-    sfreq = float(anchor.get("sfreq") or 1.0)
-    if sfreq <= 0:
-        sfreq = 1.0
+    # Sfreq: prefer the anchor's when present (legacy behaviour);
+    # otherwise default to the first ROI member's sfreq, falling back
+    # to 1.0 if even that's missing. The save flow does the same.
+    anchor = state.library_selected_hrf
+    sfreq = _resolve_roi_sfreq(anchor, matched, roi_keys)
     ui.separator()
     ui.label(
         f"ROI average ({n} HRFs)"
@@ -876,6 +1081,33 @@ def _kv(key: str, value: str) -> None:
     with ui.row().classes("w-full gap-4"):
         ui.label(key).classes("text-xs uppercase opacity-60 w-32")
         ui.label(value).classes("text-sm break-all")
+
+
+def _resolve_roi_sfreq(
+    anchor: Optional[Dict[str, Any]],
+    hrfs: Dict[str, Dict[str, Any]],
+    roi_keys: Any,
+) -> float:
+    """Pick the sample rate for an ROI-averaged trace.
+
+    Prefers the click-anchor's ``sfreq`` when there is one (matches the
+    v1.2 behaviour). For free-floating ROIs with no anchor, falls back
+    to the first ROI member's ``sfreq``. Final fallback is 1.0 Hz so
+    the time axis on the plot has *some* scale even when the HRFs are
+    missing rate metadata.
+    """
+    if anchor is not None:
+        anchor_sfreq = float(anchor.get("sfreq") or 0.0)
+        if anchor_sfreq > 0:
+            return anchor_sfreq
+    for key in roi_keys:
+        hrf = hrfs.get(key)
+        if hrf is None:
+            continue
+        member_sfreq = float(hrf.get("sfreq") or 0.0)
+        if member_sfreq > 0:
+            return member_sfreq
+    return 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -1007,17 +1239,25 @@ def build_plotly_figure(
     show_brain: bool = False,
     show_scalp: bool = False,
     roi_keys: Optional[Any] = None,
+    roi_shape: Optional[Shape] = None,
 ):
     """Build the 3D scatter figure for the given HRF dict.
 
-    Up to five traces, ordered so the ROI highlight renders on top:
+    Up to six traces, ordered so the ROI highlight renders on top:
 
     - **Scalp** (``go.Mesh3d``, only when ``show_scalp=True``):
-      fsaverage outer-skin surface — anatomically where the optodes
+      fsaverage outer-skin surface -- anatomically where the optodes
       sit. Drawn first (outermost in 3D-painter order).
     - **Brain** (``go.Mesh3d``, only when ``show_brain=True``):
-      fsaverage pial cortical surface — where the neural activity
+      fsaverage pial cortical surface -- where the neural activity
       originates. Drawn inside the scalp.
+    - **ROI shape overlay** (``go.Mesh3d``, only when ``roi_shape``
+      is a :class:`~hrfunc.spatial.shapes.Box` or
+      :class:`~hrfunc.spatial.shapes.Sphere`): a translucent violet
+      cuboid / UV-sphere showing where the Cluster sub-tab's ROI
+      selector currently sits. The shape's centre/extent state is
+      converted from MNI mm to MNE-meter coordinates so it renders
+      in the same coordinate frame as the HRF scatter.
     - **HbO** (``go.Scatter3d``, red): oxygenated HRFs.
     - **HbR** (``go.Scatter3d``, blue): deoxygenated HRFs.
     - **ROI** (``go.Scatter3d``, gold, larger): every HRF whose key
@@ -1088,6 +1328,24 @@ def build_plotly_figure(
                     ambient=0.5, diffuse=0.6,
                 )
             )
+
+    # ROI shape overlay (PR #49 box/sphere). HRF coords are in meters;
+    # the spatial-layer shape is in mm, so we down-convert before
+    # building the trace -- the resulting Mesh3d is in meters and
+    # overlays directly on the HRF scatter.
+    if roi_shape is not None:
+        if isinstance(roi_shape, Box):
+            box_m = Box(
+                center_mm=(c / 1000.0 for c in roi_shape.center_mm),
+                half_extents_mm=(h / 1000.0 for h in roi_shape.half_extents_mm),
+            )
+            traces.append(make_box_overlay_trace(box_m))
+        elif isinstance(roi_shape, Sphere):
+            sphere_m = Sphere(
+                center_mm=(c / 1000.0 for c in roi_shape.center_mm),
+                radius_mm=roi_shape.radius_mm / 1000.0,
+            )
+            traces.append(make_sphere_overlay_trace(sphere_m))
 
     if hbo_x:
         traces.append(
@@ -1250,6 +1508,69 @@ def compute_roi_keys(
             if anchor_oxy is not None:
                 if hrfs[key].get("oxygenation") != anchor_oxy:
                     continue
+            out.add(key)
+
+    return out
+
+
+def compute_roi_keys_by_shape(
+    hrfs: Dict[str, Dict[str, Any]],
+    shape: Optional[Any],
+    painted: Optional[Any] = None,
+    *,
+    oxygenation_filter: Optional[bool] = None,
+) -> "set":
+    """Shape-based ROI membership for free-floating Box / Sphere modes.
+
+    Companion to :func:`compute_roi_keys`. The original anchor-based
+    API is preserved for the legacy click-anchor + radius workflow;
+    this function takes a fully-constructed :class:`hrfunc.spatial.Shape`
+    (typically a :class:`Box` or a free-floating :class:`Sphere`) plus
+    an explicit oxygenation filter and returns the matching keys.
+
+    Membership rules:
+
+    - If ``shape`` is not None, every HRF whose location (converted
+      meters->mm) is inside ``shape`` is included. HRFs without a
+      location are skipped.
+    - Every key in ``painted`` is included (filtered by
+      ``oxygenation_filter`` when set, so a stray paint on the
+      wrong haemoglobin doesn't contaminate the average).
+    - When ``oxygenation_filter`` is ``True`` / ``False``, only HRFs
+      with matching ``oxygenation`` survive the membership check.
+      ``None`` (the default) skips the oxygenation filter -- callers
+      that have already filtered upstream (e.g. via
+      ``library_oxygenation``) should leave this as None.
+
+    Module-level so tests can hit it without spinning up the GUI.
+    """
+    out: "set" = set()
+    if shape is None and not painted:
+        return out
+
+    if shape is not None:
+        for key, hrf in hrfs.items():
+            loc = hrf.get("location")
+            if loc is None or len(loc) < 3:
+                continue
+            if (
+                oxygenation_filter is not None
+                and bool(hrf.get("oxygenation")) != bool(oxygenation_filter)
+            ):
+                continue
+            loc_mm = meters_to_mm(loc[:3]).tolist()
+            if shape.contains(loc_mm):
+                out.add(key)
+
+    if painted:
+        for key in painted:
+            if key not in hrfs:
+                continue
+            if (
+                oxygenation_filter is not None
+                and bool(hrfs[key].get("oxygenation")) != bool(oxygenation_filter)
+            ):
+                continue
             out.add(key)
 
     return out
