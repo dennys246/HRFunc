@@ -138,7 +138,23 @@ def _build_current_shape(state: AppState) -> Optional[Shape]:
 
     Returns None for unknown shape modes (defensive -- a stale state
     value from a future / legacy build shouldn't crash the render).
+
+    PR #54: returns None when ``state.cluster_roi_active`` is False so
+    the gold halo + shape overlay + save button stay quiet by default;
+    researchers opt into ROI mode explicitly via the toggle at the top
+    of the Cluster sub-tab.
     """
+    if not state.cluster_roi_active:
+        return None
+    return _build_shape_unconditional(state)
+
+
+def _build_shape_unconditional(state: AppState) -> Optional[Shape]:
+    """Same as :func:`_build_current_shape` but ignores the ROI-active
+    toggle. The Cluster sub-tab UI needs to render shape-specific
+    controls (sphere radius, atlas dropdown) regardless of whether
+    the toggle is on -- otherwise turning the toggle off would
+    collapse the entire UI body and disorient the user."""
     if state.cluster_shape == SHAPE_BOX:
         return Box(
             center_mm=(
@@ -178,6 +194,66 @@ def _build_current_shape(state: AppState) -> Optional[Shape]:
             radius_mm=float(meters_to_mm(state.library_roi_radius_m)),
         )
     return None
+
+
+def _build_atlas_alignment_affine(state: AppState) -> "Optional[np.ndarray]":
+    """Compose the full HRF-coord -> MNI mm affine for atlas lookups.
+
+    Returns ``None`` when the alignment is identity (no transform
+    needed) -- callers fast-path the lookup.
+
+    The user can provide alignment two ways:
+
+    1. A full 4x4 ``cluster_atlas_alignment_affine`` loaded from a
+       JSON or .npy file via the file picker in atlas mode.
+    2. Three pure-translation offsets (``cluster_atlas_offset_*_mm``)
+       for users without a registered affine.
+
+    Both compose -- offsets translate AFTER the affine. Identity
+    affine + zero offsets returns None so callers know they can
+    skip the transform.
+    """
+    import numpy as np
+
+    ox = float(state.cluster_atlas_offset_x_mm)
+    oy = float(state.cluster_atlas_offset_y_mm)
+    oz = float(state.cluster_atlas_offset_z_mm)
+    has_offset = ox != 0.0 or oy != 0.0 or oz != 0.0
+    has_affine = state.cluster_atlas_alignment_affine is not None
+
+    if not has_offset and not has_affine:
+        return None
+
+    if has_affine:
+        affine = np.asarray(
+            state.cluster_atlas_alignment_affine, dtype=np.float64
+        )
+        if affine.shape != (4, 4):
+            # Defensive: stale state; ignore and fall back to identity.
+            affine = np.eye(4, dtype=np.float64)
+    else:
+        affine = np.eye(4, dtype=np.float64)
+
+    if has_offset:
+        translation = np.eye(4, dtype=np.float64)
+        translation[:3, 3] = (ox, oy, oz)
+        # Translation applied AFTER the affine ("T @ A @ point").
+        affine = translation @ affine
+
+    return affine
+
+
+def _alignment_for_shape(state: AppState, shape: Optional[Shape]) -> "Optional[np.ndarray]":
+    """Return the HRF -> atlas alignment affine when applicable, else None.
+
+    Atlas mode needs the alignment because library HRFs are stored in
+    MNE head coords (origin near auditory meatus) while the bundled
+    atlas is in MNI mm. Sphere / Box modes don't need alignment --
+    their geometry lives in the same frame as the HRF locations.
+    """
+    if not isinstance(shape, AtlasRegion):
+        return None
+    return _build_atlas_alignment_affine(state)
 
 
 DataSource = Literal["library", "project", "both"]
@@ -224,8 +300,13 @@ def _load_trees(state: AppState) -> None:
         lib_dir = os.path.join(os.path.dirname(hrfunc_file), "hrfs")
         hbo_path = os.path.join(lib_dir, "hbo_hrfs.json")
         hbr_path = os.path.join(lib_dir, "hbr_hrfs.json")
-        state.library_hbo = Tree(hbo_path)
-        state.library_hbr = Tree(hbr_path)
+        # ``rich=True`` keeps the per-subject ``estimates`` lists on each
+        # HRF node so ROI averaging can pool subject-level traces (the
+        # statistically correct grand mean). The default ``rich=False``
+        # strips them to save memory; for the GUI we accept the ~1-2 MB
+        # cost in exchange for accurate ROI averages.
+        state.library_hbo = Tree(hbo_path, rich=True)
+        state.library_hbr = Tree(hbr_path, rich=True)
         logger.info(
             "Loaded library trees: HbO=%d nodes, HbR=%d nodes",
             len(state.library_hbo.gather(state.library_hbo.root)),
@@ -524,6 +605,25 @@ def _render_cluster_subtab(state: AppState) -> None:
                 "text-xs uppercase opacity-60 tracking-wide"
             )
 
+            # --- ROI active toggle (PR #54) ---------------------------
+            # Default off so a fresh page load shows raw HRFs without a
+            # mystery gold halo around (0, 0, 0). Researchers explicitly
+            # opt in to ROI mode before the shape, centre, radius, etc.
+            # contribute to membership.
+            def _on_roi_active_change(event) -> None:
+                state.cluster_roi_active = bool(event.value)
+                state.publish("hrtree_filter_changed", state.library_filter)
+
+            ui.switch(
+                "ROI active",
+                value=state.cluster_roi_active,
+                on_change=_on_roi_active_change,
+            ).props("dense").tooltip(
+                "Turn the ROI on to highlight matching HRFs in the viz "
+                "and enable Save. Off by default so the page loads "
+                "without a default ROI applied."
+            )
+
             # --- Shape radio -----------------------------------------
             shape_options = {SHAPE_SPHERE: "Sphere"}
             if atlas is not None:
@@ -634,6 +734,16 @@ def _render_cluster_subtab(state: AppState) -> None:
                     on_change=_on_region_change,
                 ).props("dense outlined").classes("w-full")
 
+                # --- Atlas alignment (HRF coords -> MNI mm) ----------
+                # Library HRFs are stored in MNE head coords (origin
+                # near auditory meatus); the atlas is in MNI mm.
+                # Without alignment, every lookup falls outside the
+                # atlas volume -> silently empty ROIs. Two UI paths:
+                # full 4x4 affine upload (for users with a registered
+                # head->MNI transform) or pure-translation offsets
+                # (a one-click "shift everything"). They compose.
+                _render_atlas_alignment_section(state, _body)
+
             # --- Clear ROI button ------------------------------------
             def _on_clear_roi() -> None:
                 state.library_selected_hrf = None
@@ -676,24 +786,36 @@ def _render_cluster_subtab(state: AppState) -> None:
             )
             shape = _build_current_shape(state)
             oxy_filter = _resolve_cluster_oxygenation(state)
+            alignment = _alignment_for_shape(state, shape)
             roi_keys = compute_roi_keys_by_shape(
                 matched, shape, state.library_roi_painted,
                 oxygenation_filter=oxy_filter,
+                alignment_affine=alignment,
             )
             roi_result = compute_roi_average(matched, roi_keys)
+            excluded_count = compute_roi_excluded_count(matched, roi_keys)
             can_save = roi_result is not None
 
             if roi_result is None:
                 ui.label(
-                    "ROI has fewer than 2 averageable HRFs in the "
-                    "current shape -- widen the shape, paint more "
-                    "neighbours, or seed a different centre."
+                    "ROI has fewer than 2 averageable subject estimates "
+                    "in the current shape. Either widen the shape, paint "
+                    "more neighbours, or seed a different centre. (Note: "
+                    "HRFs without per-subject estimates are excluded.)"
                 ).classes("text-xs opacity-60 italic")
             else:
-                _, _, n_used = roi_result
+                _, _, n_subjects, n_channels = roi_result
                 ui.label(
-                    f"Current ROI: {n_used} averageable HRFs."
+                    f"Current ROI: averaging {n_subjects} subject "
+                    f"estimates across {n_channels} channel"
+                    f"{'s' if n_channels != 1 else ''}."
                 ).classes("text-xs opacity-70")
+                if excluded_count > 0:
+                    ui.label(
+                        f"  ({excluded_count} HRF"
+                        f"{'s' if excluded_count != 1 else ''} excluded "
+                        f"for lacking subject-level estimates.)"
+                    ).classes("text-xs opacity-50 italic")
 
             def _on_save_roi() -> None:
                 # Recompute at click time so we save what the user sees
@@ -706,18 +828,21 @@ def _render_cluster_subtab(state: AppState) -> None:
                 )
                 _shape = _build_current_shape(state)
                 _oxy = _resolve_cluster_oxygenation(state)
+                _alignment = _alignment_for_shape(state, _shape)
                 _roi_keys = compute_roi_keys_by_shape(
                     _matched, _shape, state.library_roi_painted,
                     oxygenation_filter=_oxy,
+                    alignment_affine=_alignment,
                 )
                 _result = compute_roi_average(_matched, _roi_keys)
                 if _result is None:
                     ui.notify(
-                        "ROI has fewer than 2 averageable HRFs.",
+                        "ROI has fewer than 2 averageable subject "
+                        "estimates.",
                         type="warning",
                     )
                     return
-                _mean, _std, _ = _result
+                _mean, _std, _n_subjects, _n_channels = _result
                 _anchor = state.library_selected_hrf
                 _sfreq = _resolve_roi_sfreq(_anchor, _matched, _roi_keys)
 
@@ -733,11 +858,15 @@ def _render_cluster_subtab(state: AppState) -> None:
                         library_filter=state.library_filter,
                         oxygenation_filter=_oxy,
                     )
+                    state.last_saved_roi_path = out_path
                     ui.notify(
                         f"Saved ROI average to {out_path.name} "
                         f"({workspace_dir()})",
                         type="positive",
                     )
+                    # Re-render so the persistent "Last saved" label
+                    # below picks up the new path immediately.
+                    _body.refresh()
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("save ROI average failed: %s", exc)
                     ui.notify(
@@ -752,6 +881,16 @@ def _render_cluster_subtab(state: AppState) -> None:
             ).props("color=primary dense")
             if not can_save:
                 save_btn.props("disable")
+
+            # --- Persistent "last saved" feedback (PR #54) ----------
+            # ``ui.notify`` toasts vanish in seconds; this label stays
+            # visible until the next render replaces it, so users can
+            # confirm the save happened even if they didn't catch the
+            # toast.
+            if state.last_saved_roi_path is not None:
+                ui.label(
+                    f"Last saved: {state.last_saved_roi_path.name}"
+                ).classes("text-xs font-mono opacity-60 break-all")
 
     _body()
 
@@ -788,6 +927,169 @@ def _format_shape_readout(state: AppState) -> str:
         return f"{centre}  ·  Atlas region: {region}"
     radius_mm = state.library_roi_radius_m * 1000.0
     return f"{centre}  ·  Sphere r={radius_mm:.1f} mm"
+
+
+def _atlas_alignment_status(state: AppState) -> str:
+    """Short label describing the current HRF->MNI alignment state."""
+    import numpy as np
+    has_affine = state.cluster_atlas_alignment_affine is not None
+    has_offset = (
+        state.cluster_atlas_offset_x_mm != 0.0
+        or state.cluster_atlas_offset_y_mm != 0.0
+        or state.cluster_atlas_offset_z_mm != 0.0
+    )
+    if has_affine and has_offset:
+        return "Alignment: custom affine + offsets"
+    if has_affine:
+        affine = np.asarray(state.cluster_atlas_alignment_affine)
+        if affine.shape == (4, 4) and np.allclose(affine, np.eye(4), atol=1e-9):
+            return "Alignment: identity (no transform)"
+        return "Alignment: custom 4x4 affine"
+    if has_offset:
+        ox = state.cluster_atlas_offset_x_mm
+        oy = state.cluster_atlas_offset_y_mm
+        oz = state.cluster_atlas_offset_z_mm
+        return f"Alignment: offset ({ox:+.1f}, {oy:+.1f}, {oz:+.1f}) mm"
+    return "Alignment: identity (no transform)"
+
+
+def _looks_out_of_mni(hrfs: Dict[str, Dict[str, Any]]) -> bool:
+    """Heuristic: sample a few HRF locations and check if they're out of MNI mm bounds.
+
+    MNI Y axis runs roughly -100 to +80 mm. Bundled P-CAT HRFs are
+    stored in MNE head coords with origin near the auditory meatus,
+    so their Y values land around +60 to +110 mm -- the ``> 100`` mm
+    test catches that case while letting properly-MNI HRFs pass.
+    Used by the Cluster sub-tab to surface an alignment warning.
+    """
+    import numpy as np
+    # Sample up to 8 HRFs; require >=3 to have Y > 100 mm to flag.
+    over_threshold = 0
+    sampled = 0
+    for hrf in hrfs.values():
+        loc = hrf.get("location")
+        if loc is None or len(loc) < 3:
+            continue
+        sampled += 1
+        try:
+            y_mm = float(loc[1]) * 1000.0
+        except (TypeError, ValueError):
+            continue
+        if abs(y_mm) > 100.0:
+            over_threshold += 1
+        if sampled >= 8:
+            break
+    return sampled >= 3 and over_threshold >= 3
+
+
+def _render_atlas_alignment_section(state: AppState, body_refreshable) -> None:
+    """Render the alignment controls in atlas mode.
+
+    Three pieces:
+
+    1. Out-of-MNI warning when HRF locations look like MNE head coords.
+       Helps the user understand why atlas mode shows empty ROIs.
+    2. Three offset number inputs (x / y / z mm) for users who want
+       to dial in a rough translation by eye.
+    3. An upload widget for a JSON 4x4 affine matrix. Cleared via a
+       "reset" button.
+    """
+    import json as _json
+    import numpy as np
+
+    matched = filter_by_oxygenation(
+        apply_filter(gather_library_hrfs(state), state.library_filter),
+        state.library_oxygenation,
+    )
+    if _looks_out_of_mni(matched):
+        with ui.row().classes("w-full items-start gap-2"):
+            ui.icon("warning").classes("text-amber-500 text-sm")
+            ui.label(
+                "HRF locations appear to be in MNE head coords (not MNI). "
+                "Atlas membership will be inaccurate until you load an "
+                "alignment matrix or set offsets below."
+            ).classes("text-xs opacity-80")
+
+    ui.label("Atlas alignment (HRF coord -> MNI mm)").classes(
+        "text-xs uppercase opacity-60 tracking-wide"
+    )
+
+    # --- Offset inputs ---
+    def _make_offset_input(axis: str, attr: str):
+        def _on_change(event) -> None:
+            try:
+                value = float(event.value or 0.0)
+            except (TypeError, ValueError):
+                return
+            setattr(state, attr, value)
+            state.publish("hrtree_filter_changed", state.library_filter)
+            body_refreshable.refresh()
+
+        return ui.number(
+            label=axis,
+            value=getattr(state, attr),
+            step=1.0,
+            format="%.1f",
+            on_change=_on_change,
+        ).props("dense").classes("w-20")
+
+    with ui.row().classes("w-full gap-2"):
+        _make_offset_input("dx", "cluster_atlas_offset_x_mm")
+        _make_offset_input("dy", "cluster_atlas_offset_y_mm")
+        _make_offset_input("dz", "cluster_atlas_offset_z_mm")
+
+    # --- Affine matrix upload ---
+    def _on_upload(event) -> None:
+        try:
+            content = event.content.read()
+            payload = _json.loads(content.decode("utf-8"))
+            # Accept either {"affine_mm": [[...], ...]} or a bare
+            # nested-list 4x4. Both make sense as user input.
+            raw = (
+                payload.get("affine_mm")
+                if isinstance(payload, dict) and "affine_mm" in payload
+                else payload
+            )
+            affine = np.asarray(raw, dtype=np.float64)
+            if affine.shape != (4, 4):
+                raise ValueError(
+                    f"affine must be 4x4, got shape {affine.shape}"
+                )
+            state.cluster_atlas_alignment_affine = affine
+            ui.notify(
+                "Loaded HRF -> MNI alignment matrix.", type="positive"
+            )
+            state.publish("hrtree_filter_changed", state.library_filter)
+            body_refreshable.refresh()
+        except Exception as exc:  # noqa: BLE001
+            ui.notify(
+                f"Failed to load alignment: {type(exc).__name__}: {exc}",
+                type="negative",
+            )
+
+    def _on_reset_alignment() -> None:
+        state.cluster_atlas_alignment_affine = None
+        state.cluster_atlas_offset_x_mm = 0.0
+        state.cluster_atlas_offset_y_mm = 0.0
+        state.cluster_atlas_offset_z_mm = 0.0
+        state.publish("hrtree_filter_changed", state.library_filter)
+        body_refreshable.refresh()
+
+    with ui.row().classes("w-full gap-2 items-center"):
+        ui.upload(
+            label="Load alignment .json",
+            on_upload=_on_upload,
+            auto_upload=True,
+            max_files=1,
+        ).props("flat dense accept=.json").classes("w-48")
+        ui.button(
+            "Reset alignment",
+            on_click=_on_reset_alignment,
+        ).props("flat dense")
+
+    ui.label(_atlas_alignment_status(state)).classes(
+        "text-xs font-mono opacity-70"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -837,11 +1139,13 @@ def _render_viz_pane(state: AppState) -> None:
             # halo and the label can report the count.
             shape = _build_current_shape(state)
             oxy_filter = _resolve_cluster_oxygenation(state)
+            alignment = _alignment_for_shape(state, shape)
             roi_keys = compute_roi_keys_by_shape(
                 matched,
                 shape,
                 state.library_roi_painted,
                 oxygenation_filter=oxy_filter,
+                alignment_affine=alignment,
             )
             roi_status = ""
             if roi_keys:
@@ -1091,14 +1395,16 @@ def _render_roi_average(state: AppState) -> None:
     )
     shape = _build_current_shape(state)
     oxy_filter = _resolve_cluster_oxygenation(state)
+    alignment = _alignment_for_shape(state, shape)
     roi_keys = compute_roi_keys_by_shape(
         matched, shape, state.library_roi_painted,
         oxygenation_filter=oxy_filter,
+        alignment_affine=alignment,
     )
     result = compute_roi_average(matched, roi_keys)
     if result is None:
         return
-    mean, std, n = result
+    mean, std, n_subjects, n_channels = result
     # Sfreq: prefer the anchor's when present (legacy behaviour);
     # otherwise default to the first ROI member's sfreq, falling back
     # to 1.0 if even that's missing. The save flow does the same.
@@ -1106,9 +1412,9 @@ def _render_roi_average(state: AppState) -> None:
     sfreq = _resolve_roi_sfreq(anchor, matched, roi_keys)
     ui.separator()
     ui.label(
-        f"ROI average ({n} HRFs)"
+        f"ROI average ({n_subjects} subjects, {n_channels} channels)"
     ).classes("text-xs uppercase opacity-60 tracking-wide")
-    png = _render_roi_average_png(mean, std, sfreq, n)
+    png = _render_roi_average_png(mean, std, sfreq, n_subjects)
     if png is not None:
         ui.image(png).classes("max-w-md")
 
@@ -1594,6 +1900,7 @@ def compute_roi_keys_by_shape(
     painted: Optional[Any] = None,
     *,
     oxygenation_filter: Optional[bool] = None,
+    alignment_affine: "Optional[np.ndarray]" = None,
 ) -> "set":
     """Shape-based ROI membership for free-floating Box / Sphere modes.
 
@@ -1606,8 +1913,9 @@ def compute_roi_keys_by_shape(
     Membership rules:
 
     - If ``shape`` is not None, every HRF whose location (converted
-      meters->mm) is inside ``shape`` is included. HRFs without a
-      location are skipped.
+      meters->mm, then through the optional ``alignment_affine``)
+      is inside ``shape`` is included. HRFs without a location are
+      skipped.
     - Every key in ``painted`` is included (filtered by
       ``oxygenation_filter`` when set, so a stray paint on the
       wrong haemoglobin doesn't contaminate the average).
@@ -1617,8 +1925,16 @@ def compute_roi_keys_by_shape(
       that have already filtered upstream (e.g. via
       ``library_oxygenation``) should leave this as None.
 
+    ``alignment_affine`` (PR #54): a 4x4 homogeneous transform applied
+    to the HRF coordinate before the shape predicate. Used for atlas
+    mode to map MNE-head-coord HRFs into the atlas's MNI-mm frame.
+    Pass ``None`` to skip the transform (default; sphere / box modes
+    don't need it because the shape itself is in MNE-head space).
+
     Module-level so tests can hit it without spinning up the GUI.
     """
+    import numpy as np
+
     out: "set" = set()
     if shape is None and not painted:
         return out
@@ -1634,6 +1950,17 @@ def compute_roi_keys_by_shape(
             ):
                 continue
             loc_mm = meters_to_mm(loc[:3]).tolist()
+            if alignment_affine is not None:
+                homo = np.array(
+                    [loc_mm[0], loc_mm[1], loc_mm[2], 1.0],
+                    dtype=np.float64,
+                )
+                aligned = alignment_affine @ homo
+                loc_mm = [
+                    float(aligned[0]),
+                    float(aligned[1]),
+                    float(aligned[2]),
+                ]
             if shape.contains(loc_mm):
                 out.add(key)
 
@@ -1655,37 +1982,65 @@ def compute_roi_average(
     hrfs: Dict[str, Dict[str, Any]],
     roi_keys: Any,
 ):
-    """Average the ``hrf_mean`` arrays of all HRFs in the ROI.
+    """Average the per-subject ``estimates`` of every HRF in the ROI.
 
-    Returns ``(mean, std, n_used)`` numpy arrays + a count, or None if
-    fewer than 2 traces in the ROI are averageable.
+    Returns ``(mean, std, n_subjects, n_channels)`` -- the grand mean
+    and std across all subject-level estimates pooled from every HRF
+    in the ROI, plus the number of subject traces that contributed
+    and the number of source channels they came from. Returns ``None``
+    if fewer than 2 subject traces are averageable.
 
-    Skips HRFs with empty / None / mismatched-length ``hrf_mean``.
-    Anchor's trace length is the canonical length; HRFs whose traces
-    don't match are skipped (we'd otherwise smear different durations
-    together silently).
+    **PR #54 correctness fix:** previously averaged ``hrf_mean`` (the
+    per-channel mean), so a 50-subject channel got the same weight as
+    a 5-subject channel in the final grand mean. Pooling ``estimates``
+    instead gives every subject equal weight, which is what
+    researchers report in publications.
+
+    **HRFs without populated ``estimates``** are excluded from the
+    average -- :func:`compute_roi_excluded_count` surfaces the count
+    so the GUI can warn the user. The bundled library is loaded with
+    ``rich=True`` so estimates survive the JSON load; HRFs missing
+    estimates are typically those that came from a study where only
+    the channel mean was published.
+
+    Skips traces with empty / mismatched length. The modal length
+    across the candidate pool is the canonical length; outliers are
+    dropped (e.g. a single channel published at a different duration
+    doesn't contaminate the average).
 
     Module-level so tests can call without a UI.
     """
     import numpy as np
     from collections import Counter
 
-    # First pass: parse every candidate trace into a numpy array.
+    # First pass: parse every subject-level estimate into a numpy array.
+    # Track the source-channel count separately so the UI can show
+    # "averaged N subjects across M channels".
     candidates: List["np.ndarray"] = []
+    contributing_channels = 0
     for key in roi_keys:
         hrf = hrfs.get(key)
         if hrf is None:
             continue
-        trace = hrf.get("hrf_mean")
-        if trace is None:
+        estimates = hrf.get("estimates") or []
+        if not estimates:
+            # No subject-level estimates -> can't contribute to a
+            # subject-weighted grand mean. Skip the channel entirely
+            # rather than fall back to hrf_mean (would mix two
+            # averaging conventions in the same output).
             continue
-        try:
-            arr = np.asarray(trace, dtype=float)
-        except Exception:  # noqa: BLE001
-            continue
-        if arr.size == 0:
-            continue
-        candidates.append(arr)
+        added_from_this_channel = False
+        for estimate in estimates:
+            try:
+                arr = np.asarray(estimate, dtype=float)
+            except Exception:  # noqa: BLE001
+                continue
+            if arr.ndim != 1 or arr.size == 0:
+                continue
+            candidates.append(arr)
+            added_from_this_channel = True
+        if added_from_this_channel:
+            contributing_channels += 1
 
     if len(candidates) < 2:
         return None
@@ -1704,7 +2059,33 @@ def compute_roi_average(
         return None
 
     stacked = np.vstack(traces)
-    return stacked.mean(axis=0), stacked.std(axis=0, ddof=0), len(traces)
+    return (
+        stacked.mean(axis=0),
+        stacked.std(axis=0, ddof=0),
+        len(traces),
+        contributing_channels,
+    )
+
+
+def compute_roi_excluded_count(
+    hrfs: Dict[str, Dict[str, Any]],
+    roi_keys: Any,
+) -> int:
+    """Count the ROI HRFs that have no usable per-subject estimates.
+
+    Used by the GUI to warn researchers when their ROI mixes channels
+    with and without published subject-level data -- the average will
+    silently drop the un-publishable channels.
+    """
+    excluded = 0
+    for key in roi_keys:
+        hrf = hrfs.get(key)
+        if hrf is None:
+            continue
+        estimates = hrf.get("estimates") or []
+        if not estimates:
+            excluded += 1
+    return excluded
 
 
 def _hover_text_for(key: str, hrf: Dict[str, Any]) -> str:

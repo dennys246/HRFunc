@@ -539,45 +539,118 @@ class TestComputeRoiKeys:
 
 
 class TestComputeRoiAverage:
-    def test_returns_none_with_fewer_than_two_traces(self):
+    """PR #54: averaging is now over per-subject ``estimates`` (subject-
+    weighted grand mean), not over ``hrf_mean`` (channel-weighted).
+    HRFs without populated estimates are excluded entirely so the two
+    averaging conventions never mix in the same output."""
+
+    def test_returns_none_when_no_estimates(self):
+        """HRF with only ``hrf_mean`` (no estimates) yields no
+        averageable subject traces -- compute_roi_average returns
+        None rather than silently falling back to the channel mean."""
         hrfs = {
             "a": {"hrf_mean": [1.0, 2.0, 3.0]},
         }
         assert library.compute_roi_average(hrfs, {"a"}) is None
 
-    def test_averages_same_length_traces(self):
+    def test_averages_subject_estimates(self):
+        """Two HRFs, each with two subject estimates -> 4 subjects
+        pooled, 2 contributing channels."""
         import numpy as np
         hrfs = {
-            "a": {"hrf_mean": [1.0, 2.0, 3.0]},
-            "b": {"hrf_mean": [3.0, 4.0, 5.0]},
+            "a": {
+                "estimates": [
+                    [1.0, 2.0, 3.0],
+                    [2.0, 3.0, 4.0],
+                ],
+            },
+            "b": {
+                "estimates": [
+                    [3.0, 4.0, 5.0],
+                    [4.0, 5.0, 6.0],
+                ],
+            },
         }
         result = library.compute_roi_average(hrfs, {"a", "b"})
         assert result is not None
-        mean, std, n = result
-        assert n == 2
-        np.testing.assert_array_almost_equal(mean, [2.0, 3.0, 4.0])
+        mean, std, n_subjects, n_channels = result
+        assert n_subjects == 4
+        assert n_channels == 2
+        np.testing.assert_array_almost_equal(mean, [2.5, 3.5, 4.5])
 
-    def test_skips_mismatched_length_traces(self):
+    def test_skips_mismatched_length_estimates(self):
+        """Estimate with different duration is the oddball -- modal
+        length wins, the outlier is silently dropped."""
         hrfs = {
-            "a": {"hrf_mean": [1.0, 2.0, 3.0]},
-            "b": {"hrf_mean": [1.0, 2.0]},  # different length → skip
-            "c": {"hrf_mean": [5.0, 6.0, 7.0]},
+            "a": {
+                "estimates": [
+                    [1.0, 2.0, 3.0],
+                    [2.0, 3.0, 4.0],
+                ],
+            },
+            "b": {
+                "estimates": [
+                    [1.0, 2.0],          # different length, dropped
+                    [5.0, 6.0, 7.0],     # canonical
+                ],
+            },
         }
-        result = library.compute_roi_average(hrfs, {"a", "b", "c"})
+        result = library.compute_roi_average(hrfs, {"a", "b"})
         assert result is not None
-        _, _, n = result
-        assert n == 2  # b was skipped
+        _, _, n_subjects, _ = result
+        assert n_subjects == 3
+
+    def test_excludes_hrfs_without_estimates(self):
+        """An HRF with only ``hrf_mean`` (no estimates) does not
+        contribute; the average comes only from estimate-bearing HRFs."""
+        hrfs = {
+            "a": {
+                "estimates": [
+                    [1.0, 2.0],
+                    [3.0, 4.0],
+                ],
+            },
+            "b": {
+                "hrf_mean": [10.0, 20.0],  # no estimates -> excluded
+            },
+        }
+        result = library.compute_roi_average(hrfs, {"a", "b"})
+        assert result is not None
+        _, _, n_subjects, n_channels = result
+        assert n_subjects == 2
+        assert n_channels == 1  # only a contributed
 
     def test_skips_missing_hrfs_silently(self):
         hrfs = {
-            "a": {"hrf_mean": [1.0, 2.0]},
-            "b": {"hrf_mean": [3.0, 4.0]},
+            "a": {"estimates": [[1.0, 2.0], [2.0, 3.0]]},
+            "b": {"estimates": [[3.0, 4.0], [4.0, 5.0]]},
         }
-        # nonexistent-key in the ROI set should be tolerated
         result = library.compute_roi_average(hrfs, {"a", "b", "ghost"})
         assert result is not None
-        _, _, n = result
-        assert n == 2
+        _, _, n_subjects, n_channels = result
+        assert n_subjects == 4
+        assert n_channels == 2
+
+
+class TestComputeRoiExcludedCount:
+    def test_counts_hrfs_without_estimates(self):
+        hrfs = {
+            "a": {"estimates": [[1.0]]},
+            "b": {"hrf_mean": [1.0]},   # no estimates -> excluded
+            "c": {"estimates": []},      # empty estimates -> excluded
+        }
+        assert library.compute_roi_excluded_count(hrfs, {"a", "b", "c"}) == 2
+
+    def test_zero_when_all_have_estimates(self):
+        hrfs = {
+            "a": {"estimates": [[1.0]]},
+            "b": {"estimates": [[2.0]]},
+        }
+        assert library.compute_roi_excluded_count(hrfs, {"a", "b"}) == 0
+
+    def test_skips_missing_keys(self):
+        hrfs = {"a": {"estimates": [[1.0]]}}
+        assert library.compute_roi_excluded_count(hrfs, {"a", "ghost"}) == 0
 
 
 class TestStateLibraryROI:
@@ -596,6 +669,177 @@ class TestStateLibraryROI:
         s.reset()
         assert s.library_roi_radius_m == 0.02
         assert s.library_roi_painted == set()
+
+
+class TestStateClusterRoiActive:
+    """PR #54: cluster ROI is gated by an explicit toggle (default off)
+    so a fresh page load shows raw HRFs with no mystery halo around
+    the default (0, 0, 0) centre."""
+
+    def test_default_is_off(self):
+        s = AppState()
+        assert s.cluster_roi_active is False
+
+    def test_reset_clears_to_off(self):
+        s = AppState()
+        s.cluster_roi_active = True
+        s.reset()
+        assert s.cluster_roi_active is False
+
+
+class TestStateClusterAtlasAlignment:
+    """PR #54: HRF -> MNI alignment state for atlas mode."""
+
+    def test_defaults_are_identity(self):
+        s = AppState()
+        assert s.cluster_atlas_alignment_affine is None
+        assert s.cluster_atlas_offset_x_mm == 0.0
+        assert s.cluster_atlas_offset_y_mm == 0.0
+        assert s.cluster_atlas_offset_z_mm == 0.0
+
+    def test_reset_clears_alignment(self):
+        import numpy as np
+        s = AppState()
+        s.cluster_atlas_alignment_affine = np.eye(4)
+        s.cluster_atlas_offset_x_mm = 10.0
+        s.cluster_atlas_offset_y_mm = -20.0
+        s.cluster_atlas_offset_z_mm = 5.0
+        s.reset()
+        assert s.cluster_atlas_alignment_affine is None
+        assert s.cluster_atlas_offset_x_mm == 0.0
+        assert s.cluster_atlas_offset_y_mm == 0.0
+        assert s.cluster_atlas_offset_z_mm == 0.0
+
+
+class TestStateLastSavedRoiPath:
+    def test_default_is_none(self):
+        s = AppState()
+        assert s.last_saved_roi_path is None
+
+    def test_reset_clears(self):
+        from pathlib import Path
+        s = AppState()
+        s.last_saved_roi_path = Path("/tmp/test_roi.json")
+        s.reset()
+        assert s.last_saved_roi_path is None
+
+
+class TestBuildAtlasAlignmentAffine:
+    """``_build_atlas_alignment_affine`` composes offsets + a 4x4
+    affine. Returns None for the identity case so callers can
+    fast-path the membership check."""
+
+    def test_returns_none_for_identity(self):
+        s = AppState()
+        assert library._build_atlas_alignment_affine(s) is None
+
+    def test_pure_offset(self):
+        import numpy as np
+        s = AppState()
+        s.cluster_atlas_offset_x_mm = 10.0
+        s.cluster_atlas_offset_y_mm = -20.0
+        s.cluster_atlas_offset_z_mm = 5.0
+        result = library._build_atlas_alignment_affine(s)
+        assert result is not None
+        np.testing.assert_array_equal(result[:3, 3], [10.0, -20.0, 5.0])
+        # Rotation part is identity.
+        np.testing.assert_array_equal(result[:3, :3], np.eye(3))
+
+    def test_pure_affine(self):
+        import numpy as np
+        s = AppState()
+        # 90-degree rotation about z.
+        s.cluster_atlas_alignment_affine = np.array([
+            [0.0, -1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        result = library._build_atlas_alignment_affine(s)
+        assert result is not None
+        np.testing.assert_allclose(
+            result, s.cluster_atlas_alignment_affine,
+        )
+
+    def test_compose_affine_and_offset(self):
+        """The offset translation is applied AFTER the affine."""
+        import numpy as np
+        s = AppState()
+        s.cluster_atlas_alignment_affine = np.eye(4)
+        s.cluster_atlas_offset_x_mm = 7.0
+        result = library._build_atlas_alignment_affine(s)
+        assert result is not None
+        np.testing.assert_array_equal(result[:3, 3], [7.0, 0.0, 0.0])
+
+
+class TestLooksOutOfMni:
+    """The atlas-mode warning trigger -- detects HRFs in MNE-head coords."""
+
+    def test_mni_coords_pass(self):
+        # MNI Y range is roughly -100 to +80. All-within examples.
+        hrfs = {
+            "a": {"location": [0.02, 0.05, 0.01]},   # 20, 50, 10 mm
+            "b": {"location": [-0.03, 0.04, 0.02]},
+            "c": {"location": [0.01, -0.06, 0.03]},
+        }
+        assert library._looks_out_of_mni(hrfs) is False
+
+    def test_mne_head_coords_flag(self):
+        # MNE head coords place Y around +60 to +120 mm for bundled HRFs.
+        hrfs = {
+            "a": {"location": [0.02, 0.11, 0.01]},   # 110 mm Y
+            "b": {"location": [-0.03, 0.12, 0.02]},  # 120 mm Y
+            "c": {"location": [0.01, 0.10, 0.03]},   # 100 mm Y -- just at threshold
+            "d": {"location": [0.02, 0.13, 0.04]},
+        }
+        assert library._looks_out_of_mni(hrfs) is True
+
+    def test_few_samples_does_not_flag(self):
+        """With only 1-2 sample HRFs we don't trust the heuristic."""
+        hrfs = {
+            "a": {"location": [0.02, 0.11, 0.01]},
+            "b": {"location": [-0.03, 0.12, 0.02]},
+        }
+        # Only 2 samples -- threshold requires >=3.
+        assert library._looks_out_of_mni(hrfs) is False
+
+    def test_ignores_missing_location(self):
+        hrfs = {
+            "a": {},
+            "b": {"location": None},
+            "c": {"location": [0.02, 0.05, 0.01]},
+        }
+        assert library._looks_out_of_mni(hrfs) is False
+
+
+class TestComputeRoiKeysByShapeWithAlignment:
+    """Atlas-mode membership applies the alignment affine before the
+    shape predicate. Pure-translation case is easy to verify."""
+
+    def test_alignment_translates_locations(self):
+        from hrfunc.spatial.shapes import Sphere
+        import numpy as np
+        # HRF at MNE-head (0.02, 0.11, 0.01) m == (20, 110, 10) mm.
+        # Sphere at MNI (20, 10, 10) mm radius 5. Without alignment,
+        # HRF is at (20, 110, 10) mm -- 100 mm away on Y -- outside.
+        # With alignment translating Y by -100, HRF arrives at
+        # (20, 10, 10) mm -- inside.
+        hrfs = {
+            "a": {
+                "location": [0.02, 0.11, 0.01],
+                "oxygenation": True,
+            },
+        }
+        sphere = Sphere(center_mm=(20.0, 10.0, 10.0), radius_mm=5.0)
+        # Without alignment -> empty.
+        assert library.compute_roi_keys_by_shape(hrfs, sphere) == set()
+        # With Y -= 100 alignment -> includes the HRF.
+        alignment = np.eye(4)
+        alignment[1, 3] = -100.0
+        result = library.compute_roi_keys_by_shape(
+            hrfs, sphere, alignment_affine=alignment,
+        )
+        assert result == {"a"}
 
 
 class TestStateClusterShape:
@@ -1038,6 +1282,40 @@ async def test_cluster_subtab_atlas_readout_shows_region_for_known_centre(user: 
     # region, or in background -- but the readout label itself must
     # render so we can be sure the wiring fires.
     await user.should_see("Region at centre:")
+
+
+async def test_cluster_subtab_roi_toggle_visible_default_off(user: User):
+    """PR #54: the ROI activate toggle lives at the top of the Cluster
+    sub-tab and starts in the off position. A fresh page therefore
+    shows raw HRFs, no halo, no shape overlay."""
+    global_state.reset()
+    global_state.library_hbo = type("FakeTree", (), {
+        "root": None,
+        "gather": lambda self, root: {},
+    })()
+    global_state.library_hbr = global_state.library_hbo
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    # Toggle label visible.
+    await user.should_see("ROI active")
+    # The state itself is off.
+    assert global_state.cluster_roi_active is False
+
+
+async def test_cluster_subtab_renders_atlas_alignment_in_atlas_mode(user: User):
+    """PR #54: switching to atlas mode reveals offset inputs + an
+    affine-upload widget + a status label. Sphere mode hides them."""
+    global_state.reset()
+    global_state.library_hbo = type("FakeTree", (), {
+        "root": None,
+        "gather": lambda self, root: {},
+    })()
+    global_state.library_hbr = global_state.library_hbo
+    global_state.cluster_shape = "atlas_region"
+    _mount_hrtree_route()
+    await user.open("/_test_hrtree")
+    await user.should_see("Atlas alignment")
+    await user.should_see("Alignment: identity")
 
 
 async def test_cluster_subtab_does_not_expose_box_shape(user: User):

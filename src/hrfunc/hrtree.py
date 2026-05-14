@@ -32,12 +32,18 @@ def _flatten_context_value(value):
 
 class tree:
 
-    def __init__(self, hrf_filename = None, **kwargs):
+    def __init__(self, hrf_filename = None, *, rich = False, **kwargs):
         """
         A k-d tree data structure for storing HRF estimates across NIRX space
 
         Arguments:
             - hrf_filename (str) - Filepath to json file containing HRF estimates
+            - rich (bool) - When True, retain the per-subject ``estimates`` +
+                ``locations`` lists from the JSON. Defaults to False for
+                back-compat (the v1.2 / v1.3.0 default), which strips both
+                lists at load time to save memory. Set rich=True when
+                downstream code (e.g. ROI averaging over subject estimates)
+                needs the underlying data.
             - context arguments - Any context item you'd like to include in the HRF search
             
         Functions:
@@ -95,7 +101,7 @@ class tree:
         self._canonical_cache = {}
 
         if self.hrf_filename and os.path.exists(self.hrf_filename):
-            self.load_hrfs(self.hrf_filename)
+            self.load_hrfs(self.hrf_filename, rich=rich)
             print(f"Tree initialized with HRFs from {hrf_filename}")
         else:
             print(f"Tree initialized without HRFs loaded...")
