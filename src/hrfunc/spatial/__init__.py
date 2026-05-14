@@ -29,17 +29,21 @@ Public surface:
 """
 
 from .affine import apply_affine, identity_affine
+from .atlas import Atlas, load_harvard_oxford_cortical
 from .coords import meters_to_mm, mm_to_meters
 from .point import HRFPoint
-from .shapes import Box, Shape, Sphere
+from .shapes import AtlasRegion, Box, Shape, Sphere
 
 __all__ = [
+    "Atlas",
+    "AtlasRegion",
     "Box",
     "HRFPoint",
     "Shape",
     "Sphere",
     "apply_affine",
     "identity_affine",
+    "load_harvard_oxford_cortical",
     "meters_to_mm",
     "mm_to_meters",
 ]

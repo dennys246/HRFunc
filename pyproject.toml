@@ -52,6 +52,7 @@ package-dir = {"" = "src"}
 packages = [
     "hrfunc",
     "hrfunc.assets",
+    "hrfunc.assets.atlases",
     "hrfunc.cli",
     "hrfunc.io",
     "hrfunc.gui",
@@ -64,6 +65,7 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 "hrfunc.assets" = ["*.png", "*.icns", "*.npz"]
+"hrfunc.assets.atlases" = ["*.nii.gz", "*.json"]
 "hrfunc.hrfs" = ["*.json"]
 
 [tool.pytest.ini_options]

@@ -17,17 +17,21 @@ Currently shipped:
   (rotatable-box drag handles, atlas-region oriented patches) can
   use it without retrofitting; the GUI's Cluster sub-tab doesn't
   yet expose rotation controls.
-
-Atlas-region membership lands in a follow-up PR with the Harvard-
-Oxford atlas integration.
+- :class:`AtlasRegion` — membership defined by an MNI label-volume
+  atlas (see :mod:`hrfunc.spatial.atlas`). A point is "inside" iff
+  the atlas labels its voxel as the chosen region. Used by the v1.3
+  Cluster sub-tab's atlas-region selection mode.
 """
 
 from __future__ import annotations
 
 import abc
-from typing import Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .atlas import Atlas
 
 
 class Shape(abc.ABC):
@@ -267,4 +271,53 @@ class Box(Shape):
         return (
             f"Box(center_mm=({cx:.2f}, {cy:.2f}, {cz:.2f}), "
             f"half_extents_mm=({hx:.2f}, {hy:.2f}, {hz:.2f}), {aligned})"
+        )
+
+
+class AtlasRegion(Shape):
+    """Spatial region defined by an MNI label-volume atlas region.
+
+    A point is "inside" iff the atlas labels its voxel as the chosen
+    region. Nearest-neighbour voxel sampling; out-of-volume points are
+    "outside" (not background -- callers occasionally distinguish, but
+    for membership the answer is the same).
+
+    Used by the v1.3 Cluster sub-tab's atlas-region selection mode.
+    The :class:`Atlas` instance carries the label volume + affine +
+    label table; this class is the thin :class:`Shape` adapter that
+    plugs atlas membership into the same ROI machinery
+    (:func:`hrfunc.gui.components.hrtree_panel.compute_roi_keys_by_shape`)
+    that sphere and box selection use.
+
+    Membership is read-only -- callers can't translate or rotate the
+    region (the atlas defines the geometry). For "select all HRFs in
+    Frontal Pole within a 5 mm box", future PRs will compose
+    :class:`AtlasRegion` with :class:`Box` via set intersection.
+    """
+
+    __slots__ = ("atlas", "region_name")
+
+    def __init__(self, atlas: "Atlas", region_name: str):
+        if atlas is None:
+            raise ValueError("atlas must not be None")
+        if not region_name:
+            raise ValueError("region_name must be a non-empty string")
+        if atlas.label_index(region_name) is None:
+            raise ValueError(
+                f"region_name {region_name!r} not present in atlas "
+                f"{atlas.name!r}"
+            )
+        self.atlas = atlas
+        self.region_name = region_name
+
+    def contains(self, xyz_mm: Sequence[float]) -> bool:
+        return self.atlas.contains_mm(xyz_mm, self.region_name)
+
+    def contains_batch(self, points_mm: np.ndarray) -> np.ndarray:
+        return self.atlas.contains_batch(points_mm, self.region_name)
+
+    def __repr__(self) -> str:
+        return (
+            f"AtlasRegion(atlas={self.atlas.name!r}, "
+            f"region_name={self.region_name!r})"
         )

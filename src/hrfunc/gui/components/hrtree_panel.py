@@ -38,8 +38,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 from nicegui import ui
 
+from ...spatial.atlas import load_harvard_oxford_cortical
 from ...spatial.coords import meters_to_mm
-from ...spatial.shapes import Box, Shape, Sphere
+from ...spatial.shapes import AtlasRegion, Box, Shape, Sphere
 from ...viz.brain_scene import (
     make_box_overlay_trace,
     make_sphere_overlay_trace,
@@ -87,7 +88,8 @@ FILTER_FIELDS = (
 # Available shape modes for the Cluster sub-tab's ROI selector.
 SHAPE_SPHERE = "sphere"
 SHAPE_BOX = "box"
-SHAPE_MODES = (SHAPE_SPHERE, SHAPE_BOX)
+SHAPE_ATLAS_REGION = "atlas_region"
+SHAPE_MODES = (SHAPE_SPHERE, SHAPE_BOX, SHAPE_ATLAS_REGION)
 
 
 def _resolve_cluster_oxygenation(state: AppState) -> Optional[bool]:
@@ -150,6 +152,22 @@ def _build_current_shape(state: AppState) -> Optional[Shape]:
                 state.cluster_box_half_z_mm,
             ),
         )
+    if state.cluster_shape == SHAPE_ATLAS_REGION:
+        # Atlas mode needs both the loaded atlas and a selected region.
+        # If either is missing we return None so callers fall back to
+        # "no ROI yet" UI (the save button disables, the viz skips the
+        # shape-membership filter).
+        if not state.cluster_atlas_label:
+            return None
+        atlas = load_harvard_oxford_cortical()
+        if atlas is None:
+            return None
+        try:
+            return AtlasRegion(atlas, state.cluster_atlas_label)
+        except ValueError:
+            # Label no longer in atlas (e.g. user state from a future
+            # version with a richer atlas). Treat as unselected.
+            return None
     if state.cluster_shape == SHAPE_SPHERE:
         return Sphere(
             center_mm=(
@@ -462,45 +480,92 @@ def _render_filter_subtab(state: AppState) -> None:
 
 
 def _render_cluster_subtab(state: AppState) -> None:
-    """The Cluster sub-tab -- ROI shape, sizing, and save action.
+    """The Cluster sub-tab -- ROI shape selection, sizing, save action.
 
-    Sphere-only for now (PR #49). The Box class lives in the spatial
-    layer as a primitive and the GUI's compute_roi_keys_by_shape /
-    save_roi_average paths already accept it, but the UI doesn't
-    expose Box mode -- an axis-aligned box has no anatomical fit for
-    cortex. Rotation-aware Box returns to the UI in v1.4 after the
-    PR #50 orientation refactor + the v1.4 drag-handle work.
+    Two shape modes since PR #53:
+
+    - **Sphere** (default): the centre + radius selection from
+      PR #49. Centre seeds from clicks in the viz; radius slider
+      lives in this sub-tab.
+    - **Atlas region**: pick a Harvard-Oxford cortical region from
+      a dropdown; the ROI is every HRF whose MNI coordinate lies in
+      that region's voxel mask. Region name + "Region at centre"
+      readout serve as the methods-section provenance line.
+
+    Box mode is hidden from the UI; the underlying class is still
+    available for the v1.4 rotatable-box UI work (PR #52 made it
+    orientation-aware).
 
     Contents:
 
-    - **Centre inputs**: three MNI-mm number inputs for x / y / z.
-      Auto-populated when the user clicks an HRF in the viz; can be
-      edited directly for free-floating selection.
-    - **Radius slider**: the ROI sphere radius. Moved here from the
-      Filter sub-tab so all ROI-shape controls live together.
+    - **Shape radio**: Sphere | Atlas region.
+    - **Centre inputs**: three MNI-mm number inputs. Visible in
+      both modes -- they drive the atlas readout even when not
+      driving membership.
+    - **Radius slider** (sphere only).
+    - **Region dropdown** (atlas only).
     - **Clear ROI button**: drops the anchor + painted set.
-    - **MNI readout**: a copy-pasteable summary like
-      ``"Centre: (-30.0, 22.0, 5.0) mm  ·  Sphere r=20.0 mm"`` -- the
-      kind of line a researcher pastes into a methods section.
-    - **Save ROI average**: writes the averaged trace + shape metadata
-      to the workspace folder via :func:`save_roi_average`.
-
-    Future: free-draw lasso ROI (PR #52) and atlas-region membership
-    (PR #51) add buttons here as they land.
+    - **MNI readout** + **Region-at-centre readout**: copy-pasteable
+      methods-section provenance.
+    - **Save ROI average**: writes the averaged trace + shape
+      metadata to the workspace folder.
     """
 
     @ui.refreshable
     def _body() -> None:
+        # Load the atlas lazily on first sub-tab render. The loader
+        # caches per-process so repeat renders pay nothing; sphere-only
+        # users still get the per-render cost (small, ~ms) but in
+        # exchange the atlas readout works in sphere mode too.
+        atlas = load_harvard_oxford_cortical()
+
         with ui.column().classes("w-full gap-3"):
             ui.label("Cluster").classes(
                 "text-xs uppercase opacity-60 tracking-wide"
             )
-            ui.label(
-                "Place the ROI sphere in MNI mm. Click an HRF in the "
-                "viz to seed the centre, or type coordinates directly."
-            ).classes("text-xs opacity-60")
+
+            # --- Shape radio -----------------------------------------
+            shape_options = {SHAPE_SPHERE: "Sphere"}
+            if atlas is not None:
+                shape_options[SHAPE_ATLAS_REGION] = "Atlas region"
+            # Defensive: if persisted state has atlas mode but atlas
+            # failed to load, fall back to sphere so the user isn't
+            # stuck on a dead option.
+            current_shape = state.cluster_shape
+            if current_shape not in shape_options:
+                current_shape = SHAPE_SPHERE
+                state.cluster_shape = SHAPE_SPHERE
+
+            def _on_shape_change(event) -> None:
+                new_shape = event.value
+                if new_shape not in shape_options:
+                    return
+                state.cluster_shape = new_shape
+                state.publish("hrtree_filter_changed", state.library_filter)
+                _body.refresh()
+
+            ui.radio(
+                shape_options,
+                value=current_shape,
+                on_change=_on_shape_change,
+            ).props("inline dense")
+
+            if state.cluster_shape == SHAPE_SPHERE:
+                ui.label(
+                    "Place the ROI sphere in MNI mm. Click an HRF in "
+                    "the viz to seed the centre, or type coordinates "
+                    "directly."
+                ).classes("text-xs opacity-60")
+            elif state.cluster_shape == SHAPE_ATLAS_REGION:
+                ui.label(
+                    "Pick a Harvard-Oxford cortical region. The ROI "
+                    "includes every HRF whose MNI coordinate falls "
+                    "inside the region's voxel mask."
+                ).classes("text-xs opacity-60")
 
             # --- Centre inputs (MNI mm) ------------------------------
+            # Always visible: drives the atlas readout in both modes,
+            # and is also the sphere centre in sphere mode.
             ui.label("Centre (MNI mm)").classes(
                 "text-xs uppercase opacity-60 tracking-wide"
             )
@@ -527,29 +592,49 @@ def _render_cluster_subtab(state: AppState) -> None:
                 _make_centre_input("y", "cluster_center_y_mm")
                 _make_centre_input("z", "cluster_center_z_mm")
 
-            # --- ROI radius (moved from Filter sub-tab in PR #49) ----
-            ui.label("ROI radius").classes(
-                "text-xs uppercase opacity-60 tracking-wide"
-            )
-            radius_label = ui.label(
-                f"{state.library_roi_radius_m * 100:.1f} cm"
-            ).classes("text-xs font-mono opacity-80")
+            # --- Sphere radius (sphere mode only) --------------------
+            if state.cluster_shape == SHAPE_SPHERE:
+                ui.label("ROI radius").classes(
+                    "text-xs uppercase opacity-60 tracking-wide"
+                )
+                radius_label = ui.label(
+                    f"{state.library_roi_radius_m * 100:.1f} cm"
+                ).classes("text-xs font-mono opacity-80")
 
-            def _on_radius_change(event) -> None:
-                # Slider is centimetres for human-readable steps; state
-                # stores metres so the geometric compute keeps MNI units.
-                cm = float(event.value)
-                state.library_roi_radius_m = cm / 100.0
-                radius_label.set_text(f"{cm:.1f} cm")
-                state.publish("hrtree_filter_changed", state.library_filter)
+                def _on_radius_change(event) -> None:
+                    cm = float(event.value)
+                    state.library_roi_radius_m = cm / 100.0
+                    radius_label.set_text(f"{cm:.1f} cm")
+                    state.publish(
+                        "hrtree_filter_changed", state.library_filter
+                    )
 
-            ui.slider(
-                min=0.5, max=10.0, step=0.1,
-                value=state.library_roi_radius_m * 100.0,
-                on_change=_on_radius_change,
-            ).props("dense")
+                ui.slider(
+                    min=0.5, max=10.0, step=0.1,
+                    value=state.library_roi_radius_m * 100.0,
+                    on_change=_on_radius_change,
+                ).props("dense")
 
-            # --- Clear ROI button (moved from Filter sub-tab) --------
+            # --- Atlas region dropdown (atlas mode only) -------------
+            if state.cluster_shape == SHAPE_ATLAS_REGION and atlas is not None:
+                ui.label("Atlas region").classes(
+                    "text-xs uppercase opacity-60 tracking-wide"
+                )
+
+                def _on_region_change(event) -> None:
+                    state.cluster_atlas_label = event.value or None
+                    state.publish(
+                        "hrtree_filter_changed", state.library_filter
+                    )
+
+                ui.select(
+                    options=atlas.region_names,
+                    value=state.cluster_atlas_label,
+                    label="Region",
+                    on_change=_on_region_change,
+                ).props("dense outlined").classes("w-full")
+
+            # --- Clear ROI button ------------------------------------
             def _on_clear_roi() -> None:
                 state.library_selected_hrf = None
                 state.library_roi_painted.clear()
@@ -560,11 +645,28 @@ def _render_cluster_subtab(state: AppState) -> None:
                 "Clear ROI", on_click=_on_clear_roi
             ).props("flat dense")
 
-            # --- MNI readout (copy-pasteable methods-section line) ---
+            # --- MNI + atlas readouts --------------------------------
             ui.separator()
             ui.label(_format_shape_readout(state)).classes(
                 "text-xs font-mono opacity-80 break-all"
             )
+            if atlas is not None:
+                # Atlas readout is shown in BOTH modes so sphere users
+                # can see "my centre sits in: Frontal Pole" without
+                # switching modes -- useful navigation aid.
+                region_at_centre = atlas.region_at((
+                    state.cluster_center_x_mm,
+                    state.cluster_center_y_mm,
+                    state.cluster_center_z_mm,
+                ))
+                centre_region_text = (
+                    f"Region at centre: {region_at_centre}"
+                    if region_at_centre is not None
+                    else "Region at centre: (outside atlas / background)"
+                )
+                ui.label(centre_region_text).classes(
+                    "text-xs font-mono opacity-70"
+                )
 
             # --- ROI status + Save button ----------------------------
             all_hrfs = gather_library_hrfs(state)
@@ -664,10 +766,10 @@ def _format_shape_readout(state: AppState) -> str:
     """One-line summary of the current Cluster shape, suitable for copy-paste.
 
     Branches on ``state.cluster_shape`` so when the box / lasso UIs
-    return in v1.4 / PR #52 this helper renders them too without
-    touching the call sites. Today (PR #49 sphere-only UI) the box
-    branch is unreachable from the GUI but stays here as the contract
-    for the spatial-layer ``cluster_shape`` field.
+    return in v1.4 / PR #54 this helper renders them too without
+    touching the call sites. Today the box branch is unreachable
+    from the GUI but stays here as the contract for the spatial-
+    layer ``cluster_shape`` field.
     """
     cx, cy, cz = (
         state.cluster_center_x_mm,
@@ -681,6 +783,9 @@ def _format_shape_readout(state: AppState) -> str:
         hz = state.cluster_box_half_z_mm
         dims = f"Box {hx * 2:.1f}x{hy * 2:.1f}x{hz * 2:.1f} mm"
         return f"{centre}  ·  {dims}"
+    if state.cluster_shape == SHAPE_ATLAS_REGION:
+        region = state.cluster_atlas_label or "(no region selected)"
+        return f"{centre}  ·  Atlas region: {region}"
     radius_mm = state.library_roi_radius_m * 1000.0
     return f"{centre}  ·  Sphere r={radius_mm:.1f} mm"
 
