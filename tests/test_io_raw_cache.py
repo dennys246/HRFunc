@@ -46,6 +46,16 @@ def fake_loader(monkeypatch, tmp_path):
     Returns a callable that creates fake snirf files in tmp_path for tests
     that need real on-disk paths. Tests can inspect ``calls`` to verify how
     many disk loads occurred.
+
+    Uses the direct ``RawCache`` class reference (already imported at module
+    top) rather than the ``"hrfunc.io.raw_cache.RawCache._load_from_disk"``
+    string target. monkeypatch's string form walks the dotted path via
+    attribute access -- ``getattr(hrfunc, "io")``, then ``getattr(io,
+    "raw_cache")``. That fails with ``AttributeError: module 'hrfunc' has
+    no attribute 'io'`` whenever a prior test in the full-suite run has
+    reloaded or cleared the ``hrfunc`` package's submodule attributes
+    (some GUI test fixtures do this). The class reference is captured at
+    import time and is immune to that pollution.
     """
     calls = []
 
@@ -54,8 +64,7 @@ def fake_loader(monkeypatch, tmp_path):
         return _FakeRaw(path)
 
     monkeypatch.setattr(
-        "hrfunc.io.raw_cache.RawCache._load_from_disk",
-        staticmethod(_fake_load),
+        RawCache, "_load_from_disk", staticmethod(_fake_load),
     )
 
     def _make_fake_snirf(name="scan.snirf"):
