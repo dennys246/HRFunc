@@ -1376,3 +1376,189 @@ async def test_filter_count_annotates_missing_location_hrfs(user: User):
     await user.open("/_test_hrtree")
     # Both HRFs match the (empty) filter; one lacks location.
     await user.should_see("not visualizable: missing location")
+
+
+# ---------------------------------------------------------------------------
+# PR #57: ADD MONTAGE per-channel auto-create
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_raw_with_locations(channel_specs):
+    """Build a synthetic MNE Raw with per-channel locations stamped on.
+
+    ``channel_specs`` is a list of ``(ch_name, (x_m, y_m, z_m))`` tuples.
+    The constructor uses ``mne.create_info`` (which produces zero
+    locations by default) and then writes the requested coords into
+    each channel's ``info['chs'][i]['loc'][:3]``. Other ``loc`` indices
+    (the optode positions for fNIRS, normal vectors for MEG) are left
+    at zero -- ``rois_from_raw`` only reads the first three slots.
+    """
+    import mne
+    import numpy as np
+
+    ch_names = [name for name, _ in channel_specs]
+    info = mne.create_info(
+        ch_names=ch_names, sfreq=10.0, ch_types="misc"
+    )
+    raw = mne.io.RawArray(
+        np.zeros((len(ch_names), 5)), info, verbose="ERROR"
+    )
+    for i, (_, loc) in enumerate(channel_specs):
+        raw.info["chs"][i]["loc"][:3] = list(loc)
+    return raw
+
+
+class TestStripOxygenationSuffix:
+    """``_strip_oxygenation_suffix`` normalises a per-channel name into
+    its source-detector label for the auto-created montage ROIs."""
+
+    def test_drops_trailing_hbo(self):
+        assert library._strip_oxygenation_suffix("S1_D1 hbo") == "S1_D1"
+
+    def test_drops_trailing_hbr(self):
+        assert library._strip_oxygenation_suffix("S1_D1 hbr") == "S1_D1"
+
+    def test_drops_trailing_wavelength(self):
+        assert library._strip_oxygenation_suffix("S2_D3 760") == "S2_D3"
+        assert library._strip_oxygenation_suffix("S2_D3 850nm") == "S2_D3"
+
+    def test_underscore_separator(self):
+        assert library._strip_oxygenation_suffix("S1_D1_hbo") == "S1_D1"
+
+    def test_hyphen_separator(self):
+        assert library._strip_oxygenation_suffix("S1_D1-hbo") == "S1_D1"
+
+    def test_case_insensitive(self):
+        assert library._strip_oxygenation_suffix("S1_D1 HBO") == "S1_D1"
+
+    def test_no_suffix_passes_through(self):
+        assert library._strip_oxygenation_suffix("canonical") == "canonical"
+
+
+class TestRoisFromRaw:
+    """``rois_from_raw`` is the pure helper behind the Cluster sub-tab's
+    "Add montage" button -- it iterates an MNE Raw's channel locations
+    and emits one sphere ROI per unique source-detector pair."""
+
+    def test_basic_dedupe_of_hbo_hbr_pair(self):
+        """HbO + HbR for the same source-detector midpoint collapse
+        to a single sphere -- not two duplicate spheres at the same
+        xyz."""
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.01, 0.02, 0.03)),
+            ("S1_D1 hbr", (0.01, 0.02, 0.03)),
+            ("S2_D1 hbo", (0.04, 0.02, 0.03)),
+            ("S2_D1 hbr", (0.04, 0.02, 0.03)),
+        ])
+        slots = library.rois_from_raw(raw)
+        assert len(slots) == 2
+        assert {s.name for s in slots} == {
+            "Montage: S1_D1", "Montage: S2_D1",
+        }
+
+    def test_meters_converted_to_mm(self):
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.025, -0.030, 0.012)),
+        ])
+        slots = library.rois_from_raw(raw)
+        assert len(slots) == 1
+        slot = slots[0]
+        # 0.025 m -> 25.0 mm, etc.
+        assert slot.center_x_mm == 25.0
+        assert slot.center_y_mm == -30.0
+        assert slot.center_z_mm == 12.0
+
+    def test_default_radius_is_per_channel_constant(self):
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.01, 0.02, 0.03)),
+        ])
+        slots = library.rois_from_raw(raw)
+        assert slots[0].radius_mm == library.DEFAULT_PER_CHANNEL_RADIUS_MM
+
+    def test_custom_radius_respected(self):
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.01, 0.02, 0.03)),
+        ])
+        slots = library.rois_from_raw(raw, radius_mm=7.5)
+        assert slots[0].radius_mm == 7.5
+
+    def test_zero_location_channels_skipped(self):
+        """MNE channels without a recorded location report (0, 0, 0).
+        Emitting a sphere at the origin would be meaningless and pile
+        every such channel on top of each other -- skip them."""
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.0, 0.0, 0.0)),
+            ("S2_D1 hbo", (0.04, 0.02, 0.03)),
+        ])
+        slots = library.rois_from_raw(raw)
+        assert len(slots) == 1
+        assert slots[0].name == "Montage: S2_D1"
+
+    def test_canonical_channel_skipped(self):
+        """The bundled library uses ``canonical`` as a sentinel
+        channel name; per-channel ROIs should not emit a sphere for
+        it (it has no real anatomical location)."""
+        raw = _make_fake_raw_with_locations([
+            ("canonical", (0.01, 0.02, 0.03)),
+            ("S1_D1 hbo", (0.04, 0.05, 0.06)),
+        ])
+        slots = library.rois_from_raw(raw)
+        assert [s.name for s in slots] == ["Montage: S1_D1"]
+
+    def test_oxygenation_filter_hbo_only(self):
+        """When the caller pins oxygenation to HbO, only HbO channels
+        contribute (used when the /library viz is in HbO-only mode
+        so the resulting montage matches the visible HRFs)."""
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.01, 0.02, 0.03)),
+            ("S1_D1 hbr", (0.01, 0.02, 0.03)),
+            ("S2_D1 hbo", (0.04, 0.02, 0.03)),
+        ])
+        slots = library.rois_from_raw(raw, library_oxygenation=True)
+        assert {s.name for s in slots} == {
+            "Montage: S1_D1", "Montage: S2_D1",
+        }
+
+    def test_oxygenation_filter_hbr_only(self):
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.01, 0.02, 0.03)),
+            ("S1_D1 hbr", (0.01, 0.02, 0.03)),
+            ("S2_D1 hbo", (0.04, 0.02, 0.03)),
+        ])
+        slots = library.rois_from_raw(raw, library_oxygenation=False)
+        # Only the s1_d1 hbr channel matches (s2_d1 has no hbr counterpart
+        # in this synthetic raw).
+        assert len(slots) == 1
+        assert slots[0].name == "Montage: S1_D1"
+
+    def test_micron_jitter_collapsed_by_dedupe(self):
+        """HbO and HbR sometimes report locations that differ by
+        microns due to MNE info-structure jitter. The dedupe key
+        rounds to 0.1 mm so the pair still collapses to one sphere."""
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.0100001, 0.0200001, 0.0300001)),
+            ("S1_D1 hbr", (0.0100000, 0.0200000, 0.0300000)),
+        ])
+        slots = library.rois_from_raw(raw)
+        assert len(slots) == 1
+
+    def test_empty_raw_returns_empty_list(self):
+        """A Raw with channels but no locations (every channel at the
+        zero sentinel) produces no ROIs at all."""
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.0, 0.0, 0.0)),
+            ("S1_D1 hbr", (0.0, 0.0, 0.0)),
+        ])
+        slots = library.rois_from_raw(raw)
+        assert slots == []
+
+    def test_all_slots_default_to_sphere(self):
+        """The "Add montage" feature only emits spheres (the natural
+        per-channel ROI shape). The user can switch a specific slot
+        to box / atlas mode afterwards if they want."""
+        raw = _make_fake_raw_with_locations([
+            ("S1_D1 hbo", (0.01, 0.02, 0.03)),
+            ("S2_D1 hbo", (0.04, 0.02, 0.03)),
+        ])
+        slots = library.rois_from_raw(raw)
+        assert all(s.shape == library.SHAPE_SPHERE for s in slots)
