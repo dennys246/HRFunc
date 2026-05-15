@@ -188,6 +188,21 @@ class AppState:
     preload_path: Optional[Path] = None
     busy: bool = False
     estimation_progress: Optional[Tuple[int, int, str]] = None
+    # PR #55a: scans the user has checked in the dataset tree. Stored as a
+    # set of resolved paths so equality is filesystem-stable across
+    # ScanEntry rebuilds (the manifest rebuilds its entries on every
+    # rescan, but the on-disk path is the constant identity). Empty set =
+    # "nothing checked"; the action buttons fall back to selected_scan
+    # in that case so single-scan workflows keep working. Lives outside
+    # the manifest so a project rescan that re-walks the directory
+    # doesn't silently wipe the user's selection.
+    checked_scan_paths: Set[Path] = field(default_factory=set)
+    # PR #55a: bulk-run progress -- (current_index, total, current_scan).
+    # Lives alongside ``estimation_progress`` (which tracks within-scan
+    # channel progress); the action panels render both lines during a
+    # bulk run. ``None`` when no bulk run is in flight. Set by
+    # ``workers.run_bulk_in_background`` as it advances.
+    bulk_progress: Optional[Tuple[int, int, ScanEntry]] = None
     last_error: Optional[str] = None
     subscribers: Dict[str, List[EventCallback]] = field(default_factory=dict)
     # Montage from the most recent HRF estimation (Sprint 3.3). Typed as Any to
@@ -572,6 +587,12 @@ class AppState:
         self.preload_path = None
         self.busy = False
         self.estimation_progress = None
+        # PR #55a: bulk-iterate state cleared on project switch -- the
+        # checked set is meaningless against a different manifest, and
+        # bulk_progress can't survive a busy=False without leaking a
+        # stale "still running" display.
+        self.checked_scan_paths.clear()
+        self.bulk_progress = None
         self.last_error = None
         self.subscribers.clear()
         self.montage = None

@@ -23,14 +23,31 @@ or the stringified path. Subjects and sessions with zero surviving scans
 are pruned, so the tree only shows the relevant subtree. ``render`` wires
 a ``ui.input`` above the tree that refreshes the body on change.
 
+Bulk action UI (PR #55a):
+- Tree renders with ``tick_strategy='leaf'`` so each scan has its own
+  checkbox. The ticked set is mirrored into ``state.checked_scan_paths``
+  (a set of resolved Paths) so it survives tab switches and re-renders.
+- Subjects + sessions are auto-expanded on first render so every scan
+  is immediately visible without clicking chevrons.
+- A "Select all" checkbox above the search filter ticks / unticks every
+  visible scan in one shot.
+
+Preprocess, HRFs, and Activity panels read ``checked_scan_paths`` and
+run their action sequentially across the whole set when it's non-empty.
+Inspect, Quality, and Export render the same checkbox UI for consistency
+but their handlers stay on ``state.selected_scan``.
+
 Public API:
     build_nodes(manifest, filter_text="") -> list[dict]   - tree node structure
+    all_group_node_ids(nodes) -> list[str]                - subject + session ids
+    all_leaf_node_ids(nodes) -> list[str]                 - scan-leaf ids
     render(state, on_select_scan=None)                    - render the tree + wire selection
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from nicegui import ui
@@ -43,6 +60,36 @@ logger = logging.getLogger(__name__)
 _NO_SESSION_LABEL = "(no session)"
 
 OnScanSelect = Callable[[Optional[ScanEntry]], None]
+
+
+def all_group_node_ids(nodes: List[dict]) -> List[str]:
+    """Collect every non-leaf node id from a ``build_nodes`` result.
+
+    Used to pre-populate the tree's ``expanded`` prop so subjects +
+    sessions render open on first paint (PR #55a). Leaf nodes (scans)
+    are not expandable, so we only need subject / session ids.
+    """
+    out: List[str] = []
+    for sub in nodes:
+        out.append(sub["id"])
+        for ses in sub.get("children", []):
+            out.append(ses["id"])
+    return out
+
+
+def all_leaf_node_ids(nodes: List[dict]) -> List[str]:
+    """Collect every leaf (scan) node id from a ``build_nodes`` result.
+
+    Used by the Select-All checkbox to tick every visible scan in one
+    shot (PR #55a). Filter-pruned scans are not in ``nodes`` so the
+    select-all spans whatever the user currently sees.
+    """
+    out: List[str] = []
+    for sub in nodes:
+        for ses in sub.get("children", []):
+            for scan in ses.get("children", []):
+                out.append(scan["id"])
+    return out
 
 
 def _scan_matches_filter(scan: ScanEntry, filter_text: str) -> bool:
@@ -133,6 +180,14 @@ def render(
     substring match against display_name or path. Filter state lives in a
     closure dict so the refreshable body always reads the latest value.
 
+    PR #55a additions:
+    - Per-scan checkboxes via ``tick_strategy='leaf'`` -- ticks mirror to
+      ``state.checked_scan_paths`` (set of resolved Paths).
+    - "Select all" checkbox above the filter input ticks every currently-
+      visible scan; unticking it clears the same set.
+    - Tree opens with all subjects + sessions expanded so every scan is
+      visible without the user clicking chevrons.
+
     Caller is responsible for placing this inside the desired layout
     (typically the left pane of a splitter).
     """
@@ -162,6 +217,25 @@ def render(
         if on_select_scan is not None:
             on_select_scan(scan)
 
+    def _on_tick(event) -> None:
+        """Mirror the tree's ticked-id list into ``state.checked_scan_paths``.
+
+        NiceGUI's tree emits the full list of currently-ticked leaf ids
+        on every change (not a delta), so this handler just rebuilds the
+        set from scratch. Resolved Paths are the storage form so equality
+        is filesystem-stable across manifest re-walks.
+        """
+        ticked_ids = event.value or []
+        new_set = set()
+        for node_id in ticked_ids:
+            scan = path_to_scan.get(node_id)
+            if scan is not None:
+                new_set.add(scan.path.resolve())
+        state.checked_scan_paths = new_set
+        # Re-render so the Select-all checkbox indeterminate / checked
+        # display tracks the new set without waiting on another event.
+        _tree_body.refresh()
+
     @ui.refreshable
     def _tree_body() -> None:
         nodes = build_nodes(state.manifest, filter_state["text"])
@@ -170,7 +244,74 @@ def render(
                 "opacity-60 text-xs p-2"
             )
             return
-        ui.tree(nodes, on_select=_on_select).classes("w-full")
+        leaf_ids = all_leaf_node_ids(nodes)
+        # PR #55a Select-all: tri-state checkbox driven by the visible
+        # leaf set. ``state.checked_scan_paths`` is the source of truth,
+        # but the UI checkbox needs a flat True/False -- intermediate
+        # selection renders as unchecked (Quasar's q-checkbox supports
+        # indeterminate but ui.checkbox doesn't expose it). Two clicks
+        # off a partial state cycles all-on -> all-off, which matches
+        # most users' expectation.
+        visible_paths = {
+            path_to_scan[node_id].path.resolve()
+            for node_id in leaf_ids
+            if node_id in path_to_scan
+        }
+        all_ticked = bool(visible_paths) and visible_paths.issubset(
+            state.checked_scan_paths
+        )
+
+        def _on_select_all(event) -> None:
+            if event.value:
+                state.checked_scan_paths = (
+                    state.checked_scan_paths | visible_paths
+                )
+            else:
+                state.checked_scan_paths = (
+                    state.checked_scan_paths - visible_paths
+                )
+            _tree_body.refresh()
+
+        n_checked = sum(
+            1 for p in visible_paths if p in state.checked_scan_paths
+        )
+        select_all_label = (
+            f"Select all  ({n_checked}/{len(visible_paths)} checked)"
+            if visible_paths
+            else "Select all"
+        )
+        ui.checkbox(
+            select_all_label,
+            value=all_ticked,
+            on_change=_on_select_all,
+        ).props("dense").classes("text-xs")
+
+        # Initial ``ticked`` reflects state.checked_scan_paths so the
+        # tree re-renders with the saved selection after tab switches.
+        ticked_initial = [
+            node_id for node_id in leaf_ids
+            if node_id in path_to_scan
+            and path_to_scan[node_id].path.resolve()
+            in state.checked_scan_paths
+        ]
+        # All subjects + sessions expanded by default so every scan is
+        # visible -- bulk-action workflows are the common case now and
+        # hunting through chevrons for each subject is friction.
+        expanded_initial = all_group_node_ids(nodes)
+        tree = ui.tree(
+            nodes,
+            on_select=_on_select,
+            tick_strategy="leaf",
+            on_tick=_on_tick,
+        ).classes("w-full")
+        # Apply initial expanded + ticked state via NiceGUI's
+        # ``Tree.expand()`` / ``Tree.tick()`` helpers (the supported
+        # path for setting initial state from Python; setting
+        # ``.expanded`` directly is not exposed as a public attribute).
+        if expanded_initial:
+            tree.expand(expanded_initial)
+        if ticked_initial:
+            tree.tick(ticked_initial)
 
     def _on_filter_change(event) -> None:
         filter_state["text"] = event.value or ""

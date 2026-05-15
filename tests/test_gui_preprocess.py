@@ -475,3 +475,72 @@ class TestGLMBaselineGuard:
         )
         # Deconvolution mode → user's choice respected
         assert snapshot.apply_baseline_correct is False
+
+
+# ---------------------------------------------------------------------------
+# PR #55a: bulk-iterate routing (no UI dispatch -- just the resolver)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveCheckedScans:
+    """``_resolve_checked_scans`` is the bridge between
+    ``state.checked_scan_paths`` (set of resolved Paths) and the
+    ScanEntry list a panel's bulk-run loop walks. Pure helper, easy
+    to test."""
+
+    def _state_with_manifest(self, tmp_path):
+        from hrfunc.gui.state import AppState
+        from hrfunc.io.manifest import Manifest, ScanEntry
+
+        scans = [
+            ScanEntry(format="snirf", path=tmp_path / "sub-01/a.snirf",
+                      display_name="A"),
+            ScanEntry(format="snirf", path=tmp_path / "sub-02/b.snirf",
+                      display_name="B"),
+            ScanEntry(format="snirf", path=tmp_path / "sub-03/c.snirf",
+                      display_name="C"),
+        ]
+        s = AppState()
+        s.manifest = Manifest(root=tmp_path, scans=scans)
+        return s, scans
+
+    def test_empty_checked_set_returns_empty_list(self, tmp_path):
+        from hrfunc.gui.components.preprocess_panel import (
+            _resolve_checked_scans,
+        )
+
+        s, _ = self._state_with_manifest(tmp_path)
+        assert _resolve_checked_scans(s) == []
+
+    def test_resolves_in_manifest_order(self, tmp_path):
+        """Even when the user ticks scans in a different order, the
+        resolver returns them in manifest order so the bulk run has a
+        stable iteration order (matches the visual top-down tree)."""
+        from hrfunc.gui.components.preprocess_panel import (
+            _resolve_checked_scans,
+        )
+
+        s, scans = self._state_with_manifest(tmp_path)
+        # Tick last + first; expect ordering [first, last].
+        s.checked_scan_paths = {
+            scans[2].path.resolve(), scans[0].path.resolve(),
+        }
+        resolved = _resolve_checked_scans(s)
+        assert [r.display_name for r in resolved] == ["A", "C"]
+
+    def test_stale_path_silently_dropped(self, tmp_path):
+        """Paths that no longer match a manifest scan (e.g. after a
+        rescan removed a file) are silently skipped -- the run shouldn't
+        fail just because a previously-checked file vanished."""
+        from hrfunc.gui.components.preprocess_panel import (
+            _resolve_checked_scans,
+        )
+
+        s, scans = self._state_with_manifest(tmp_path)
+        s.checked_scan_paths = {
+            scans[0].path.resolve(),
+            tmp_path / "ghost.snirf",  # not in manifest
+        }
+        resolved = _resolve_checked_scans(s)
+        assert len(resolved) == 1
+        assert resolved[0].display_name == "A"
