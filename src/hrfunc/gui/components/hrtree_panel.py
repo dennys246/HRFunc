@@ -624,6 +624,17 @@ def _render_cluster_subtab(state: AppState) -> None:
                 "without a default ROI applied."
             )
 
+            # --- Multi-ROI list (PR #55) ----------------------------
+            # The active ROI is what the shape / centre / radius / atlas
+            # widgets below operate on (proxy properties on AppState).
+            # ADD ROI appends a fresh slot at defaults; clicking a row
+            # switches the active index; the trash icon deletes the
+            # row (refusing to drop below one slot -- the proxy
+            # properties need a target). The list is scrollable so a
+            # large montage doesn't push the rest of the sub-tab off
+            # screen.
+            _render_roi_list(state, _body)
+
             # --- Shape radio -----------------------------------------
             shape_options = {SHAPE_SPHERE: "Sphere"}
             if atlas is not None:
@@ -745,14 +756,29 @@ def _render_cluster_subtab(state: AppState) -> None:
                 _render_atlas_alignment_section(state, _body)
 
             # --- Clear ROI button ------------------------------------
+            # PR #55: when there are 2+ ROIs in the list, CLEAR ROI
+            # deletes the active slot and advances to the prior one.
+            # When there's only one ROI left, it resets that slot to
+            # defaults rather than deleting it -- the proxy properties
+            # need at least one slot to point at, and "clear" on a
+            # fresh page shouldn't make the list disappear entirely.
+            # Library-side selection (``library_selected_hrf``) is
+            # also cleared so the detail pane returns to its empty
+            # state for the new active slot.
             def _on_clear_roi() -> None:
+                state.clear_active_roi()
                 state.library_selected_hrf = None
-                state.library_roi_painted.clear()
                 state.publish("hrtree_selection_changed", None)
                 state.publish("hrtree_filter_changed", state.library_filter)
+                _body.refresh()
 
+            clear_label = (
+                "Clear ROI"
+                if len(state.cluster_rois) <= 1
+                else "Delete active ROI"
+            )
             ui.button(
-                "Clear ROI", on_click=_on_clear_roi
+                clear_label, on_click=_on_clear_roi
             ).props("flat dense")
 
             # --- MNI + atlas readouts --------------------------------
@@ -818,68 +844,130 @@ def _render_cluster_subtab(state: AppState) -> None:
                     ).classes("text-xs opacity-50 italic")
 
             def _on_save_roi() -> None:
-                # Recompute at click time so we save what the user sees
-                # right now (state may have changed between mount and
-                # click).
+                # PR #55: walk every slot in cluster_rois, build a
+                # per-ROI entry for each one that has enough data to
+                # average, and write a single montage.json with the
+                # whole list. Slots that fail the averaging gate
+                # ("fewer than 2 subject estimates") are skipped --
+                # the notify at the end says how many were saved /
+                # skipped so the user knows nothing was silently lost.
                 _matched = filter_by_oxygenation(
                     apply_filter(gather_library_hrfs(state),
                                  state.library_filter),
                     state.library_oxygenation,
                 )
-                _shape = _build_current_shape(state)
-                _oxy = _resolve_cluster_oxygenation(state)
-                _alignment = _alignment_for_shape(state, _shape)
-                _roi_keys = compute_roi_keys_by_shape(
-                    _matched, _shape, state.library_roi_painted,
-                    oxygenation_filter=_oxy,
-                    alignment_affine=_alignment,
-                )
-                _result = compute_roi_average(_matched, _roi_keys)
-                if _result is None:
+
+                entries: list = []
+                skipped: list = []
+                original_index = state.cluster_active_index
+                original_anchor = state.library_selected_hrf
+                try:
+                    for i, slot in enumerate(state.cluster_rois):
+                        # Make the slot active so the proxy-based
+                        # helpers (_build_current_shape,
+                        # _resolve_cluster_oxygenation, etc.) read its
+                        # state. The save handler restores the original
+                        # active index in the finally block.
+                        state.cluster_active_index = i
+                        state.library_selected_hrf = slot.anchor
+
+                        _shape = _build_current_shape(state)
+                        if _shape is None:
+                            skipped.append((slot.name, "no shape"))
+                            continue
+                        _oxy = _resolve_cluster_oxygenation(state)
+                        _alignment = _alignment_for_shape(state, _shape)
+                        _roi_keys = compute_roi_keys_by_shape(
+                            _matched, _shape, slot.painted,
+                            oxygenation_filter=_oxy,
+                            alignment_affine=_alignment,
+                        )
+                        _result = compute_roi_average(_matched, _roi_keys)
+                        if _result is None:
+                            skipped.append(
+                                (slot.name, "insufficient estimates")
+                            )
+                            continue
+                        _mean, _std, _n_subjects, _n_channels = _result
+                        _sfreq = _resolve_roi_sfreq(
+                            slot.anchor, _matched, _roi_keys
+                        )
+                        from ..workspace_io import build_roi_entry
+                        entries.append(
+                            build_roi_entry(
+                                roi_keys=_roi_keys,
+                                hrf_mean=_mean,
+                                hrf_std=_std,
+                                sfreq=_sfreq,
+                                shape=_shape,
+                                anchor=slot.anchor,
+                                library_filter=state.library_filter,
+                                oxygenation_filter=_oxy,
+                                name=slot.name,
+                            )
+                        )
+                finally:
+                    state.cluster_active_index = original_index
+                    state.library_selected_hrf = original_anchor
+
+                if not entries:
                     ui.notify(
-                        "ROI has fewer than 2 averageable subject "
-                        "estimates.",
+                        "No ROI in the montage has enough data to "
+                        "average. Widen a shape, paint more neighbours, "
+                        "or seed a different centre.",
                         type="warning",
                     )
                     return
-                _mean, _std, _n_subjects, _n_channels = _result
-                _anchor = state.library_selected_hrf
-                _sfreq = _resolve_roi_sfreq(_anchor, _matched, _roi_keys)
 
-                from ..workspace_io import save_roi_average, workspace_dir
+                # Alignment is a global per-scan property of the HRF
+                # library's coord frame (locked decision 2026-05-14) --
+                # one block at the wrapper level for all ROIs.
+                from ..workspace_io import save_montage, workspace_dir
                 try:
-                    out_path = save_roi_average(
-                        roi_keys=_roi_keys,
-                        hrf_mean=_mean,
-                        hrf_std=_std,
-                        sfreq=_sfreq,
-                        shape=_shape,
-                        anchor=_anchor,
-                        library_filter=state.library_filter,
-                        oxygenation_filter=_oxy,
+                    out_path = save_montage(
+                        rois=entries,
+                        alignment_offset_mm=(
+                            float(state.cluster_atlas_offset_x_mm),
+                            float(state.cluster_atlas_offset_y_mm),
+                            float(state.cluster_atlas_offset_z_mm),
+                        ),
+                        alignment_affine=state.cluster_atlas_alignment_affine,
                     )
                     state.last_saved_roi_path = out_path
-                    ui.notify(
-                        f"Saved ROI average to {out_path.name} "
-                        f"({workspace_dir()})",
-                        type="positive",
+                    saved_msg = (
+                        f"Saved montage ({len(entries)} ROI"
+                        f"{'s' if len(entries) != 1 else ''}) to "
+                        f"{out_path.name} ({workspace_dir()})"
                     )
-                    # Re-render so the persistent "Last saved" label
-                    # below picks up the new path immediately.
+                    if skipped:
+                        names = ", ".join(name for name, _ in skipped)
+                        saved_msg += (
+                            f". Skipped {len(skipped)}: {names}"
+                        )
+                    ui.notify(saved_msg, type="positive")
                     _body.refresh()
                 except Exception as exc:  # noqa: BLE001
-                    logger.exception("save ROI average failed: %s", exc)
+                    logger.exception("save montage failed: %s", exc)
                     ui.notify(
                         f"Save failed: {type(exc).__name__}: {exc}",
                         type="negative",
                     )
 
+            save_label = (
+                "Save ROI average"
+                if len(state.cluster_rois) <= 1
+                else f"Save montage ({len(state.cluster_rois)} ROIs)"
+            )
             save_btn = ui.button(
-                "Save ROI average",
+                save_label,
                 icon="download",
                 on_click=_on_save_roi,
             ).props("color=primary dense")
-            if not can_save:
+            # Disable only when EVERY slot fails the averaging gate.
+            # With multiple ROIs we let the user click even if the
+            # active slot is invalid -- the iteration handles per-slot
+            # skips and the notify spells out what was saved.
+            if not can_save and len(state.cluster_rois) <= 1:
                 save_btn.props("disable")
 
             # --- Persistent "last saved" feedback (PR #54) ----------
@@ -980,6 +1068,132 @@ def _looks_out_of_mni(hrfs: Dict[str, Dict[str, Any]]) -> bool:
         if sampled >= 8:
             break
     return sampled >= 3 and over_threshold >= 3
+
+
+def _render_roi_list(state: AppState, body_refreshable) -> None:
+    """Render the multi-ROI list (PR #55).
+
+    Layout:
+        +-------------------------------------------+
+        | ROIs                              [+ ADD] |
+        | > [active] ROI 1                       x  |
+        |   ROI 2                                x  |
+        |   ROI 3                                x  |
+        +-------------------------------------------+
+
+    Clicking a row switches the active index; the trash icon deletes
+    that row. The list is scrollable (capped at ~8 rows visible)
+    so a long montage doesn't push the rest of the Cluster sub-tab
+    off screen.
+
+    ``body_refreshable`` is the cluster sub-tab's ``@ui.refreshable``
+    body so list mutations re-render the sub-tab and the shape
+    widgets pick up the new active slot.
+    """
+
+    def _refresh_all() -> None:
+        body_refreshable.refresh()
+        state.publish("hrtree_filter_changed", state.library_filter)
+
+    def _on_add() -> None:
+        state.add_roi()
+        _refresh_all()
+
+    def _on_select(index: int) -> None:
+        # Re-seed the library_selected_hrf from the slot's anchor so
+        # the detail pane + viz click-state mirror what the active
+        # ROI was last anchored on. None is fine -- detail pane shows
+        # its empty state.
+        state.set_active_roi(index)
+        state.library_selected_hrf = state.active_roi.anchor
+        state.publish(
+            "hrtree_selection_changed",
+            None if state.active_roi.anchor is None
+            else state.active_roi.anchor.get("_key"),
+        )
+        _refresh_all()
+
+    def _on_delete(index: int) -> None:
+        # Use clear_active_roi semantics, but delete the targeted
+        # index rather than always the active. Switch active there
+        # first so the helper's "remove active, walk back one" logic
+        # applies to the right slot.
+        state.set_active_roi(index)
+        state.clear_active_roi()
+        state.library_selected_hrf = state.active_roi.anchor
+        _refresh_all()
+
+    with ui.row().classes("w-full items-center justify-between"):
+        ui.label("ROIs").classes(
+            "text-xs uppercase opacity-60 tracking-wide"
+        )
+        ui.button(
+            "Add ROI", icon="add", on_click=_on_add,
+        ).props("flat dense color=primary")
+
+    # Cap the visible height so a long montage scrolls inside the
+    # sub-tab instead of stretching the page. ~8 rows at ~32px each.
+    with ui.column().classes(
+        "w-full gap-1 overflow-auto"
+    ).style("max-height: 256px"):
+        for i, slot in enumerate(state.cluster_rois):
+            is_active = i == state.cluster_active_index
+            row_classes = (
+                "w-full items-center gap-2 px-2 py-1 rounded cursor-pointer "
+                + (
+                    "bg-amber-50 dark:bg-amber-900/30 "
+                    "border border-amber-400"
+                    if is_active
+                    else "hover:bg-gray-100 dark:hover:bg-gray-800"
+                )
+            )
+            with ui.row().classes(row_classes).on(
+                "click", lambda _e=None, idx=i: _on_select(idx)
+            ):
+                # Active indicator + shape glyph + name.
+                shape_glyph = {
+                    SHAPE_SPHERE: "radio_button_unchecked",
+                    SHAPE_BOX: "crop_square",
+                    SHAPE_ATLAS_REGION: "map",
+                }.get(slot.shape, "radio_button_unchecked")
+                ui.icon(
+                    "arrow_right" if is_active else "circle",
+                    size="sm" if is_active else "xs",
+                ).classes(
+                    "opacity-80" if is_active else "opacity-30"
+                )
+                ui.icon(shape_glyph, size="sm").classes("opacity-70")
+                with ui.column().classes("flex-1 gap-0"):
+                    ui.label(slot.name).classes(
+                        "text-sm "
+                        + ("font-semibold" if is_active else "")
+                    )
+                    # Secondary line: shape-specific summary so the
+                    # user can tell ROIs apart without clicking.
+                    ui.label(_describe_slot(slot)).classes(
+                        "text-xs opacity-60 font-mono"
+                    )
+                # Stop propagation on the delete click so it doesn't
+                # also fire the row's _on_select.
+                ui.button(
+                    icon="delete_outline",
+                    on_click=lambda _e=None, idx=i: _on_delete(idx),
+                ).props("flat dense round size=sm").classes("opacity-60")
+
+
+def _describe_slot(slot) -> str:
+    """One-line summary of a ROISlot for the list secondary text."""
+    if slot.shape == SHAPE_ATLAS_REGION:
+        return slot.atlas_label or "(no region)"
+    centre = f"({slot.center_x_mm:.0f}, {slot.center_y_mm:.0f}, {slot.center_z_mm:.0f})"
+    if slot.shape == SHAPE_BOX:
+        return (
+            f"box {centre} ±"
+            f"({slot.box_half_x_mm:.0f},"
+            f"{slot.box_half_y_mm:.0f},"
+            f"{slot.box_half_z_mm:.0f}) mm"
+        )
+    return f"sphere {centre} r={slot.radius_mm:.0f} mm"
 
 
 def _render_atlas_alignment_section(state: AppState, body_refreshable) -> None:
@@ -1176,7 +1390,13 @@ def _render_viz_pane(state: AppState) -> None:
                 # A plain click also resets the painted set -- the user is
                 # picking a fresh anchor, so accumulated shift-hover paint
                 # from a prior anchor shouldn't carry over.
-                state.library_selected_hrf = {**hrf, "_key": hrf_key}
+                anchor_dict = {**hrf, "_key": hrf_key}
+                state.library_selected_hrf = anchor_dict
+                # PR #55: also stamp the anchor onto the *active* ROI
+                # slot so it travels with the slot (and into the saved
+                # montage). Pre-PR-#55 the anchor was a single global
+                # field; now each ROI keeps its own.
+                state.active_roi.anchor = anchor_dict
                 # Seed the Cluster sub-tab's shape centre from the clicked
                 # HRF so sphere mode's behaviour matches the v1.2 "click
                 # an HRF, sphere centres on it" workflow even though the

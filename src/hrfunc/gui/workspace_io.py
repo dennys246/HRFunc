@@ -26,9 +26,16 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Schema version for the montage.json file. Bump when the wrapper or
+# per-ROI block changes shape in a way readers need to detect. ROIs
+# inside the list keep the per-ROI single-file schema that pre-PR-#55
+# audit scripts already understand (anchor / location / hrf_mean /
+# context.roi_*), so most consumers can skim past the wrapper.
+MONTAGE_SCHEMA_VERSION = "1.3"
 
 
 def workspace_dir() -> Path:
@@ -63,60 +70,31 @@ def _safe_filename_fragment(name: str) -> str:
     return sanitized.strip("._") or "untitled"
 
 
-def save_roi_average(
+def build_roi_entry(
     *,
     roi_keys: Iterable[str],
     hrf_mean: Any,
     hrf_std: Any,
     sfreq: float,
-    # Anchor is optional in PR #49 to support free-floating shape ROIs.
-    # When a click-anchor IS set, its location / oxygenation / context
-    # ride into the saved JSON so the file matches the v1.2 schema and
-    # can still be re-loaded into ``hrfunc.tree``. When the anchor is
-    # None, the ROI's shape centre stands in as the saved location and
-    # the saved oxygenation comes from ``oxygenation_filter``.
     anchor: Optional[Dict[str, Any]] = None,
-    # Spatial-layer Shape describing the ROI extent. Defaults to None
-    # to keep the v1.2 anchor + radius_m call sites compatible.
     shape: Optional[Any] = None,
-    # Pre-PR-#49 legacy field. When the new ``shape`` is provided this
-    # is ignored for geometry but still recorded in the JSON as the
-    # ``roi_radius_m`` context key (v1.2 audit scripts read it).
     radius_m: Optional[float] = None,
     library_filter: Optional[Dict[str, Any]] = None,
-    # Oxygenation that the membership computation filtered on (True for
-    # HbO, False for HbR, None for mixed). Used to set the saved
-    # ``oxygenation`` field when there's no anchor.
     oxygenation_filter: Optional[bool] = None,
-    workspace: Optional[Path] = None,
-) -> Path:
-    """Save an ROI-averaged HRF to the workspace folder.
+    name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the per-ROI block of a montage.json file.
 
-    The output JSON extends the standard HRF entry schema (so it can
-    be re-loaded into ``hrfunc.tree`` if desired) with ROI provenance
-    fields so a researcher can audit what went into the average:
+    Pure -- no I/O, no clocks except for the ``saved_at`` timestamp
+    that's stamped at construction time. Same content as the pre-PR-#55
+    single-file ``roi_*.json`` payload (anchor / location / hrf_mean /
+    context.roi_*), plus an optional ``name`` field for the per-ROI
+    display label in the multi-ROI list.
 
-    - ``hrf_mean`` / ``hrf_std`` -- the averaged trace + per-sample std
-    - ``sfreq`` -- sampling rate
-    - ``oxygenation`` -- anchor's oxygenation when present; otherwise
-      the explicit ``oxygenation_filter``; falls back to ``None``
-      when neither is available.
-    - ``location`` -- anchor's location when present; otherwise the
-      shape's centre (converted from MNI mm into MNE-meter coords so
-      the saved JSON round-trips back into ``hrfunc.tree`` without
-      unit fixups).
-    - ``context`` -- extended with ROI metadata: anchor key (or
-      ``None`` for free-floating), shape descriptor, member keys,
-      library filter that was active.
-
-    File name: ``roi_<anchor_or_shape_key>_<YYYYMMDDTHHMMSSZ>.json``,
-    placed in the workspace folder. Returns the absolute Path.
-
-    Module-level so tests can call it without the GUI.
+    Extracted from ``save_roi_average`` so ``save_montage`` can build
+    each ROI's block via the same path. Keeping it pure also lets
+    tests inspect the entry shape without exercising disk I/O.
     """
-    if workspace is None:
-        workspace = workspace_dir()
-
     import numpy as np
 
     mean_list = np.asarray(hrf_mean).tolist()
@@ -238,7 +216,7 @@ def save_roi_average(
     ):
         context_extra["roi_radius_m"] = float(shape.radius_mm) / 1000.0
 
-    payload: Dict[str, Any] = {
+    entry: Dict[str, Any] = {
         "hrf_mean": mean_list,
         "hrf_std": std_list,
         "sfreq": float(sfreq),
@@ -249,23 +227,184 @@ def save_roi_average(
             **context_extra,
         },
     }
+    if name:
+        entry["name"] = name
+    return entry
+
+
+def _entry_filename_fragment(entry: Dict[str, Any]) -> str:
+    """Pick a recognisable filename fragment for a single ROI entry.
+
+    Preference order matches the pre-PR-#55 ``save_roi_average``
+    convention: anchor key first, then a ``freefloat_<shape>`` stand-
+    in derived from the shape descriptor, then ``freefloat_unknown``.
+    """
+    anchor_key = entry.get("context", {}).get("roi_anchor_key")
+    if anchor_key:
+        return _safe_filename_fragment(anchor_key)
+    shape_desc = entry.get("context", {}).get("roi_shape") or {}
+    shape_type = shape_desc.get("type") if isinstance(shape_desc, dict) else None
+    if shape_type:
+        return _safe_filename_fragment(f"freefloat_{shape_type}")
+    return "freefloat_unknown"
+
+
+def _build_alignment_block(
+    alignment_offset_mm: Optional[Tuple[float, float, float]],
+    alignment_affine: Optional[Any],
+) -> Dict[str, Any]:
+    """Build the wrapper's ``alignment`` block.
+
+    Alignment is a property of the HRF library's coord frame, not of
+    any individual ROI (locked decision 2026-05-14 -- see the
+    v1-3-spatial-viz-compartmentalization memory). The wrapper carries
+    it once for the whole montage.
+
+    ``offset_mm`` is always present (zeros when unset) so readers
+    don't have to special-case its absence. ``affine`` is null when
+    the user hasn't loaded one.
+    """
+    import numpy as np
+
+    offset = alignment_offset_mm or (0.0, 0.0, 0.0)
+    if alignment_affine is None:
+        affine_block: Optional[List[List[float]]] = None
+    else:
+        affine_block = np.asarray(alignment_affine, dtype=np.float64).tolist()
+    return {
+        "offset_mm": [float(v) for v in offset],
+        "affine": affine_block,
+    }
+
+
+def save_montage(
+    *,
+    rois: Sequence[Dict[str, Any]],
+    alignment_offset_mm: Optional[Tuple[float, float, float]] = None,
+    alignment_affine: Optional[Any] = None,
+    workspace: Optional[Path] = None,
+) -> Path:
+    """Write a multi-ROI montage to the workspace as a single JSON.
+
+    Schema:
+
+    .. code-block:: json
+
+        {
+          "version": "1.3",
+          "alignment": {
+            "offset_mm": [dx, dy, dz],
+            "affine": [[...], ...] | null
+          },
+          "rois": [<per-ROI entry>, ...]
+        }
+
+    Each per-ROI entry is the pre-PR-#55 single-file payload (anchor
+    metadata + ROI provenance under ``context.roi_*``). Build entries
+    with :func:`build_roi_entry`. Caller is responsible for excluding
+    ROIs that don't average (the canonical guard is
+    ``compute_roi_average() is None``).
+
+    Filename: ``montage_<descriptor>_<YYYYMMDDTHHMMSSZ>.json``. The
+    descriptor is the first ROI's anchor key (or shape stand-in) so
+    single-ROI montages keep the recognisable filename shape of the
+    legacy single-file save; multi-ROI montages get the first ROI's
+    fragment plus a ``_plus<N-1>`` suffix.
+    """
+    if not rois:
+        raise ValueError("save_montage requires at least one ROI entry")
+
+    if workspace is None:
+        workspace = workspace_dir()
+
+    payload: Dict[str, Any] = {
+        "version": MONTAGE_SCHEMA_VERSION,
+        "alignment": _build_alignment_block(
+            alignment_offset_mm, alignment_affine
+        ),
+        "rois": list(rois),
+    }
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    # Filename fragment: anchor key first (v1.2 convention), else a
-    # shape-derived stand-in so free-floating saves still have a
-    # human-recognisable prefix.
-    if anchor_key:
-        fragment = _safe_filename_fragment(anchor_key)
-    elif shape_descriptor is not None:
-        fragment = _safe_filename_fragment(
-            f"freefloat_{shape_descriptor.get('type', 'shape')}"
-        )
-    else:
-        fragment = "freefloat_unknown"
-    out_path = workspace / f"roi_{fragment}_{timestamp}.json"
+    head_fragment = _entry_filename_fragment(rois[0])
+    if len(rois) > 1:
+        head_fragment = f"{head_fragment}_plus{len(rois) - 1}"
+    out_path = workspace / f"montage_{head_fragment}_{timestamp}.json"
 
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
 
-    logger.info("Saved ROI average to %s", out_path)
+    logger.info("Saved montage (%d ROIs) to %s", len(rois), out_path)
     return out_path
+
+
+def save_roi_average(
+    *,
+    roi_keys: Iterable[str],
+    hrf_mean: Any,
+    hrf_std: Any,
+    sfreq: float,
+    # Anchor is optional in PR #49 to support free-floating shape ROIs.
+    # When a click-anchor IS set, its location / oxygenation / context
+    # ride into the saved JSON so the file matches the v1.2 schema and
+    # can still be re-loaded into ``hrfunc.tree``. When the anchor is
+    # None, the ROI's shape centre stands in as the saved location and
+    # the saved oxygenation comes from ``oxygenation_filter``.
+    anchor: Optional[Dict[str, Any]] = None,
+    # Spatial-layer Shape describing the ROI extent. Defaults to None
+    # to keep the v1.2 anchor + radius_m call sites compatible.
+    shape: Optional[Any] = None,
+    # Pre-PR-#49 legacy field. When the new ``shape`` is provided this
+    # is ignored for geometry but still recorded in the JSON as the
+    # ``roi_radius_m`` context key (v1.2 audit scripts read it).
+    radius_m: Optional[float] = None,
+    library_filter: Optional[Dict[str, Any]] = None,
+    # Oxygenation that the membership computation filtered on (True for
+    # HbO, False for HbR, None for mixed). Used to set the saved
+    # ``oxygenation`` field when there's no anchor.
+    oxygenation_filter: Optional[bool] = None,
+    name: Optional[str] = None,
+    # PR #55: alignment is now a wrapper-level property of the
+    # montage, not of any single ROI. ``save_roi_average`` accepts it
+    # for callers that want to write a single-ROI montage with the
+    # alignment already known; defaults to identity / zeros so existing
+    # callers keep producing alignment=None / zero-offset montages.
+    alignment_offset_mm: Optional[Tuple[float, float, float]] = None,
+    alignment_affine: Optional[Any] = None,
+    workspace: Optional[Path] = None,
+) -> Path:
+    """Save a single-ROI average to the workspace as a 1-ROI montage.
+
+    PR #55 unified the on-disk format: every save -- single ROI or
+    multi-ROI montage -- writes the same wrapper schema with a list
+    of ROI entries. ``save_roi_average`` builds a 1-entry list and
+    calls :func:`save_montage`. The pre-PR-#55 ``roi_<key>_<ts>.json``
+    filename is replaced by ``montage_<key>_<ts>.json`` (same
+    descriptive fragment, new prefix) and the trace data moves under
+    ``rois[0]`` instead of sitting at the top level.
+
+    Use this when you have a single ROI's averaged trace already
+    computed (e.g. the legacy single-save flow). Use
+    :func:`save_montage` directly when you have multiple pre-built
+    ROI entries to write to one file (the multi-ROI list flow).
+
+    Module-level so tests can call it without the GUI.
+    """
+    entry = build_roi_entry(
+        roi_keys=roi_keys,
+        hrf_mean=hrf_mean,
+        hrf_std=hrf_std,
+        sfreq=sfreq,
+        anchor=anchor,
+        shape=shape,
+        radius_m=radius_m,
+        library_filter=library_filter,
+        oxygenation_filter=oxygenation_filter,
+        name=name,
+    )
+    return save_montage(
+        rois=[entry],
+        alignment_offset_mm=alignment_offset_mm,
+        alignment_affine=alignment_affine,
+        workspace=workspace,
+    )

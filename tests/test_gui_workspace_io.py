@@ -16,10 +16,29 @@ import pytest
 
 
 from hrfunc.gui.workspace_io import (
+    MONTAGE_SCHEMA_VERSION,
     _safe_filename_fragment,
+    build_roi_entry,
+    save_montage,
     save_roi_average,
     workspace_dir,
 )
+
+
+def _read_single_roi(out_path):
+    """Helper: open a montage.json and return ``payload["rois"][0]``.
+
+    PR #55 unified the on-disk format -- every save_roi_average call
+    now writes a 1-entry montage. Tests that pre-date the schema
+    change asserted the trace shape at the top level; this helper
+    centralises the ``payload["rois"][0]`` indirection so each call
+    site stays terse.
+    """
+    payload = json.loads(out_path.read_text())
+    assert payload["version"] == MONTAGE_SCHEMA_VERSION
+    assert "alignment" in payload
+    assert len(payload["rois"]) == 1
+    return payload, payload["rois"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +148,10 @@ class TestSaveRoiAverage:
             radius_m=0.0,
             workspace=tmp_path,
         )
-        # Sanitized anchor key + timestamp pattern
-        assert out.name.startswith("roi_")
+        # PR #55: filename prefix is "montage_" (every save writes the
+        # wrapper schema, even for a single-ROI montage). The anchor
+        # key still rides in the filename for discoverability.
+        assert out.name.startswith("montage_")
         assert "hbo_s1_d1_hbo-temp" in out.name
         # ISO basic format includes a 'T' separator
         assert "T" in out.name
@@ -148,13 +169,13 @@ class TestSaveRoiAverage:
             library_filter={"task": "flanker"},
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
-        assert payload["hrf_mean"] == [1.5, 2.5]
-        assert payload["hrf_std"] == [0.5, 0.5]
-        assert payload["sfreq"] == 7.8125
-        assert payload["oxygenation"] is True
-        assert payload["location"] == [0.01, 0.02, 0.03]
-        ctx = payload["context"]
+        _, roi = _read_single_roi(out)
+        assert roi["hrf_mean"] == [1.5, 2.5]
+        assert roi["hrf_std"] == [0.5, 0.5]
+        assert roi["sfreq"] == 7.8125
+        assert roi["oxygenation"] is True
+        assert roi["location"] == [0.01, 0.02, 0.03]
+        ctx = roi["context"]
         # Anchor's original context preserved
         assert ctx["task"] == "flanker"
         assert ctx["doi"] == "doi/A"
@@ -179,9 +200,9 @@ class TestSaveRoiAverage:
             radius_m=0.02,
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
+        _, roi = _read_single_roi(out)
         # Floats decode to plain Python floats
-        assert all(isinstance(x, float) for x in payload["hrf_mean"])
+        assert all(isinstance(x, float) for x in roi["hrf_mean"])
 
     def test_member_keys_sorted_for_determinism(self, tmp_path):
         """Set iteration order is unpredictable; ROI member keys in the
@@ -195,8 +216,8 @@ class TestSaveRoiAverage:
             radius_m=0.0,
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
-        assert payload["context"]["roi_member_keys"] == ["hbo:a", "hbo:m", "hbo:z"]
+        _, roi = _read_single_roi(out)
+        assert roi["context"]["roi_member_keys"] == ["hbo:a", "hbo:m", "hbo:z"]
 
 
 # ---------------------------------------------------------------------------
@@ -229,8 +250,8 @@ class TestSaveRoiAverageWithShape:
             shape=box,
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
-        shape_desc = payload["context"]["roi_shape"]
+        _, roi = _read_single_roi(out)
+        shape_desc = roi["context"]["roi_shape"]
         assert shape_desc["type"] == "box"
         assert shape_desc["center_mm"] == [10.0, 20.0, 30.0]
         assert shape_desc["half_extents_mm"] == [5.0, 5.0, 5.0]
@@ -247,13 +268,13 @@ class TestSaveRoiAverageWithShape:
             shape=sphere,
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
-        shape_desc = payload["context"]["roi_shape"]
+        _, roi = _read_single_roi(out)
+        shape_desc = roi["context"]["roi_shape"]
         assert shape_desc["type"] == "sphere"
         assert shape_desc["center_mm"] == [0.0, 0.0, 0.0]
         assert shape_desc["radius_mm"] == 15.0
         # The legacy roi_radius_m key still appears for back-compat audit scripts.
-        assert payload["context"]["roi_radius_m"] == 0.015
+        assert roi["context"]["roi_radius_m"] == 0.015
 
     def test_free_floating_no_anchor_uses_shape_centre_as_location(self, tmp_path):
         """When the user has not clicked an anchor, the shape centre
@@ -271,11 +292,11 @@ class TestSaveRoiAverageWithShape:
             oxygenation_filter=True,
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
+        _, roi = _read_single_roi(out)
         # Centre 15 mm -> 0.015 m (matching v1.2 meter convention).
-        assert payload["location"] == [0.015, 0.025, 0.035]
+        assert roi["location"] == [0.015, 0.025, 0.035]
         # Oxygenation falls back to the explicit filter when no anchor.
-        assert payload["oxygenation"] is True
+        assert roi["oxygenation"] is True
 
     def test_free_floating_filename_prefix(self, tmp_path):
         """Free-floating saves should still have a recognisable filename
@@ -302,8 +323,8 @@ class TestSaveRoiAverageWithShape:
             shape=sphere,
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
-        assert payload["context"]["roi_anchor_key"] is None
+        _, roi = _read_single_roi(out)
+        assert roi["context"]["roi_anchor_key"] is None
 
     def test_oxygenation_filter_none_means_mixed(self, tmp_path):
         """When neither anchor nor oxygenation_filter is set, the saved
@@ -318,8 +339,8 @@ class TestSaveRoiAverageWithShape:
             shape=box,
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
-        assert payload["oxygenation"] is None
+        _, roi = _read_single_roi(out)
+        assert roi["oxygenation"] is None
 
     def test_legacy_radius_m_only_call_still_works(self, tmp_path):
         """v1.2 call sites that pass ``radius_m`` without ``shape`` keep
@@ -334,9 +355,9 @@ class TestSaveRoiAverageWithShape:
             radius_m=0.02,
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
-        assert payload["context"]["roi_radius_m"] == 0.02
-        shape_desc = payload["context"]["roi_shape"]
+        _, roi = _read_single_roi(out)
+        assert roi["context"]["roi_radius_m"] == 0.02
+        shape_desc = roi["context"]["roi_shape"]
         assert shape_desc["type"] == "sphere"
         assert shape_desc["radius_m"] == 0.02
 
@@ -367,7 +388,8 @@ class TestSaveRoiAverageBoxOrientation:
             shape=box,
             workspace=tmp_path,
         )
-        shape_desc = json.loads(out.read_text())["context"]["roi_shape"]
+        _, roi = _read_single_roi(out)
+        shape_desc = roi["context"]["roi_shape"]
         assert shape_desc["type"] == "box"
         # Pre-PR-#52 readers parse this descriptor unchanged.
         assert "orientation_mm" not in shape_desc
@@ -394,7 +416,8 @@ class TestSaveRoiAverageBoxOrientation:
             shape=box,
             workspace=tmp_path,
         )
-        shape_desc = json.loads(out.read_text())["context"]["roi_shape"]
+        _, roi = _read_single_roi(out)
+        shape_desc = roi["context"]["roi_shape"]
         assert shape_desc["type"] == "box"
         assert "orientation_mm" in shape_desc
         # The matrix round-trips through json as a list-of-lists.
@@ -428,7 +451,8 @@ class TestSaveRoiAverageBoxOrientation:
             oxygenation_filter=True,
             workspace=tmp_path,
         )
-        shape_desc = json.loads(out.read_text())["context"]["roi_shape"]
+        _, roi = _read_single_roi(out)
+        shape_desc = roi["context"]["roi_shape"]
         assert shape_desc["type"] == "atlas_region"
         assert shape_desc["atlas"] == "synthetic-test"
         assert shape_desc["region_name"] == "Region_A"
@@ -462,10 +486,10 @@ class TestSaveRoiAverageBoxOrientation:
             shape=region,
             workspace=tmp_path,
         )
-        payload = json.loads(out.read_text())
+        _, roi = _read_single_roi(out)
         # Region_A occupies voxels (i, 1, k) for i, k in [0, 3) -- the
         # centroid is voxel (1, 1, 1) -> MNI (10, 10, 10) mm = 0.01 m.
-        loc = payload["location"]
+        loc = roi["location"]
         assert loc == pytest.approx([0.01, 0.01, 0.01], abs=1e-9)
 
     def test_atlas_region_filename_prefix(self, tmp_path):
@@ -519,7 +543,8 @@ class TestSaveRoiAverageBoxOrientation:
             shape=original,
             workspace=tmp_path,
         )
-        shape_desc = json.loads(out.read_text())["context"]["roi_shape"]
+        _, roi = _read_single_roi(out)
+        shape_desc = roi["context"]["roi_shape"]
         rebuilt = Box(
             center_mm=tuple(shape_desc["center_mm"]),
             half_extents_mm=tuple(shape_desc["half_extents_mm"]),
@@ -531,3 +556,174 @@ class TestSaveRoiAverageBoxOrientation:
             original.contains_batch(points),
             rebuilt.contains_batch(points),
         )
+
+
+# ---------------------------------------------------------------------------
+# PR #55: save_montage wrapper schema + multi-ROI lists
+# ---------------------------------------------------------------------------
+
+
+class TestSaveMontage:
+    """The new save_montage writer is the canonical on-disk path; the
+    legacy save_roi_average delegates to it. These tests pin down the
+    wrapper schema, alignment block, filename convention, and
+    multi-ROI behaviour."""
+
+    def _entry(self, name="ROI 1"):
+        return build_roi_entry(
+            roi_keys={"hbo:a"},
+            hrf_mean=[1.0, 2.0],
+            hrf_std=[0.1, 0.2],
+            sfreq=10.0,
+            anchor={
+                "_key": "hbo:s1_d1_hbo-temp",
+                "oxygenation": True,
+                "location": [0.01, 0.02, 0.03],
+                "context": {"task": "flanker"},
+            },
+            radius_m=0.02,
+            name=name,
+        )
+
+    def test_wrapper_keys_and_version(self, tmp_path):
+        out = save_montage(
+            rois=[self._entry()],
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        assert payload["version"] == MONTAGE_SCHEMA_VERSION
+        assert set(payload) == {"version", "alignment", "rois"}
+
+    def test_alignment_block_defaults(self, tmp_path):
+        """Without explicit alignment, the wrapper still records the
+        block -- offset_mm zeros, affine null. Readers don't have to
+        special-case the absence."""
+        out = save_montage(
+            rois=[self._entry()],
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        assert payload["alignment"]["offset_mm"] == [0.0, 0.0, 0.0]
+        assert payload["alignment"]["affine"] is None
+
+    def test_alignment_offset_round_trips(self, tmp_path):
+        out = save_montage(
+            rois=[self._entry()],
+            alignment_offset_mm=(1.5, -2.5, 3.0),
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        assert payload["alignment"]["offset_mm"] == [1.5, -2.5, 3.0]
+
+    def test_alignment_affine_round_trips(self, tmp_path):
+        import numpy as np
+        affine = np.array(
+            [[1.0, 0.0, 0.0, 5.0],
+             [0.0, 1.0, 0.0, -3.0],
+             [0.0, 0.0, 1.0, 1.5],
+             [0.0, 0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+        out = save_montage(
+            rois=[self._entry()],
+            alignment_affine=affine,
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        recovered = np.asarray(payload["alignment"]["affine"])
+        np.testing.assert_allclose(recovered, affine)
+
+    def test_rois_list_preserves_order_and_names(self, tmp_path):
+        out = save_montage(
+            rois=[self._entry("Pole"), self._entry("OFC"), self._entry("PFC")],
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        assert [r["name"] for r in payload["rois"]] == ["Pole", "OFC", "PFC"]
+
+    def test_filename_single_roi_has_no_plus_suffix(self, tmp_path):
+        """Single-ROI montages keep the descriptive fragment-only
+        filename so they read like the pre-PR-#55 single-file saves."""
+        out = save_montage(
+            rois=[self._entry()],
+            workspace=tmp_path,
+        )
+        assert out.name.startswith("montage_hbo_s1_d1_hbo-temp_")
+        assert "_plus" not in out.name
+
+    def test_filename_multi_roi_has_plus_suffix(self, tmp_path):
+        """Multi-ROI montages tag the filename with how many extra
+        ROIs ride alongside the first, so a directory listing surfaces
+        the size without having to open the file."""
+        out = save_montage(
+            rois=[self._entry(), self._entry("ROI 2"), self._entry("ROI 3")],
+            workspace=tmp_path,
+        )
+        assert "_plus2_" in out.name
+
+    def test_empty_rois_list_rejected(self, tmp_path):
+        with pytest.raises(ValueError):
+            save_montage(rois=[], workspace=tmp_path)
+
+    def test_save_roi_average_writes_single_entry_montage(self, tmp_path):
+        """The legacy single-save shim writes the same wrapper schema
+        with a 1-entry rois list -- one writer, one reader."""
+        out = save_roi_average(
+            anchor={
+                "_key": "hbo:k",
+                "oxygenation": True,
+                "location": [0.0, 0.0, 0.0],
+                "context": {},
+            },
+            roi_keys={"hbo:a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            radius_m=0.02,
+            workspace=tmp_path,
+        )
+        payload = json.loads(out.read_text())
+        assert payload["version"] == MONTAGE_SCHEMA_VERSION
+        assert len(payload["rois"]) == 1
+        assert payload["rois"][0]["hrf_mean"] == [1.0]
+
+
+class TestBuildRoiEntry:
+    """build_roi_entry is the pure helper that turns ROI inputs into
+    one block of the rois list. Same content as the legacy single-save
+    payload, with an optional ``name`` field for the multi-ROI list
+    display label."""
+
+    def test_name_omitted_when_not_provided(self):
+        entry = build_roi_entry(
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+        )
+        assert "name" not in entry
+
+    def test_name_included_when_provided(self):
+        entry = build_roi_entry(
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+            name="Visual Cortex",
+        )
+        assert entry["name"] == "Visual Cortex"
+
+    def test_pure_no_io(self, tmp_path):
+        """Build the entry without touching the filesystem so callers
+        can build a montage in memory before deciding where to save."""
+        # No workspace argument -- this must not create files anywhere.
+        entry = build_roi_entry(
+            roi_keys={"a"},
+            hrf_mean=[1.0],
+            hrf_std=[0.1],
+            sfreq=10.0,
+        )
+        assert isinstance(entry, dict)
+        # tmp_path should remain empty since build_roi_entry doesn't
+        # write -- we only pass it to confirm no surprise mkdir/write.
+        assert list(tmp_path.iterdir()) == []

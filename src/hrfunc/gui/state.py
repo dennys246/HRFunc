@@ -87,7 +87,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ..io.manifest import Manifest, ScanEntry
 from ..io.raw_cache import RawCache
@@ -95,6 +95,82 @@ from ..io.raw_cache import RawCache
 logger = logging.getLogger(__name__)
 
 EventCallback = Callable[..., None]
+
+
+@dataclass
+class ROISlot:
+    """One ROI in the Cluster sub-tab's multi-ROI list (PR #55).
+
+    Holds everything that distinguishes one ROI from another: its shape
+    selection, geometry parameters, painted-key set, and the click-
+    anchor that seeded it (if any). Atlas alignment is NOT stored
+    here -- alignment is a property of the HRF library's coord frame,
+    not of any individual ROI, so it lives on AppState as a global
+    per scan/dataset (locked decision 2026-05-14).
+
+    The default-constructed slot reproduces the pre-PR-#55 single-ROI
+    starting state: sphere mode, free-floating centred at the MNI
+    origin with a 20 mm radius. The first slot in ``cluster_rois``
+    is therefore safe to leave at defaults if the user never opens
+    the Cluster sub-tab.
+    """
+
+    # Display name for the ROI list ("ROI 1", "ROI 2", ...). Auto-
+    # assigned by ``AppState.add_roi`` but mutable so future iterations
+    # can rename. Not included in the saved montage's per-ROI block
+    # unless renamed (see ``workspace_io``).
+    name: str = "ROI 1"
+
+    # Shape mode: "sphere" | "box" | "atlas_region". Matches the
+    # module-level SHAPE_* constants in hrtree_panel; kept as a string
+    # here so this module doesn't have to import the panel.
+    shape: str = "sphere"
+
+    # Free-floating shape centre, MNI mm. Three separate fields so each
+    # binds cleanly to its own ``ui.number`` input. Defaults to MNI
+    # origin (0, 0, 0); seeded by clicking an HRF in the viz pane.
+    center_x_mm: float = 0.0
+    center_y_mm: float = 0.0
+    center_z_mm: float = 0.0
+
+    # Box half-extents, MNI mm. Default 20 mm on each axis = a 40 mm
+    # cube, comparable to a 2 cm radius sphere by volume.
+    box_half_x_mm: float = 20.0
+    box_half_y_mm: float = 20.0
+    box_half_z_mm: float = 20.0
+
+    # Sphere radius, MNI mm. Pre-PR-#55 this lived on AppState as
+    # ``library_roi_radius_m`` (meters); the per-ROI move converts to
+    # mm to match the rest of the spatial-layer convention (MNI mm
+    # everywhere from PR #46). Default 20 mm = the legacy 0.02 m.
+    radius_mm: float = 20.0
+
+    # Atlas-region label when ``shape == "atlas_region"``. ``None``
+    # means "no region picked yet" and the save button disables.
+    atlas_label: Optional[str] = None
+
+    # Shift-hover painted keys (the lasso-like accumulation), filtered
+    # to the anchor's oxygenation when an anchor is set. Joins the
+    # ROI regardless of the shape geometry. Cleared on every new
+    # anchor click so paint from a prior anchor doesn't carry over.
+    painted: Set[str] = field(default_factory=set)
+
+    # Click-anchor HRF, if any. Same dict shape as
+    # ``state.library_selected_hrf`` (gathered HRF + ``_key``).
+    # When present, drives the saved JSON's location + oxygenation
+    # fields and the sphere's centre seed.
+    anchor: Optional[Dict[str, Any]] = None
+
+
+def _default_rois() -> List[ROISlot]:
+    """Factory for AppState.cluster_rois.
+
+    Always seeds with one default ROISlot so the active-index has
+    something to point at and the proxy properties never look at an
+    empty list. CLEAR ROI deletes the active slot but refuses to drop
+    below one entry (it resets the last slot instead).
+    """
+    return [ROISlot()]
 
 
 @dataclass
@@ -191,50 +267,21 @@ class AppState:
     # set, filtered to the anchor's oxygenation. The averaged trace
     # in the detail pane is computed from this union.
     #
-    # Radius default 0.02 m (2 cm) — a typical fNIRS short-separation
-    # neighbourhood. ``library_roi_painted`` is cleared on every new
-    # anchor click so the painted carryover from a prior anchor
-    # doesn't follow into a fresh selection.
-    library_roi_radius_m: float = 0.02
-    library_roi_painted: set = field(default_factory=set)
-    # Cluster sub-tab shape selection (PR #49, v1.3 spatial/viz arc).
+    # PR #55: per-ROI cluster state moved into ``cluster_rois``. The
+    # ``library_roi_radius_m`` / ``library_roi_painted`` /
+    # ``cluster_shape`` / ``cluster_center_*_mm`` / ``cluster_box_half_*_mm``
+    # / ``cluster_atlas_label`` names are now ``@property`` proxies
+    # onto ``cluster_rois[cluster_active_index]`` so existing panel
+    # bindings and tests keep working. See ``ROISlot``.
     #
-    # The Cluster sub-tab supports two ROI-shape modes:
-    #
-    # - ``"sphere"`` (default) -- the existing anchor + radius workflow.
-    #   ``library_roi_radius_m`` is the sphere's radius; when an anchor
-    #   HRF is clicked, the sphere centres on it. When no anchor is
-    #   clicked, the sphere centres on ``cluster_center_*_mm`` for free-
-    #   floating selection.
-    # - ``"box"`` -- an axis-aligned bounding box with independent half-
-    #   extents on each axis. Always free-floating: the box's centre is
-    #   ``cluster_center_*_mm`` (seedable by clicking an HRF or typed
-    #   directly), and ``cluster_box_half_*_mm`` controls the dimensions.
-    #
-    # All cluster spatial state is in MNI mm (the spatial-layer
-    # convention from PR #46) -- the conversion from MNE-meter HRF
-    # locations happens once at the membership-check boundary.
-    cluster_shape: str = "sphere"
-    # Free-floating shape centre, MNI mm. Three separate fields so each
-    # binds cleanly to its own ``ui.number`` input; tuple-construct at
-    # use sites. Defaults to MNI origin (0, 0, 0); seeded by clicking
-    # an HRF in the viz pane.
-    cluster_center_x_mm: float = 0.0
-    cluster_center_y_mm: float = 0.0
-    cluster_center_z_mm: float = 0.0
-    # Box half-extents, MNI mm. Default 20 mm on each axis produces a
-    # 40 mm cube -- comparable to a 2 cm radius sphere by volume and
-    # in line with typical fNIRS short-separation neighbourhood sizes.
-    cluster_box_half_x_mm: float = 20.0
-    cluster_box_half_y_mm: float = 20.0
-    cluster_box_half_z_mm: float = 20.0
-    # Atlas-region mode (PR #53). When ``cluster_shape == "atlas_region"``,
-    # the Cluster sub-tab uses an atlas-defined mask instead of a
-    # sphere / box. ``cluster_atlas_label`` is the selected region
-    # name; ``None`` means "no region picked yet" and the save button
-    # disables. The atlas itself is loaded lazily on first atlas-mode
-    # render via ``hrfunc.spatial.load_harvard_oxford_cortical``.
-    cluster_atlas_label: Optional[str] = None
+    # Multi-ROI list (PR #55). Always at least one entry -- CLEAR ROI
+    # on the last slot resets it instead of removing it, so the
+    # proxy properties never index an empty list. The active index
+    # picks which slot the proxies read/write. UI exposes ADD ROI to
+    # append, click-to-switch on the list, and CLEAR ROI on the
+    # current active slot.
+    cluster_rois: List[ROISlot] = field(default_factory=_default_rois)
+    cluster_active_index: int = 0
     # PR #54: cluster ROI active toggle (default off). When False, the
     # cluster shape doesn't contribute to ROI membership at all -- the
     # viz pane shows raw HRFs with no halo, the detail-pane ROI-average
@@ -269,6 +316,173 @@ class AppState:
     # below the save button so users can confirm the file went out
     # even after navigating away and back.
     last_saved_roi_path: Optional[Path] = None
+
+    # ------------------------------------------------------------------
+    # PR #55: proxy properties onto the active ROI slot.
+    # ------------------------------------------------------------------
+    # These exist so the Cluster sub-tab UI (which binds widgets to
+    # ``state.cluster_shape``, ``state.cluster_center_x_mm``, etc.) and
+    # the existing test suite see the per-ROI fields under their pre-
+    # PR-#55 names. The actual storage lives in
+    # ``cluster_rois[cluster_active_index]``.
+    #
+    # Switching the active ROI changes which slot the proxies read /
+    # write -- callers re-render after touching ``cluster_active_index``
+    # to pick up the new values. The proxies fall back to the first
+    # slot when the index is out of range; ``cluster_rois`` is also
+    # never empty (CLEAR ROI resets the last slot rather than removing
+    # it), so the fallback is defensive against bad external state, not
+    # an expected code path.
+
+    @property
+    def active_roi(self) -> ROISlot:
+        """The currently-active ROI slot. Always returns a slot --
+        if the list is empty (shouldn't happen under normal flow) one
+        is created. If the index is out of range it clamps to 0."""
+        if not self.cluster_rois:
+            self.cluster_rois.append(ROISlot())
+            self.cluster_active_index = 0
+            return self.cluster_rois[0]
+        if not (0 <= self.cluster_active_index < len(self.cluster_rois)):
+            self.cluster_active_index = 0
+        return self.cluster_rois[self.cluster_active_index]
+
+    @property
+    def cluster_shape(self) -> str:
+        return self.active_roi.shape
+
+    @cluster_shape.setter
+    def cluster_shape(self, value: str) -> None:
+        self.active_roi.shape = value
+
+    @property
+    def cluster_center_x_mm(self) -> float:
+        return self.active_roi.center_x_mm
+
+    @cluster_center_x_mm.setter
+    def cluster_center_x_mm(self, value: float) -> None:
+        self.active_roi.center_x_mm = float(value)
+
+    @property
+    def cluster_center_y_mm(self) -> float:
+        return self.active_roi.center_y_mm
+
+    @cluster_center_y_mm.setter
+    def cluster_center_y_mm(self, value: float) -> None:
+        self.active_roi.center_y_mm = float(value)
+
+    @property
+    def cluster_center_z_mm(self) -> float:
+        return self.active_roi.center_z_mm
+
+    @cluster_center_z_mm.setter
+    def cluster_center_z_mm(self, value: float) -> None:
+        self.active_roi.center_z_mm = float(value)
+
+    @property
+    def cluster_box_half_x_mm(self) -> float:
+        return self.active_roi.box_half_x_mm
+
+    @cluster_box_half_x_mm.setter
+    def cluster_box_half_x_mm(self, value: float) -> None:
+        self.active_roi.box_half_x_mm = float(value)
+
+    @property
+    def cluster_box_half_y_mm(self) -> float:
+        return self.active_roi.box_half_y_mm
+
+    @cluster_box_half_y_mm.setter
+    def cluster_box_half_y_mm(self, value: float) -> None:
+        self.active_roi.box_half_y_mm = float(value)
+
+    @property
+    def cluster_box_half_z_mm(self) -> float:
+        return self.active_roi.box_half_z_mm
+
+    @cluster_box_half_z_mm.setter
+    def cluster_box_half_z_mm(self, value: float) -> None:
+        self.active_roi.box_half_z_mm = float(value)
+
+    @property
+    def cluster_atlas_label(self) -> Optional[str]:
+        return self.active_roi.atlas_label
+
+    @cluster_atlas_label.setter
+    def cluster_atlas_label(self, value: Optional[str]) -> None:
+        self.active_roi.atlas_label = value
+
+    @property
+    def library_roi_radius_m(self) -> float:
+        """Sphere radius in meters (legacy unit). The per-ROI storage
+        is in mm to match the spatial-layer convention -- the meter
+        view is kept for back-compat with pre-PR-#55 panel code and
+        tests that compute ``radius_m * 1000`` at the boundary."""
+        return self.active_roi.radius_mm / 1000.0
+
+    @library_roi_radius_m.setter
+    def library_roi_radius_m(self, value: float) -> None:
+        self.active_roi.radius_mm = float(value) * 1000.0
+
+    @property
+    def library_roi_painted(self) -> Set[str]:
+        """Painted-key set for the active ROI. Returned by reference so
+        callers that do ``state.library_roi_painted.add(...)`` or
+        ``.clear()`` mutate the active slot's set directly -- matches
+        the pre-PR-#55 contract where this attribute *was* a mutable
+        set on AppState."""
+        return self.active_roi.painted
+
+    @library_roi_painted.setter
+    def library_roi_painted(self, value: Set[str]) -> None:
+        self.active_roi.painted = set(value)
+
+    # ------------------------------------------------------------------
+    # PR #55: ROI list manipulation helpers.
+    # ------------------------------------------------------------------
+
+    def add_roi(self) -> ROISlot:
+        """Append a fresh ROI to ``cluster_rois`` and make it active.
+
+        The new ROI inherits no state from the previous active slot --
+        it starts at the dataclass defaults. Auto-names it
+        "ROI <n>" where n is the new length of the list.
+
+        Returns the new slot so callers can stamp additional state
+        onto it before publishing the change.
+        """
+        name = f"ROI {len(self.cluster_rois) + 1}"
+        slot = ROISlot(name=name)
+        self.cluster_rois.append(slot)
+        self.cluster_active_index = len(self.cluster_rois) - 1
+        return slot
+
+    def set_active_roi(self, index: int) -> None:
+        """Switch the active ROI index. No-op if out of range."""
+        if 0 <= index < len(self.cluster_rois):
+            self.cluster_active_index = index
+
+    def clear_active_roi(self) -> None:
+        """Reset the active ROI to default geometry (CLEAR ROI button).
+
+        If there are 2+ ROIs, removes the active slot and advances the
+        active index to the previous slot (or 0 if we removed slot 0).
+        If there's exactly one ROI, resets its fields to defaults
+        rather than removing it -- the proxy properties always need
+        at least one slot to point at, and "clear" on a fresh project
+        shouldn't disappear the list entirely.
+        """
+        if len(self.cluster_rois) <= 1:
+            self.cluster_rois[0] = ROISlot()
+            self.cluster_active_index = 0
+            return
+        del self.cluster_rois[self.cluster_active_index]
+        self.cluster_active_index = max(0, self.cluster_active_index - 1)
+        # Renumber default names so the list stays in "ROI 1 ... ROI N"
+        # order. Custom-named slots (once renaming lands) would be
+        # detected by checking against the auto-name pattern; for now
+        # every name is auto so a simple re-stamp is correct.
+        for i, slot in enumerate(self.cluster_rois):
+            slot.name = f"ROI {i + 1}"
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -374,16 +588,10 @@ class AppState:
         self.library_show_brain = True
         self.library_show_scalp = True
         self.library_oxygenation = "both"
-        self.library_roi_radius_m = 0.02
-        self.library_roi_painted.clear()
-        self.cluster_shape = "sphere"
-        self.cluster_center_x_mm = 0.0
-        self.cluster_center_y_mm = 0.0
-        self.cluster_center_z_mm = 0.0
-        self.cluster_box_half_x_mm = 20.0
-        self.cluster_box_half_y_mm = 20.0
-        self.cluster_box_half_z_mm = 20.0
-        self.cluster_atlas_label = None
+        # PR #55: per-ROI cluster state lives in ``cluster_rois``;
+        # reset to the default-single-slot list.
+        self.cluster_rois = _default_rois()
+        self.cluster_active_index = 0
         self.cluster_roi_active = False
         self.cluster_atlas_alignment_affine = None
         self.cluster_atlas_offset_x_mm = 0.0
