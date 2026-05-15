@@ -45,7 +45,11 @@ import numpy as np
 from nicegui import background_tasks, ui
 
 from ..state import AppState
-from ..workers import make_progress_callback, run_in_background
+from ..workers import (
+    make_progress_callback,
+    run_bulk_in_background,
+    run_in_background,
+)
 from ...io.manifest import ScanEntry
 from .hrf_panel import _CanonicalResult
 
@@ -113,18 +117,41 @@ def _render_body(state: AppState, opts: ActivityOptions) -> None:
     context without going through the refreshable wrapper.
     """
     scan = state.selected_scan
+    checked_scans = _resolve_checked_scans(state)
+    bulk_mode = len(checked_scans) >= 1
+
     with ui.column().classes("p-6 gap-4 w-full"):
         ui.label("Activity").classes("text-2xl font-semibold")
 
-        if scan is None:
-            ui.label("Select a scan from the dataset tree.").classes(
-                "text-sm opacity-60"
-            )
+        if scan is None and not bulk_mode:
+            ui.label(
+                "Select a scan from the dataset tree, or tick scans "
+                "for a bulk run."
+            ).classes("text-sm opacity-60")
             return
 
-        ui.label(scan.display_name or scan.path.name).classes(
-            "text-sm font-mono opacity-70"
-        )
+        if bulk_mode:
+            ui.label(
+                f"Bulk run on {len(checked_scans)} checked scan"
+                f"{'s' if len(checked_scans) != 1 else ''}."
+            ).classes("text-sm font-mono opacity-70")
+            if opts.hrf_model == MODEL_TOEPLITZ:
+                # Toeplitz bulk needs per-scan estimated HRFs, but
+                # ``state.montage`` is single-valued. The bulk worker
+                # will skip scans whose montage_source_scan doesn't
+                # match -- in practice that's every scan except whichever
+                # one the user last ran HRFs on. Canonical bulk works
+                # universally.
+                ui.label(
+                    "Toeplitz mode in bulk only succeeds on the scan "
+                    "whose HRFs are currently in memory; other scans "
+                    "will be skipped. Switch to canonical for an "
+                    "every-scan deconvolution."
+                ).classes("text-xs opacity-60 italic")
+        elif scan is not None:
+            ui.label(scan.display_name or scan.path.name).classes(
+                "text-sm font-mono opacity-70"
+            )
 
         # ── Mode + parameter controls
         with ui.card().classes("w-full"):
@@ -134,19 +161,33 @@ def _render_body(state: AppState, opts: ActivityOptions) -> None:
             _render_model_radio(state, opts)
             _render_lmbda_slider(opts)
 
-            if opts.hrf_model == MODEL_TOEPLITZ:
+            if opts.hrf_model == MODEL_TOEPLITZ and scan is not None:
                 _render_toeplitz_requirements(state, scan)
 
         # ── Run row + progress + errors
-        _render_run_row(state, scan, opts)
+        _render_run_row(state, scan, checked_scans, opts)
 
-        # ── Preview
-        if state.activity_raw is not None:
+        # ── Preview (single-scan only -- bulk overwrites activity_raw)
+        if state.activity_raw is not None and not bulk_mode:
             ui.separator()
             ui.label("Deconvolved preview").classes(
                 "text-xs uppercase opacity-60 tracking-wide"
             )
             _render_preview(state, scan, opts)
+
+
+def _resolve_checked_scans(state: AppState) -> List[ScanEntry]:
+    """Resolve ``state.checked_scan_paths`` to ScanEntries in manifest order.
+
+    PR #55a helper. Same shape as the preprocess/hrf panel helpers --
+    duplicated intentionally to keep panel modules self-contained.
+    """
+    if state.manifest is None or not state.checked_scan_paths:
+        return []
+    return [
+        scan for scan in state.manifest.scans
+        if scan.path.resolve() in state.checked_scan_paths
+    ]
 
 
 def _render_model_radio(state: AppState, opts: ActivityOptions) -> None:
@@ -235,44 +276,53 @@ def _render_toeplitz_requirements(state: AppState, scan: ScanEntry) -> None:
 
 
 def _render_run_row(
-    state: AppState, scan: ScanEntry, opts: ActivityOptions
+    state: AppState,
+    scan: Optional[ScanEntry],
+    checked: List[ScanEntry],
+    opts: ActivityOptions,
 ) -> None:
-    raw_ready = scan in state.processed_cache
-    if opts.hrf_model == MODEL_TOEPLITZ:
-        montage_ready = state.montage is not None and not isinstance(
-            state.montage, _CanonicalResult
+    """Render the Run button row + progress / error display.
+
+    PR #55a: dispatches single vs bulk based on the checked set. Bulk
+    button is enabled whenever there's no in-flight task; per-scan gates
+    (raw + montage match) are evaluated inside the worker and incompatible
+    scans are skipped.
+    """
+    bulk_mode = bool(checked)
+    if bulk_mode:
+        run_label = (
+            f"Estimate activity for {len(checked)} scan"
+            f"{'s' if len(checked) != 1 else ''}"
         )
-        scan_matches = (
-            state.montage_source_scan is not None
-            and state.montage_source_scan.path == scan.path
-        )
-        can_run = (
-            raw_ready and montage_ready and scan_matches and not state.busy
-        )
+        can_run = not state.busy
     else:
-        can_run = raw_ready and not state.busy
+        raw_ready = scan is not None and scan in state.processed_cache
+        if opts.hrf_model == MODEL_TOEPLITZ:
+            montage_ready = state.montage is not None and not isinstance(
+                state.montage, _CanonicalResult
+            )
+            scan_matches = (
+                state.montage_source_scan is not None
+                and scan is not None
+                and state.montage_source_scan.path == scan.path
+            )
+            can_run = (
+                raw_ready and montage_ready and scan_matches
+                and not state.busy
+            )
+        else:
+            can_run = raw_ready and not state.busy
+        run_label = "Estimate activity"
 
     with ui.row().classes("items-center gap-3"):
         ui.button(
-            "Estimate activity",
-            on_click=lambda: _run(state, scan, opts),
+            run_label,
+            on_click=lambda: _run_dispatch(state, scan, checked, opts),
         ).props(f"color=primary {'disable' if not can_run else ''}")
 
         if state.busy:
-            prog = state.estimation_progress
-            if prog is not None:
-                current, total, name = prog
-                fraction = (current + 1) / max(total, 1)
-                with ui.column().classes("gap-1 flex-grow"):
-                    ui.label(
-                        f"Channel {current + 1}/{total}: {name}"
-                    ).classes("text-xs opacity-70")
-                    ui.linear_progress(value=fraction).classes("w-64")
-            else:
-                with ui.row().classes("items-center gap-2"):
-                    ui.spinner(size="sm")
-                    ui.label("Working…").classes("text-sm opacity-70")
-        elif not raw_ready:
+            _render_busy_progress(state)
+        elif not bulk_mode and scan is not None and scan not in state.processed_cache:
             ui.label("Waiting for preprocess output…").classes(
                 "text-sm opacity-60"
             )
@@ -283,10 +333,147 @@ def _render_run_row(
             ui.label(state.last_error).classes("text-sm text-red-400")
 
 
+def _render_busy_progress(state: AppState) -> None:
+    """Two-layer progress: bulk (scan i/N) + within-scan (channel i/N)."""
+    bulk = state.bulk_progress
+    if bulk is not None:
+        idx, total, scan = bulk
+        scan_label = scan.display_name or scan.path.name
+        with ui.column().classes("gap-1 flex-grow"):
+            with ui.row().classes("items-center gap-2"):
+                ui.spinner(size="sm")
+                ui.label(
+                    f"Scan {idx + 1}/{total}: {scan_label}"
+                ).classes("text-sm opacity-80")
+            ui.linear_progress(
+                value=(idx + 1) / max(total, 1)
+            ).classes("w-64")
+            prog = state.estimation_progress
+            if prog is not None:
+                current, total_ch, name = prog
+                fraction = (current + 1) / max(total_ch, 1)
+                ui.label(
+                    f"  Channel {current + 1}/{total_ch}: {name}"
+                ).classes("text-xs opacity-60")
+                ui.linear_progress(value=fraction).classes("w-64")
+        return
+
+    prog = state.estimation_progress
+    if prog is not None:
+        current, total, name = prog
+        fraction = (current + 1) / max(total, 1)
+        with ui.column().classes("gap-1 flex-grow"):
+            ui.label(
+                f"Channel {current + 1}/{total}: {name}"
+            ).classes("text-xs opacity-70")
+            ui.linear_progress(value=fraction).classes("w-64")
+    else:
+        with ui.row().classes("items-center gap-2"):
+            ui.spinner(size="sm")
+            ui.label("Working…").classes("text-sm opacity-70")
+
+
+def _run_dispatch(
+    state: AppState,
+    selected: Optional[ScanEntry],
+    checked: List[ScanEntry],
+    opts: ActivityOptions,
+) -> None:
+    """Route Estimate activity to single or bulk based on the checked set."""
+    if checked:
+        _run_bulk(state, checked, opts)
+    elif selected is not None:
+        _run(state, selected, opts)
+
+
+def _run_bulk(
+    state: AppState,
+    scans: List[ScanEntry],
+    opts: ActivityOptions,
+) -> None:
+    """Iterate ``estimate_activity`` across the checked scans (PR #55a).
+
+    Continue-on-error per scan; per-scan preflight inside ``_build`` skips
+    scans that aren't preprocessed (toeplitz + canonical) or whose
+    montage doesn't match (toeplitz only). Final toast summarises
+    successes / failures.
+
+    Toeplitz mode caveat: ``state.montage`` is single-valued, so only the
+    scan matching ``state.montage_source_scan`` can use toeplitz. The
+    bulk run will succeed on that scan and skip every other. Canonical
+    mode works universally (each scan gets a fresh canonical Montage).
+    """
+    if state.busy:
+        return
+
+    snapshot = ActivityOptions(
+        hrf_model=opts.hrf_model,
+        lmbda=opts.lmbda,
+        preview_channel=opts.preview_channel,
+    )
+
+    def _build(scan: ScanEntry):
+        if scan not in state.processed_cache:
+            return None
+        if snapshot.hrf_model == MODEL_TOEPLITZ:
+            if state.montage is None or isinstance(
+                state.montage, _CanonicalResult
+            ):
+                return None
+            if (
+                state.montage_source_scan is None
+                or state.montage_source_scan.path != scan.path
+            ):
+                return None
+            existing_montage = state.montage
+        else:
+            existing_montage = None
+
+        raw = state.processed_cache.get(scan)
+        progress_cb = make_progress_callback(state)
+        return (
+            run_activity_sync,
+            (raw, snapshot, existing_montage, progress_cb),
+            {},
+        )
+
+    async def _on_each_done(scan: ScanEntry, result) -> None:
+        if result is None:
+            return
+        state.activity_raw = result
+        state.publish("activity_estimated", scan)
+
+    async def _bulk() -> None:
+        bulk_result = await run_bulk_in_background(
+            state, scans, _build,
+            on_each_done=_on_each_done,
+            label="estimate_activity",
+        )
+        if bulk_result is None:
+            return
+        successes, failures = bulk_result
+        n_ok, n_fail = len(successes), len(failures)
+        summary = (
+            f"Estimated activity for {n_ok}/{n_ok + n_fail} scan(s)."
+        )
+        if failures:
+            fail_names = ", ".join(
+                s.display_name or s.path.name for s, _ in failures[:3]
+            )
+            if len(failures) > 3:
+                fail_names += f" (+{len(failures) - 3} more)"
+            summary += f" Failed/skipped: {fail_names}."
+        ui.notify(
+            summary, type="positive" if n_fail == 0 else "warning"
+        )
+
+    background_tasks.create(_bulk())
+
+
 def _run(
     state: AppState, scan: ScanEntry, opts: ActivityOptions
 ) -> None:
-    """Click handler for Estimate activity.
+    """Click handler for Estimate activity (single-scan path).
 
     Validates state preconditions, snapshots options, copies the Raw
     before handing it to estimate_activity (which mutates in place),

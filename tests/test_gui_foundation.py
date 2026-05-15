@@ -162,6 +162,10 @@ class TestAppStateDefaults:
         assert s.busy is False
         assert s.estimation_progress is None
         assert s.last_error is None
+        # PR #55a: bulk-iterate state defaults to "nothing checked,
+        # no bulk run in flight".
+        assert s.checked_scan_paths == set()
+        assert s.bulk_progress is None
 
     def test_each_app_state_has_independent_raw_cache(self):
         """RawCache uses field(default_factory) so two AppStates do NOT share
@@ -383,6 +387,34 @@ class TestClusterMultiROI:
         assert s.cluster_shape == "sphere"
         assert s.cluster_atlas_label is None
         assert s.cluster_roi_active is False
+
+
+class TestBulkIterateState:
+    """PR #55a added ``checked_scan_paths`` (set) and ``bulk_progress``
+    (tuple) to AppState so Preprocess / HRF / Activity action buttons
+    can iterate every checked scan instead of just ``selected_scan``."""
+
+    def test_each_app_state_has_independent_checked_set(self):
+        """Set is created via ``field(default_factory=set)`` so two
+        AppStates don't share storage."""
+        from hrfunc.gui.state import AppState
+
+        a = AppState()
+        b = AppState()
+        assert a.checked_scan_paths is not b.checked_scan_paths
+        from pathlib import Path
+        a.checked_scan_paths.add(Path("/tmp/a.snirf"))
+        assert b.checked_scan_paths == set()
+
+    def test_reset_clears_bulk_state(self, tmp_path):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.checked_scan_paths.add(tmp_path / "a.snirf")
+        s.bulk_progress = (1, 5, None)
+        s.reset()
+        assert s.checked_scan_paths == set()
+        assert s.bulk_progress is None
 
 
 class TestSetBusy:
@@ -693,3 +725,278 @@ class TestUiRunKwargs:
             f"NiceGUI's Config.__init__ signature: {unknown}. "
             f"Check the NiceGUI changelog for renamed/removed parameters."
         )
+
+
+# ---------------------------------------------------------------------------
+# workers.run_bulk_in_background (PR #55a)
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_scan(path):
+    """Build a minimal ScanEntry for bulk-worker tests."""
+    from hrfunc.io.manifest import ScanEntry
+
+    return ScanEntry(format="snirf", path=path)
+
+
+class TestRunBulkInBackground:
+    """``run_bulk_in_background`` drives the Preprocess / HRF / Activity
+    bulk-action flow on the non-hrtree pages (PR #55a). It runs each
+    scan's per-scan callable sequentially, advances ``bulk_progress``,
+    catches per-scan failures, and returns (successes, failures)."""
+
+    def test_empty_scan_list_returns_empty_buckets(self):
+        from hrfunc.gui.state import AppState
+        from hrfunc.gui.workers import run_bulk_in_background
+
+        s = AppState()
+        result = asyncio.run(
+            run_bulk_in_background(s, [], lambda _scan: None)
+        )
+        assert result == ([], [])
+        assert s.busy is False
+        assert s.bulk_progress is None
+
+    def test_all_succeed(self, tmp_path):
+        from hrfunc.gui.state import AppState
+        from hrfunc.gui.workers import run_bulk_in_background
+
+        s = AppState()
+        scans = [
+            _make_fake_scan(tmp_path / "a.snirf"),
+            _make_fake_scan(tmp_path / "b.snirf"),
+            _make_fake_scan(tmp_path / "c.snirf"),
+        ]
+        seen = []
+
+        def _build(scan):
+            return (lambda sc=scan: ("ok", sc), (), {})
+
+        async def _on_each(scan, result):
+            seen.append((scan, result))
+
+        successes, failures = asyncio.run(
+            run_bulk_in_background(s, scans, _build, on_each_done=_on_each)
+        )
+        assert len(successes) == 3
+        assert failures == []
+        assert [s for s, _ in seen] == scans
+        assert s.busy is False
+        assert s.bulk_progress is None
+
+    def test_per_scan_exception_recorded_and_continues(self, tmp_path):
+        from hrfunc.gui.state import AppState
+        from hrfunc.gui.workers import run_bulk_in_background
+
+        s = AppState()
+        scans = [
+            _make_fake_scan(tmp_path / "a.snirf"),
+            _make_fake_scan(tmp_path / "b.snirf"),
+            _make_fake_scan(tmp_path / "c.snirf"),
+        ]
+
+        def _build(scan):
+            if scan.path.name == "b.snirf":
+                def _boom():
+                    raise RuntimeError("kaboom")
+                return (_boom, (), {})
+            return (lambda: "ok", (), {})
+
+        successes, failures = asyncio.run(
+            run_bulk_in_background(s, scans, _build)
+        )
+        assert [sc.path.name for sc in successes] == ["a.snirf", "c.snirf"]
+        assert len(failures) == 1
+        assert failures[0][0].path.name == "b.snirf"
+        assert "kaboom" in failures[0][1]
+        # last_error stamped with the failing scan's name + exception.
+        assert "b.snirf" in (s.last_error or "")
+
+    def test_build_call_returning_none_is_a_skip(self, tmp_path):
+        """Per-scan preflight returning None counts as a skipped scan
+        (failure bucket), not an exception. Lets panels gate by e.g.
+        ``scan in state.processed_cache`` without raising."""
+        from hrfunc.gui.state import AppState
+        from hrfunc.gui.workers import run_bulk_in_background
+
+        s = AppState()
+        scans = [_make_fake_scan(tmp_path / f"{n}.snirf") for n in "ab"]
+
+        def _build(scan):
+            return None  # always skip
+
+        successes, failures = asyncio.run(
+            run_bulk_in_background(s, scans, _build)
+        )
+        assert successes == []
+        assert len(failures) == 2
+        assert all("skipped" in reason for _, reason in failures)
+
+    def test_bulk_progress_advances_per_scan(self, tmp_path):
+        from hrfunc.gui.state import AppState
+        from hrfunc.gui.workers import run_bulk_in_background
+
+        s = AppState()
+        scans = [_make_fake_scan(tmp_path / f"{n}.snirf") for n in "abc"]
+        snapshots = []
+
+        def _build(scan):
+            def _run(sc=scan):
+                # Capture bulk_progress observed from inside the worker.
+                snapshots.append(s.bulk_progress)
+                return "ok"
+            return (_run, (), {})
+
+        asyncio.run(run_bulk_in_background(s, scans, _build))
+        # Each scan saw its own (idx, total, scan) tuple.
+        assert len(snapshots) == 3
+        for i, snap in enumerate(snapshots):
+            assert snap is not None
+            idx, total, scan = snap
+            assert idx == i
+            assert total == 3
+            assert scan is scans[i]
+        # bulk_progress cleared after the loop.
+        assert s.bulk_progress is None
+
+    def test_refused_when_busy(self):
+        from hrfunc.gui.state import AppState
+        from hrfunc.gui.workers import run_bulk_in_background
+
+        s = AppState()
+        s.busy = True
+        called = []
+
+        def _build(scan):
+            called.append(scan)
+            return (lambda: "ok", (), {})
+
+        result = asyncio.run(
+            run_bulk_in_background(s, [_make_fake_scan(Path("/tmp/x.snirf"))], _build)
+        )
+        assert result is None
+        assert called == []  # build_call was never invoked
+
+    def test_on_each_done_failure_moves_scan_to_failures(self, tmp_path):
+        """If the per-scan on_each_done callback raises (e.g. cache write
+        failure), the scan moves from success to failure -- the user sees
+        the post-run failure, not a silently-masked success."""
+        from hrfunc.gui.state import AppState
+        from hrfunc.gui.workers import run_bulk_in_background
+
+        s = AppState()
+        scans = [_make_fake_scan(tmp_path / f"{n}.snirf") for n in "ab"]
+
+        def _build(scan):
+            return (lambda: "ok", (), {})
+
+        async def _on_each(scan, result):
+            if scan.path.name == "a.snirf":
+                raise RuntimeError("on_each_done blew up")
+
+        successes, failures = asyncio.run(
+            run_bulk_in_background(s, scans, _build, on_each_done=_on_each)
+        )
+        assert [sc.path.name for sc in successes] == ["b.snirf"]
+        assert len(failures) == 1
+        assert failures[0][0].path.name == "a.snirf"
+
+    def test_estimation_progress_reset_between_scans(self, tmp_path):
+        """Within-scan ``estimation_progress`` is reset before each new
+        scan so the previous scan's last channel number doesn't bleed
+        into the next scan's progress line."""
+        from hrfunc.gui.state import AppState
+        from hrfunc.gui.workers import run_bulk_in_background
+
+        s = AppState()
+        scans = [_make_fake_scan(tmp_path / f"{n}.snirf") for n in "ab"]
+        seen_before = []
+
+        def _build(scan):
+            def _run():
+                seen_before.append(s.estimation_progress)
+                # Pretend the per-scan call advanced channel progress.
+                s.estimation_progress = (10, 40, "s5_d3_hbo")
+                return "ok"
+            return (_run, (), {})
+
+        asyncio.run(run_bulk_in_background(s, scans, _build))
+        # Both scans saw estimation_progress=None at the start of their
+        # call (reset between scans, even though scan 1 left it set).
+        assert seen_before == [None, None]
+        # Final cleanup clears it too.
+        assert s.estimation_progress is None
+
+
+# ---------------------------------------------------------------------------
+# dataset_tree helpers (PR #55a)
+# ---------------------------------------------------------------------------
+
+
+class TestDatasetTreeBulkHelpers:
+    """Pure helpers exposed by ``dataset_tree`` for the bulk-action UI:
+    flatten subjects + sessions for ``Tree.expand``, and flatten scan
+    leaves for the Select-all checkbox."""
+
+    def _manifest(self, tmp_path):
+        from hrfunc.io.manifest import Manifest, ScanEntry
+
+        scans = [
+            ScanEntry(
+                format="snirf",
+                path=tmp_path / "sub-01/ses-A/x.snirf",
+                bids_subject="01", bids_session="A",
+                display_name="sub-01 A x",
+            ),
+            ScanEntry(
+                format="snirf",
+                path=tmp_path / "sub-01/ses-B/y.snirf",
+                bids_subject="01", bids_session="B",
+                display_name="sub-01 B y",
+            ),
+            ScanEntry(
+                format="snirf",
+                path=tmp_path / "sub-02/ses-A/z.snirf",
+                bids_subject="02", bids_session="A",
+                display_name="sub-02 A z",
+            ),
+        ]
+        return Manifest(root=tmp_path, scans=scans)
+
+    def test_all_group_node_ids_covers_subjects_and_sessions(self, tmp_path):
+        from hrfunc.gui.components.dataset_tree import (
+            build_nodes, all_group_node_ids,
+        )
+
+        nodes = build_nodes(self._manifest(tmp_path))
+        ids = all_group_node_ids(nodes)
+        # 2 subjects + 3 sessions = 5 group ids
+        assert len(ids) == 5
+        assert "subject::sub-01" in ids
+        assert "session::sub-01::ses-A" in ids
+        assert "session::sub-02::ses-A" in ids
+
+    def test_all_leaf_node_ids_returns_every_scan_path(self, tmp_path):
+        from hrfunc.gui.components.dataset_tree import (
+            build_nodes, all_leaf_node_ids,
+        )
+
+        nodes = build_nodes(self._manifest(tmp_path))
+        ids = all_leaf_node_ids(nodes)
+        assert len(ids) == 3
+        # Leaf ids are stringified paths.
+        assert all("snirf" in i for i in ids)
+
+    def test_helpers_respect_filter_text(self, tmp_path):
+        """When the user types in the filter input, build_nodes prunes
+        the tree to matching scans; the helpers should mirror that --
+        Select-all only spans visible scans."""
+        from hrfunc.gui.components.dataset_tree import (
+            build_nodes, all_leaf_node_ids, all_group_node_ids,
+        )
+
+        nodes = build_nodes(self._manifest(tmp_path), filter_text="sub-02")
+        # Only sub-02's tree survives.
+        assert len(all_leaf_node_ids(nodes)) == 1
+        ids = all_group_node_ids(nodes)
+        assert all("sub-02" in i for i in ids)

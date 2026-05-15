@@ -51,7 +51,11 @@ import numpy as np
 from nicegui import background_tasks, ui
 
 from ..state import AppState
-from ..workers import make_progress_callback, run_in_background
+from ..workers import (
+    make_progress_callback,
+    run_bulk_in_background,
+    run_in_background,
+)
 from ...io.manifest import ScanEntry
 
 if TYPE_CHECKING:
@@ -121,6 +125,21 @@ def render(state: AppState) -> None:
     ui.timer(0.5, _poll_progress)
 
 
+def _resolve_checked_scans(state: AppState) -> List[ScanEntry]:
+    """Resolve ``state.checked_scan_paths`` to ScanEntries in manifest order.
+
+    PR #55a helper. Same shape / semantics as the preprocess panel's
+    helper -- duplicated here intentionally to keep panel modules
+    self-contained (no cross-panel imports beyond the worker layer).
+    """
+    if state.manifest is None or not state.checked_scan_paths:
+        return []
+    return [
+        scan for scan in state.manifest.scans
+        if scan.path.resolve() in state.checked_scan_paths
+    ]
+
+
 def _render_body(state: AppState, opts: EstimationOptions) -> None:
     """Render the HRFs body against the current state.
 
@@ -128,35 +147,58 @@ def _render_body(state: AppState, opts: EstimationOptions) -> None:
     context without going through the refreshable wrapper.
     """
     scan = state.selected_scan
+    checked_scans = _resolve_checked_scans(state)
+    bulk_mode = len(checked_scans) >= 1
+
     with ui.column().classes("p-6 gap-4 w-full"):
         ui.label("HRFs").classes("text-2xl font-semibold")
 
-        if scan is None:
-            ui.label("Select a scan from the dataset tree.").classes(
-                "text-sm opacity-60"
-            )
+        if scan is None and not bulk_mode:
+            ui.label(
+                "Select a scan from the dataset tree, or tick scans "
+                "for a bulk run."
+            ).classes("text-sm opacity-60")
             return
 
-        ui.label(scan.display_name or scan.path.name).classes(
-            "text-sm font-mono opacity-70"
-        )
+        if bulk_mode:
+            ui.label(
+                f"Bulk run on {len(checked_scans)} checked scan"
+                f"{'s' if len(checked_scans) != 1 else ''}."
+            ).classes("text-sm font-mono opacity-70")
+        elif scan is not None:
+            ui.label(scan.display_name or scan.path.name).classes(
+                "text-sm font-mono opacity-70"
+            )
 
-        # ── Model selector + controls
+        # ── Model selector + controls. The controls remain anchored on
+        # ``selected_scan`` so the user still picks events / lambda /
+        # duration from a concrete scan's metadata -- the bulk run uses
+        # those same options across every checked scan (events that
+        # don't exist in a particular scan are silently dropped by the
+        # per-scan toeplitz call, counting as a "no events" skip).
         with ui.card().classes("w-full"):
             ui.label("Estimation").classes(
                 "text-xs uppercase opacity-60 tracking-wide"
             )
             _render_model_radio(opts, _refresh_body_for(state))
             if opts.model == MODEL_TOEPLITZ:
-                _render_toeplitz_controls(state, opts, scan)
+                if scan is not None:
+                    _render_toeplitz_controls(state, opts, scan)
+                else:
+                    ui.label(
+                        "Pick one of the checked scans to populate the "
+                        "event picker / lambda / duration controls."
+                    ).classes("text-sm opacity-60")
             else:
                 _render_canonical_note()
 
         # ── Run button + progress / error display
-        _render_run_row(state, scan, opts)
+        _render_run_row(state, scan, checked_scans, opts)
 
-        # ── Result preview
-        if state.montage is not None:
+        # ── Result preview (single-scan only; bulk mode overwrites
+        # state.montage scan-by-scan and the preview would just flash
+        # whichever scan landed last)
+        if state.montage is not None and not bulk_mode:
             ui.separator()
             ui.label("HRF preview").classes(
                 "text-xs uppercase opacity-60 tracking-wide"
@@ -292,44 +334,64 @@ def _render_canonical_note() -> None:
 
 
 def _render_run_row(
-    state: AppState, scan: ScanEntry, opts: EstimationOptions
+    state: AppState,
+    scan: Optional[ScanEntry],
+    checked: List[ScanEntry],
+    opts: EstimationOptions,
 ) -> None:
-    """Render the Run button row + progress / error display."""
-    if opts.model == MODEL_TOEPLITZ:
+    """Render the Run button row + progress / error display.
+
+    PR #55a: when ``checked`` is non-empty the button label and dispatch
+    switch into bulk mode (iterate every checked scan sequentially). The
+    preflight checks for single-scan mode (processed_cache + selected
+    events) don't gate the bulk button because each scan's gate is
+    evaluated inside the bulk worker -- scans that fail their per-scan
+    gate are skipped, not the whole run.
+    """
+    bulk_mode = bool(checked)
+    if bulk_mode:
+        verb = (
+            "Estimate HRFs" if opts.model == MODEL_TOEPLITZ
+            else "Generate canonical HRFs"
+        )
+        run_label = (
+            f"{verb} for {len(checked)} scan"
+            f"{'s' if len(checked) != 1 else ''}"
+        )
+        can_run = not state.busy
+    elif opts.model == MODEL_TOEPLITZ:
         can_run = (
-            scan in state.processed_cache
+            scan is not None
+            and scan in state.processed_cache
             and bool(opts.selected_events)
             and not state.busy
         )
         run_label = "Estimate HRFs"
     else:
-        can_run = not state.busy
+        can_run = scan is not None and not state.busy
         run_label = "Generate canonical HRF"
 
     with ui.row().classes("items-center gap-3"):
         ui.button(
             run_label,
-            on_click=lambda: _run(state, scan, opts),
+            on_click=lambda: _run_dispatch(state, scan, checked, opts),
         ).props(f"color=primary {'disable' if not can_run else ''}")
         if state.busy:
-            prog = state.estimation_progress
-            if prog is not None:
-                current, total, name = prog
-                fraction = (current + 1) / max(total, 1)
-                with ui.column().classes("gap-1 flex-grow"):
-                    ui.label(
-                        f"Channel {current + 1}/{total}: {name}"
-                    ).classes("text-xs opacity-70")
-                    ui.linear_progress(value=fraction).classes("w-64")
-            else:
-                with ui.row().classes("items-center gap-2"):
-                    ui.spinner(size="sm")
-                    ui.label("Working…").classes("text-sm opacity-70")
-        elif opts.model == MODEL_TOEPLITZ and scan not in state.processed_cache:
+            _render_busy_progress(state)
+        elif (
+            not bulk_mode
+            and opts.model == MODEL_TOEPLITZ
+            and scan is not None
+            and scan not in state.processed_cache
+        ):
             ui.label("Waiting for preprocess output…").classes(
                 "text-sm opacity-60"
             )
-        elif opts.model == MODEL_TOEPLITZ and not opts.selected_events:
+        elif (
+            not bulk_mode
+            and opts.model == MODEL_TOEPLITZ
+            and not opts.selected_events
+        ):
             ui.label("Pick at least one event to estimate.").classes(
                 "text-sm opacity-60"
             )
@@ -340,10 +402,162 @@ def _render_run_row(
             ui.label(state.last_error).classes("text-sm text-red-400")
 
 
+def _render_busy_progress(state: AppState) -> None:
+    """Two-layer progress: bulk (scan i/N) + within-scan (channel i/N).
+
+    The within-scan ``estimation_progress`` is reset between scans by
+    the bulk worker so each scan's channel counter starts fresh.
+    """
+    bulk = state.bulk_progress
+    if bulk is not None:
+        idx, total, scan = bulk
+        scan_label = scan.display_name or scan.path.name
+        with ui.column().classes("gap-1 flex-grow"):
+            with ui.row().classes("items-center gap-2"):
+                ui.spinner(size="sm")
+                ui.label(
+                    f"Scan {idx + 1}/{total}: {scan_label}"
+                ).classes("text-sm opacity-80")
+            bulk_fraction = (idx + 1) / max(total, 1)
+            ui.linear_progress(value=bulk_fraction).classes("w-64")
+            prog = state.estimation_progress
+            if prog is not None:
+                current, total_ch, name = prog
+                fraction = (current + 1) / max(total_ch, 1)
+                ui.label(
+                    f"  Channel {current + 1}/{total_ch}: {name}"
+                ).classes("text-xs opacity-60")
+                ui.linear_progress(value=fraction).classes("w-64")
+        return
+
+    prog = state.estimation_progress
+    if prog is not None:
+        current, total, name = prog
+        fraction = (current + 1) / max(total, 1)
+        with ui.column().classes("gap-1 flex-grow"):
+            ui.label(
+                f"Channel {current + 1}/{total}: {name}"
+            ).classes("text-xs opacity-70")
+            ui.linear_progress(value=fraction).classes("w-64")
+    else:
+        with ui.row().classes("items-center gap-2"):
+            ui.spinner(size="sm")
+            ui.label("Working…").classes("text-sm opacity-70")
+
+
+def _run_dispatch(
+    state: AppState,
+    selected: Optional[ScanEntry],
+    checked: List[ScanEntry],
+    opts: EstimationOptions,
+) -> None:
+    """Route Estimate / Generate to single or bulk.
+
+    PR #55a: when scans are checked in the dataset tree, iterate every
+    one sequentially via the bulk worker. Otherwise fall back to the
+    legacy single-scan path against ``selected``.
+    """
+    if checked:
+        _run_bulk(state, checked, opts)
+    elif selected is not None:
+        _run(state, selected, opts)
+
+
+def _run_bulk(
+    state: AppState,
+    scans: List[ScanEntry],
+    opts: EstimationOptions,
+) -> None:
+    """Iterate the estimate / canonical call across each checked scan.
+
+    Continue-on-error: a per-scan failure (e.g. no events matched,
+    preprocess output missing, library exception) is logged to
+    ``last_error``, counted in the failure list, and the run continues.
+    The final toast summarises N successes / M failures.
+
+    Toeplitz mode: each scan needs its own processed Raw in
+    ``processed_cache`` and a non-empty event intersection with
+    ``opts.selected_events``. Scans that fail either gate are skipped
+    rather than crashing the whole run -- the per-scan call returns
+    ``None`` from ``run_toeplitz_sync`` and the bulk worker treats that
+    as success-with-empty-result (the on_each_done early-returns and
+    nothing lands in state.montage for that scan).
+
+    Canonical mode: every checked scan just needs a Raw (raw or
+    processed cache) to size the output, which is loaded on demand
+    inside the worker.
+    """
+    if state.busy:
+        return
+
+    snapshot = EstimationOptions(
+        model=opts.model,
+        lmbda=opts.lmbda,
+        duration=opts.duration,
+        selected_events=opts.selected_events,
+    )
+
+    def _build(scan: ScanEntry):
+        if snapshot.model == MODEL_TOEPLITZ:
+            if scan not in state.processed_cache:
+                # Preflight skip -- record as failure via the worker.
+                return None
+            raw = state.processed_cache.get(scan)
+            progress_cb = make_progress_callback(state)
+            return (run_toeplitz_sync, (raw, snapshot, progress_cb), {})
+        # Canonical: prefer processed_cache, fall back to raw_cache,
+        # otherwise load on demand inside the worker thread.
+        def _run_canonical():
+            if scan in state.processed_cache:
+                source_raw = state.processed_cache.get(scan)
+            elif scan in state.raw_cache:
+                source_raw = state.raw_cache.get(scan)
+            else:
+                source_raw = state.raw_cache.get(scan)
+            return run_canonical_sync(source_raw, snapshot)
+        return (_run_canonical, (), {})
+
+    async def _on_each_done(scan: ScanEntry, result) -> None:
+        if result is None:
+            return
+        state.montage = result
+        state.montage_source_scan = scan
+        state.publish("hrf_estimated", scan)
+
+    async def _bulk() -> None:
+        bulk_result = await run_bulk_in_background(
+            state, scans, _build,
+            on_each_done=_on_each_done,
+            label="estimate_hrf",
+        )
+        if bulk_result is None:
+            return
+        successes, failures = bulk_result
+        n_ok, n_fail = len(successes), len(failures)
+        verb = (
+            "Estimated HRFs for"
+            if snapshot.model == MODEL_TOEPLITZ
+            else "Generated canonical HRFs for"
+        )
+        summary = f"{verb} {n_ok}/{n_ok + n_fail} scan(s)."
+        if failures:
+            fail_names = ", ".join(
+                s.display_name or s.path.name for s, _ in failures[:3]
+            )
+            if len(failures) > 3:
+                fail_names += f" (+{len(failures) - 3} more)"
+            summary += f" Failed/skipped: {fail_names}."
+        ui.notify(
+            summary, type="positive" if n_fail == 0 else "warning"
+        )
+
+    background_tasks.create(_bulk())
+
+
 def _run(
     state: AppState, scan: ScanEntry, opts: EstimationOptions
 ) -> None:
-    """Click handler for Estimate / Generate.
+    """Click handler for Estimate / Generate (single-scan path).
 
     Snapshots options, dispatches the appropriate sync worker through
     ``workers.run_in_background``. On success, stashes the resulting

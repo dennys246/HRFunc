@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 from nicegui import background_tasks, ui
 
 from ..state import AppState
-from ..workers import run_in_background
+from ..workers import run_bulk_in_background, run_in_background
 from ...io.manifest import ScanEntry
 
 if TYPE_CHECKING:
@@ -99,6 +99,23 @@ def render(state: AppState) -> None:
     state.subscribe("preprocess_done", _refresh)
 
 
+def _resolve_checked_scans(state: AppState) -> list:
+    """Resolve ``state.checked_scan_paths`` to ScanEntries in manifest order.
+
+    PR #55a helper. Returns the list of currently-checked scans, in the
+    same order they appear in the manifest, so a bulk run iterates in a
+    stable order. Paths that no longer match a manifest scan (e.g. after
+    a rescan dropped a file) are silently skipped -- the on-disk source
+    is gone, the user wouldn't expect the run to fail on it.
+    """
+    if state.manifest is None or not state.checked_scan_paths:
+        return []
+    return [
+        scan for scan in state.manifest.scans
+        if scan.path.resolve() in state.checked_scan_paths
+    ]
+
+
 def _render_body(state: AppState, opts: PreprocessOptions) -> None:
     """Render the body against the current scan + cache state.
 
@@ -106,21 +123,33 @@ def _render_body(state: AppState, opts: PreprocessOptions) -> None:
     synthetic NiceGUI context without going through the refreshable wrapper.
     """
     scan = state.selected_scan
+    checked_scans = _resolve_checked_scans(state)
+    bulk_mode = len(checked_scans) >= 1
+
     with ui.column().classes("p-6 gap-4 w-full"):
         ui.label("Preprocess").classes("text-2xl font-semibold")
 
-        if scan is None:
-            ui.label("Select a scan from the dataset tree.").classes(
-                "text-sm opacity-60"
-            )
+        if scan is None and not bulk_mode:
+            ui.label(
+                "Select a scan from the dataset tree, or tick scans "
+                "for a bulk run."
+            ).classes("text-sm opacity-60")
             return
 
-        ui.label(scan.display_name or scan.path.name).classes(
-            "text-sm font-mono opacity-70"
-        )
+        if bulk_mode:
+            ui.label(
+                f"Bulk run on {len(checked_scans)} checked scan"
+                f"{'s' if len(checked_scans) != 1 else ''}."
+            ).classes("text-sm font-mono opacity-70")
+        else:
+            ui.label(scan.display_name or scan.path.name).classes(
+                "text-sm font-mono opacity-70"
+            )
 
-        raw_loaded = scan in state.raw_cache
-        already_processed = scan in state.processed_cache
+        raw_loaded = scan is not None and scan in state.raw_cache
+        already_processed = (
+            scan is not None and scan in state.processed_cache
+        )
 
         # ── Options
         with ui.card().classes("w-full"):
@@ -165,22 +194,36 @@ def _render_body(state: AppState, opts: PreprocessOptions) -> None:
             ).classes("text-xs opacity-60 italic")
 
         # ── Run button
-        run_disabled = (not raw_loaded) or state.busy
+        # PR #55a: when scans are checked, the button iterates over the
+        # checked set sequentially (bulk mode). Otherwise it runs against
+        # the currently-selected scan (single mode), which is the legacy
+        # behaviour. Per-scan raw loading happens inside the worker so
+        # an unloaded scan in the checked set doesn't block the run.
+        if bulk_mode:
+            run_label = (
+                f"Run full pipeline on {len(checked_scans)} scan"
+                f"{'s' if len(checked_scans) != 1 else ''}"
+            )
+            run_disabled = state.busy
+        else:
+            run_label = "Run full pipeline"
+            run_disabled = (not raw_loaded) or state.busy
+
         with ui.row().classes("items-center gap-3"):
             ui.button(
-                "Run full pipeline",
-                on_click=lambda: _run_pipeline(state, scan, opts),
+                run_label,
+                on_click=lambda: _run_pipeline_dispatch(
+                    state, scan, checked_scans, opts
+                ),
             ).props(
                 f"color=primary {'disable' if run_disabled else ''}"
             )
-            if not raw_loaded:
+            if not bulk_mode and not raw_loaded:
                 ui.label("Waiting for scan to load…").classes(
                     "text-sm opacity-60"
                 )
             elif state.busy:
-                with ui.row().classes("items-center gap-2"):
-                    ui.spinner(size="sm")
-                    ui.label("Preprocessing…").classes("text-sm opacity-70")
+                _render_busy_progress(state)
 
         # ── Surface the last error if there is one
         if state.last_error and not state.busy:
@@ -197,10 +240,46 @@ def _render_body(state: AppState, opts: PreprocessOptions) -> None:
             _render_before_after(state, scan)
 
 
+def _snapshot_opts(opts: PreprocessOptions) -> PreprocessOptions:
+    """Snapshot options at click-time so the closure sees stable values.
+
+    Baseline correct is forced True in GLM mode to match library
+    behaviour -- the UI hides the toggle there but a manual state
+    mutation could still leave it False, so enforce defensively.
+    """
+    return PreprocessOptions(
+        deconvolution=opts.deconvolution,
+        apply_motion_correction=opts.apply_motion_correction,
+        apply_beer_lambert=opts.apply_beer_lambert,
+        apply_baseline_correct=(
+            opts.apply_baseline_correct or not opts.deconvolution
+        ),
+    )
+
+
+def _run_pipeline_dispatch(
+    state: AppState,
+    selected: Optional[ScanEntry],
+    checked: list,
+    opts: PreprocessOptions,
+) -> None:
+    """Route the Run button to single or bulk based on the checked set.
+
+    PR #55a: when the dataset tree has scans checked, the click iterates
+    over the whole checked set sequentially (continue-on-error). When
+    nothing is checked, falls back to the legacy single-scan path against
+    ``state.selected_scan``.
+    """
+    if checked:
+        _run_pipeline_bulk(state, checked, opts)
+    elif selected is not None:
+        _run_pipeline(state, selected, opts)
+
+
 def _run_pipeline(
     state: AppState, scan: ScanEntry, opts: PreprocessOptions
 ) -> None:
-    """Click handler for the Run button.
+    """Click handler for the Run button (single-scan path).
 
     Snapshots the toggle state, then dispatches the actual preprocessing on
     the background-task helper. The helper sets ``state.busy`` so the
@@ -213,18 +292,7 @@ def _run_pipeline(
         state.last_error = "Raw not loaded; wait for the scan to finish loading."
         return
 
-    # Snapshot options so the closure sees the values at click time, not at
-    # task-completion time. Baseline correct is forced True in GLM mode to
-    # match library behavior — the UI hides the toggle there but a manual
-    # state mutation could still leave it False, so enforce defensively.
-    snapshot = PreprocessOptions(
-        deconvolution=opts.deconvolution,
-        apply_motion_correction=opts.apply_motion_correction,
-        apply_beer_lambert=opts.apply_beer_lambert,
-        apply_baseline_correct=(
-            opts.apply_baseline_correct or not opts.deconvolution
-        ),
-    )
+    snapshot = _snapshot_opts(opts)
 
     async def _on_done(result) -> None:
         if result is None:
@@ -243,6 +311,93 @@ def _run_pipeline(
             on_done=_on_done,
         )
     )
+
+
+def _run_pipeline_bulk(
+    state: AppState,
+    scans: list,
+    opts: PreprocessOptions,
+) -> None:
+    """Iterate ``run_pipeline_sync`` across a set of checked scans (PR #55a).
+
+    Each scan's raw is loaded on demand inside the worker thread
+    (``state.raw_cache.get(scan)`` synchronously loads if missing), so
+    pre-loading every checked scan isn't required. Per-scan failures land
+    in ``state.last_error`` and the run continues; the final summary toast
+    spells out N successes / M failures.
+    """
+    if state.busy:
+        return
+
+    snapshot = _snapshot_opts(opts)
+
+    def _build(scan: ScanEntry):
+        # Per-scan: load the raw (blocking inside the worker thread is
+        # fine), then run the pipeline against it.
+        def _run() -> Optional["mne.io.BaseRaw"]:
+            raw = state.raw_cache.get(scan)
+            return run_pipeline_sync(raw, snapshot)
+        return (_run, (), {})
+
+    async def _on_each_done(scan: ScanEntry, result) -> None:
+        if result is None:
+            return
+        state.processed_cache._cache[scan.path.resolve()] = result
+        state.publish("preprocess_done", scan)
+
+    async def _bulk() -> None:
+        bulk_result = await run_bulk_in_background(
+            state,
+            scans,
+            _build,
+            on_each_done=_on_each_done,
+            label="preprocess",
+        )
+        if bulk_result is None:
+            return
+        successes, failures = bulk_result
+        n_ok, n_fail = len(successes), len(failures)
+        summary = f"Preprocessed {n_ok}/{n_ok + n_fail} scan(s)."
+        if failures:
+            fail_names = ", ".join(
+                s.display_name or s.path.name for s, _ in failures[:3]
+            )
+            if len(failures) > 3:
+                fail_names += f" (+{len(failures) - 3} more)"
+            summary += f" Failed: {fail_names}."
+        ui.notify(
+            summary, type="positive" if n_fail == 0 else "warning"
+        )
+
+    background_tasks.create(_bulk())
+
+
+def _render_busy_progress(state: AppState) -> None:
+    """Render the spinner + per-scan bulk progress + within-scan progress.
+
+    PR #55a: during a bulk run there are two layers of progress -- the
+    outer ``bulk_progress`` (scan i/N) and the inner
+    ``estimation_progress`` (channel i/N) when the per-scan worker
+    pushes channel-level callbacks. Preprocess doesn't currently emit
+    channel progress, but the bulk line still gives users feedback that
+    the run is advancing across scans.
+    """
+    bulk = state.bulk_progress
+    if bulk is not None:
+        idx, total, scan = bulk
+        scan_label = scan.display_name or scan.path.name
+        with ui.column().classes("gap-1"):
+            with ui.row().classes("items-center gap-2"):
+                ui.spinner(size="sm")
+                ui.label(
+                    f"Scan {idx + 1}/{total}: {scan_label}"
+                ).classes("text-sm opacity-80")
+            fraction = (idx + 1) / max(total, 1)
+            ui.linear_progress(value=fraction).classes("w-64")
+    else:
+        with ui.row().classes("items-center gap-2"):
+            ui.spinner(size="sm")
+            ui.label("Preprocessing…").classes("text-sm opacity-70")
 
 
 def run_pipeline_sync(

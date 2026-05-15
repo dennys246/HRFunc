@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, List, Optional, Sequence, Tuple
 
 from .state import AppState
+from ..io.manifest import ScanEntry
 
 logger = logging.getLogger(__name__)
 
@@ -111,3 +112,110 @@ async def run_in_background(
             logger.exception("on_done callback failed: %s", exc)
 
     return result
+
+
+BulkResult = Tuple[List[ScanEntry], List[Tuple[ScanEntry, str]]]
+
+
+async def run_bulk_in_background(
+    state: AppState,
+    scans: Sequence[ScanEntry],
+    build_call: Callable[[ScanEntry], Optional[Tuple[Callable[..., Any], tuple, dict]]],
+    *,
+    on_each_done: Optional[Callable[[ScanEntry, Any], Awaitable[None]]] = None,
+    label: str = "bulk run",
+) -> Optional[BulkResult]:
+    """Run a synchronous callable against each scan in ``scans`` in order.
+
+    PR #55a -- the "checked N scans, click Run" workflow on the Preprocess
+    / HRF / Activity tabs. Acquires the busy gate once for the whole
+    batch (matching the single-worker contract on AppState.busy) and
+    advances ``state.bulk_progress`` per scan so panels can render a
+    "Scan i/N: name" line above the within-scan progress.
+
+    The per-scan call is built by ``build_call(scan) -> (func, args, kwargs)``
+    so each panel can layer its own preflight (e.g. "is the raw cached
+    for this scan?") without duplicating the dispatch machinery. Returning
+    ``None`` from ``build_call`` skips the scan with a "not ready"
+    reason -- counted as skipped, not failed.
+
+    Continue-on-error semantics: per-scan exceptions are caught, logged,
+    stamped onto ``state.last_error`` (overwritten per failure), and the
+    loop continues to the next scan. The returned tuple
+    ``(successes, failures)`` lists which scans landed in which bucket so
+    the caller can surface a "N succeeded, M failed" toast.
+
+    ``on_each_done`` runs after each successful per-scan call -- caches
+    the result, publishes the per-scan event, etc. Exceptions from it
+    move the scan from success → failure (so a failed cache write is
+    visible to the user, not silently masked).
+
+    The function returns ``None`` if the busy gate is already held
+    (matches ``run_in_background`` so callers can detect "already
+    running" symmetrically).
+    """
+    if state.busy:
+        logger.warning(
+            "run_bulk_in_background: state.busy already True; refusing to "
+            "start a bulk run on top of an in-flight task."
+        )
+        return None
+    if not scans:
+        return ([], [])
+
+    state.set_busy(True)
+    state.last_error = None
+    successes: List[ScanEntry] = []
+    failures: List[Tuple[ScanEntry, str]] = []
+    total = len(scans)
+    loop = asyncio.get_event_loop()
+    try:
+        for index, scan in enumerate(scans):
+            state.bulk_progress = (index, total, scan)
+            # Per-scan within-channel progress is reset between scans
+            # so the previous scan's last channel number doesn't bleed
+            # into the next scan's progress line.
+            state.estimation_progress = None
+
+            try:
+                built = build_call(scan)
+            except Exception as exc:  # noqa: BLE001
+                msg = f"build_call failed: {type(exc).__name__}: {exc}"
+                logger.exception("%s: %s", label, msg)
+                state.last_error = f"{scan.path.name}: {msg}"
+                failures.append((scan, msg))
+                continue
+
+            if built is None:
+                failures.append((scan, "skipped (preflight)"))
+                continue
+
+            func, args, kwargs = built
+            try:
+                result = await loop.run_in_executor(
+                    None, lambda f=func, a=args, k=kwargs: f(*a, **k)
+                )
+            except Exception as exc:  # noqa: BLE001
+                msg = f"{type(exc).__name__}: {exc}"
+                logger.exception("%s on %s: %s", label, scan.path.name, msg)
+                state.last_error = f"{scan.path.name}: {msg}"
+                failures.append((scan, msg))
+                continue
+
+            if on_each_done is not None:
+                try:
+                    await on_each_done(scan, result)
+                except Exception as exc:  # noqa: BLE001
+                    msg = f"on_each_done failed: {type(exc).__name__}: {exc}"
+                    logger.exception("%s on %s: %s", label, scan.path.name, msg)
+                    state.last_error = f"{scan.path.name}: {msg}"
+                    failures.append((scan, msg))
+                    continue
+
+            successes.append(scan)
+    finally:
+        state.bulk_progress = None
+        state.estimation_progress = None
+        state.set_busy(False)
+
+    return (successes, failures)
