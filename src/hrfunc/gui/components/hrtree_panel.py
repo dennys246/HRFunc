@@ -1099,6 +1099,73 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
         state.add_roi()
         _refresh_all()
 
+    async def _on_add_montage() -> None:
+        """Open a file picker, load the chosen scan, and emit one
+        sphere ROI per unique channel location (PR #57)."""
+        from .dataset_picker import pick_file
+
+        path = await pick_file(
+            file_types=[
+                "fNIRS files (*.snirf *.fif *.hdr)",
+                "All files (*.*)",
+            ],
+        )
+        if path is None:
+            return  # user cancelled
+
+        # Load on the event loop -- MNE's read_raw_* is sync. For
+        # typical fNIRS files this is fast enough (< 1 s); larger
+        # recordings could move to a worker thread later. The path
+        # discrimination mirrors RawCache._load_from_path so the
+        # picker accepts the same set of formats the project loader
+        # already understands.
+        try:
+            raw = _load_raw_for_montage(path)
+        except Exception as exc:  # noqa: BLE001 -- surface, don't crash
+            logger.exception(
+                "add montage: failed to load %s: %s", path, exc
+            )
+            ui.notify(
+                f"Couldn't read {path.name}: {type(exc).__name__}: {exc}",
+                type="negative",
+            )
+            return
+
+        # Filter to the current haemoglobin so a HbO-only library
+        # doesn't get HbR channel locations slipped in. ``None`` /
+        # ``"both"`` means "emit a sphere per source-detector pair
+        # regardless" (the dedupe still collapses the HbO/HbR pair
+        # at the same xyz).
+        if state.library_oxygenation == "hbo":
+            oxy_filter: Optional[bool] = True
+        elif state.library_oxygenation == "hbr":
+            oxy_filter = False
+        else:
+            oxy_filter = None
+
+        new_slots = rois_from_raw(raw, library_oxygenation=oxy_filter)
+        if not new_slots:
+            ui.notify(
+                f"No channels with locations found in {path.name}.",
+                type="warning",
+            )
+            return
+
+        # Append all new slots and activate the last one so the user
+        # can immediately tweak it. ``add_roi`` is the per-slot
+        # appender; we bypass it here for the bulk append to avoid
+        # publishing "filter_changed" N times in a row, then publish
+        # once at the end via _refresh_all.
+        for slot in new_slots:
+            state.cluster_rois.append(slot)
+        state.cluster_active_index = len(state.cluster_rois) - 1
+        ui.notify(
+            f"Added {len(new_slots)} ROI"
+            f"{'s' if len(new_slots) != 1 else ''} from {path.name}.",
+            type="positive",
+        )
+        _refresh_all()
+
     def _on_select(index: int) -> None:
         # Re-seed the library_selected_hrf from the slot's anchor so
         # the detail pane + viz click-state mirror what the active
@@ -1127,9 +1194,23 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
         ui.label("ROIs").classes(
             "text-xs uppercase opacity-60 tracking-wide"
         )
-        ui.button(
-            "Add ROI", icon="add", on_click=_on_add,
-        ).props("flat dense color=primary")
+        with ui.row().classes("items-center gap-1"):
+            ui.button(
+                "Add ROI", icon="add", on_click=_on_add,
+            ).props("flat dense color=primary")
+            # PR #57: auto-create one sphere ROI per unique channel
+            # location from an MNE-compatible file. The handler is
+            # async (file picker + load), so it must be passed as a
+            # coroutine-function -- a sync lambda wrapping the async
+            # call would silently no-op (see gui-async-gotchas memory).
+            ui.button(
+                "Add montage",
+                icon="device_hub",
+                on_click=_on_add_montage,
+            ).props("flat dense").tooltip(
+                "Pick a SNIRF / NIRX / FIF file and add a sphere ROI "
+                "per unique channel location."
+            )
 
     # Cap the visible height so a long montage scrolls inside the
     # sub-tab instead of stretching the page. ~8 rows at ~32px each.
@@ -1179,6 +1260,173 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
                     icon="delete_outline",
                     on_click=lambda _e=None, idx=i: _on_delete(idx),
                 ).props("flat dense round size=sm").classes("opacity-60")
+
+
+# ---------------------------------------------------------------------------
+# PR #57: ADD MONTAGE per-channel auto-create
+# ---------------------------------------------------------------------------
+
+
+# Default sphere radius (mm) for ROIs auto-created from channel locations.
+# A typical fNIRS source-detector pair covers roughly 1.5 cm of cortex
+# directly beneath the midpoint, so 15 mm is a sensible default. Mirrors
+# the ``ROISlot.radius_mm`` default of 20 mm tuned slightly tighter
+# because per-channel montages tend to be denser than free-floating ROIs.
+DEFAULT_PER_CHANNEL_RADIUS_MM = 15.0
+
+
+def _strip_oxygenation_suffix(ch_name: str) -> str:
+    """Drop the trailing hbo/hbr/760/850 suffix from a channel name.
+
+    Per-channel ROIs are scientifically one-per-source-detector pair
+    (HbO and HbR for the same pair share the optode location), so the
+    ROI name should not duplicate the haemoglobin distinction. Returns
+    the input unchanged when no recognised suffix is found.
+
+    Pattern: matches ``"... hbo"``, ``"... hbr"``, ``"... 760"``,
+    ``"... 850"`` with any whitespace / underscore / hyphen separator.
+    """
+    import re
+
+    # Trailing oxygenation/wavelength + optional separator before it.
+    m = re.match(
+        r"^(.*?)[\s_\-]*(hbo|hbr|760|850|760nm|850nm)$",
+        ch_name.strip(),
+        flags=re.IGNORECASE,
+    )
+    return m.group(1).rstrip(" _-") if m else ch_name.strip()
+
+
+def _load_raw_for_montage(path: "Path"):
+    """Read a NIRX / SNIRF / FIF file just for its info structure.
+
+    PR #57 helper for the "Add montage" picker -- we only need the
+    channel locations, so we preload data (cheap for SNIRF / NIRX
+    headers, single fseek for FIF). The loader matches the format
+    detection used by ``hrfunc.io.raw_cache._load_from_path`` so the
+    picker accepts whatever the project loader does.
+
+    Raises whatever MNE raises on a malformed file; the GUI click
+    handler catches and surfaces.
+    """
+    import mne
+
+    suffix = path.suffix.lower()
+    if suffix == ".snirf":
+        return mne.io.read_raw_snirf(str(path), verbose="ERROR")
+    if suffix == ".fif":
+        return mne.io.read_raw_fif(str(path), verbose="ERROR")
+    # NIRX directories use ``*.hdr`` as the recognisable file in the
+    # tree; if the user pointed at a .hdr, MNE wants the parent dir.
+    if suffix == ".hdr":
+        return mne.io.read_raw_nirx(str(path.parent), verbose="ERROR")
+    # Folder fallback (user picked the NIRX directory directly).
+    return mne.io.read_raw_nirx(str(path), verbose="ERROR")
+
+
+def rois_from_raw(
+    raw,
+    *,
+    radius_mm: float = DEFAULT_PER_CHANNEL_RADIUS_MM,
+    library_oxygenation: Optional[bool] = None,
+) -> "List":
+    """Build a list of ROISlots, one per unique channel location.
+
+    PR #57 helper. fNIRS channels naturally come in HbO / HbR pairs
+    (or 760 nm / 850 nm pairs in OD space) that share the same
+    source-detector midpoint. The naive "one ROI per channel"
+    interpretation would emit duplicate spheres at every location;
+    the right behaviour is "one ROI per unique optode location" so
+    a 40-channel cap turns into 20 ROIs.
+
+    Deduplication is on the rounded mm location to absorb floating-
+    point jitter in the MNE info structure (channels often co-locate
+    within microns rather than exactly).
+
+    Channel names are normalised to drop the oxygenation suffix
+    ("S1_D1 hbo" → "S1_D1") so each ROI carries the source-detector
+    label, not a hemoglobin distinction.
+
+    ``library_oxygenation``: when set (True for HbO, False for HbR),
+    only channels matching that hemoglobin contribute to the ROI
+    locations. None means "use both" and lets HbO+HbR contribute the
+    same midpoint (still deduped).
+
+    Returns a fresh list of ROISlots; the caller is responsible for
+    appending them to ``state.cluster_rois``. Each slot is named
+    "Montage: <ch_name>" so the multi-ROI list visually groups them.
+
+    Module-level + pure so the per-channel logic is testable without
+    the GUI.
+    """
+    from ..state import ROISlot
+    from ...spatial.coords import meters_to_mm
+
+    slots: List = []
+    seen_keys: Dict[Tuple[int, int, int], int] = {}
+
+    # MNE locations are in meters; we round to a small mm grid for the
+    # dedupe key so micron-scale jitter between HbO/HbR doesn't make
+    # them look like different channels. 0.1 mm is finer than any
+    # realistic fNIRS placement uncertainty.
+    DEDUPE_GRID_MM = 0.1
+
+    for channel in raw.info["chs"]:
+        ch_name = channel.get("ch_name") or ""
+        if not ch_name or ch_name.lower() == "canonical":
+            continue
+
+        # Honour the haemoglobin filter when set.
+        if library_oxygenation is not None:
+            from ..._utils import _is_oxygenated
+
+            try:
+                is_hbo = _is_oxygenated(ch_name.lower())
+            except (ValueError, LookupError):
+                # Channel without an oxygenation suffix -- include it
+                # only when the caller hasn't asked to filter.
+                continue
+            if is_hbo != library_oxygenation:
+                continue
+
+        loc = channel.get("loc")
+        if loc is None or len(loc) < 3:
+            continue
+        x_m, y_m, z_m = float(loc[0]), float(loc[1]), float(loc[2])
+        # MNE channels without a recorded location report (0, 0, 0).
+        # Emitting a sphere at the origin would be meaningless and
+        # pile every such channel on top of each other.
+        if x_m == 0.0 and y_m == 0.0 and z_m == 0.0:
+            continue
+
+        x_mm = meters_to_mm(x_m)
+        y_mm = meters_to_mm(y_m)
+        z_mm = meters_to_mm(z_m)
+
+        dedupe_key = (
+            int(round(x_mm / DEDUPE_GRID_MM)),
+            int(round(y_mm / DEDUPE_GRID_MM)),
+            int(round(z_mm / DEDUPE_GRID_MM)),
+        )
+        if dedupe_key in seen_keys:
+            # Same location as a previous channel (most commonly its
+            # HbO or HbR partner). Skip so we emit one sphere per
+            # source-detector pair.
+            continue
+        seen_keys[dedupe_key] = len(slots)
+
+        display = _strip_oxygenation_suffix(ch_name)
+        slots.append(
+            ROISlot(
+                name=f"Montage: {display}",
+                shape=SHAPE_SPHERE,
+                center_x_mm=x_mm,
+                center_y_mm=y_mm,
+                center_z_mm=z_mm,
+                radius_mm=float(radius_mm),
+            )
+        )
+    return slots
 
 
 def _describe_slot(slot) -> str:

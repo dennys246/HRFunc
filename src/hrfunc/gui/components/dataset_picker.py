@@ -84,6 +84,58 @@ async def pick_folder() -> Optional[Path]:
     return Path(paths[0])
 
 
+async def pick_file(
+    *,
+    file_types: Optional[List[str]] = None,
+) -> Optional[Path]:
+    """Open the native OS file-open picker.
+
+    PR #57 helper for the Cluster sub-tab's "Add montage" button, which
+    needs to read an MNE-compatible fNIRS file (SNIRF / NIRX header /
+    FIF) and turn its channels into per-channel sphere ROIs. Mirrors
+    :func:`pick_folder` exactly -- same pywebview-≥5 async return-type
+    handling and same picklable-enum shim -- but uses the OPEN dialog
+    kind so the user picks a file instead of a folder.
+
+    ``file_types``: optional list of pywebview file-type filter strings
+    (e.g. ``["SNIRF files (*.snirf)", "All files (*.*)"]``). Ignored on
+    non-native launches.
+
+    Returns the chosen Path, or None on cancel / non-native launch.
+    """
+    try:
+        import webview
+    except ImportError:
+        ui.notify("pywebview not installed", type="negative")
+        return None
+
+    window = getattr(app, "native", None) and app.native.main_window
+    if window is None:
+        ui.notify(
+            "File picker requires native window mode. "
+            "Launch with `hrfunc` (not via browser).",
+            type="warning",
+        )
+        return None
+
+    import inspect
+
+    from .._webview_compat import dialog_kind
+    kwargs = {}
+    if file_types:
+        kwargs["file_types"] = tuple(file_types)
+    result = window.create_file_dialog(
+        dialog_kind(webview, "OPEN"), **kwargs
+    )
+    if inspect.isawaitable(result):
+        paths = await result
+    else:
+        paths = result
+    if not paths:
+        return None
+    return Path(paths[0])
+
+
 def list_recent_manifests(limit: int = 10) -> List[Manifest]:
     """Enumerate cached manifests from the XDG cache directory.
 
