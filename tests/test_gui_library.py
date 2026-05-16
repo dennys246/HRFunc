@@ -1562,3 +1562,170 @@ class TestRoisFromRaw:
         ])
         slots = library.rois_from_raw(raw)
         assert all(s.shape == library.SHAPE_SPHERE for s in slots)
+
+
+# ---------------------------------------------------------------------------
+# PR follow-up: multi-ROI visibility flow
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPlotlyFigureRoiShapes:
+    """``build_plotly_figure`` accepts both legacy ``roi_shape=`` (single)
+    and the new ``roi_shapes=`` (list) parameters. The multi-ROI
+    visibility flow uses the list form to render every visible slot's
+    overlay simultaneously."""
+
+    def test_single_shape_via_legacy_kwarg(self):
+        from hrfunc.spatial.shapes import Sphere
+
+        sphere = Sphere(center_mm=(0.0, 0.0, 0.0), radius_mm=15.0)
+        fig = library.build_plotly_figure(
+            {}, roi_shape=sphere,
+        )
+        # No HRFs to scatter, but one Mesh3d overlay should be present.
+        mesh_traces = [t for t in fig.data if type(t).__name__ == "Mesh3d"]
+        assert len(mesh_traces) == 1
+
+    def test_multiple_shapes_via_list_kwarg(self):
+        from hrfunc.spatial.shapes import Box, Sphere
+
+        s1 = Sphere(center_mm=(0.0, 0.0, 0.0), radius_mm=10.0)
+        s2 = Sphere(center_mm=(20.0, 0.0, 0.0), radius_mm=10.0)
+        b = Box(
+            center_mm=(0.0, 20.0, 0.0),
+            half_extents_mm=(5.0, 5.0, 5.0),
+        )
+        fig = library.build_plotly_figure(
+            {}, roi_shapes=[s1, s2, b],
+        )
+        mesh_traces = [t for t in fig.data if type(t).__name__ == "Mesh3d"]
+        assert len(mesh_traces) == 3
+
+    def test_roi_shapes_wins_when_both_provided(self):
+        """If both kwargs are passed, ``roi_shapes`` takes precedence
+        -- the single-shape form is back-compat shim only."""
+        from hrfunc.spatial.shapes import Sphere
+
+        single = Sphere(center_mm=(0.0, 0.0, 0.0), radius_mm=10.0)
+        multi = [
+            Sphere(center_mm=(10.0, 0.0, 0.0), radius_mm=5.0),
+            Sphere(center_mm=(20.0, 0.0, 0.0), radius_mm=5.0),
+        ]
+        fig = library.build_plotly_figure(
+            {}, roi_shape=single, roi_shapes=multi,
+        )
+        mesh_traces = [t for t in fig.data if type(t).__name__ == "Mesh3d"]
+        # The list wins (2 overlays), the single is ignored.
+        assert len(mesh_traces) == 2
+
+    def test_empty_roi_shapes_no_overlay(self):
+        from hrfunc.spatial.shapes import Sphere
+
+        fig = library.build_plotly_figure({}, roi_shapes=[])
+        mesh_traces = [t for t in fig.data if type(t).__name__ == "Mesh3d"]
+        assert mesh_traces == []
+
+
+class TestVisibleShapes:
+    """``_visible_shapes(state)`` underpins the multi-ROI viz: only
+    slots with ``visible=True`` AND a buildable shape contribute."""
+
+    def test_empty_when_cluster_roi_active_false(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.cluster_roi_active = False
+        # Even with a real shape in slot 0, the master toggle gates everything.
+        assert library._visible_shapes(s) == []
+
+    def test_returns_only_visible_slots(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.cluster_roi_active = True
+        # Add a second slot, hide the first.
+        s.add_roi()
+        s.set_active_roi(0)
+        s.cluster_rois[0].visible = False
+        s.cluster_rois[1].visible = True
+
+        pairs = library._visible_shapes(s)
+        # Only the second slot contributes.
+        assert len(pairs) == 1
+        assert pairs[0][0] is s.cluster_rois[1]
+
+    def test_drops_slots_with_no_buildable_shape(self):
+        """A slot in atlas mode with no region picked has no shape.
+        It's silently dropped so the viz still renders the others."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.cluster_roi_active = True
+        s.cluster_rois[0].shape = library.SHAPE_ATLAS_REGION
+        s.cluster_rois[0].atlas_label = None
+        s.add_roi()  # second slot stays at sphere defaults
+
+        pairs = library._visible_shapes(s)
+        assert len(pairs) == 1
+        # The remaining pair is the sphere slot (index 1).
+        assert pairs[0][0] is s.cluster_rois[1]
+
+
+class TestVisibleRoiKeysUnion:
+    """``_visible_roi_keys`` computes the UNION of every visible
+    slot's ROI membership. The viz uses this union for the gold halo
+    (one halo, every visible ROI's HRFs)."""
+
+    def _hbo_hrf(self, key, loc_mm):
+        return {
+            key: {
+                "oxygenation": True,
+                "location": [c / 1000.0 for c in loc_mm],  # mm -> meters
+            }
+        }
+
+    def test_union_across_two_disjoint_spheres(self):
+        from hrfunc.gui.state import AppState
+
+        # Two HRFs far apart; each sphere should match one of them.
+        matched = {}
+        matched.update(self._hbo_hrf("a", (0.0, 0.0, 0.0)))
+        matched.update(self._hbo_hrf("b", (50.0, 0.0, 0.0)))
+
+        s = AppState()
+        s.cluster_roi_active = True
+        s.cluster_rois[0].shape = library.SHAPE_SPHERE
+        s.cluster_rois[0].center_x_mm = 0.0
+        s.cluster_rois[0].radius_mm = 10.0
+        new = s.add_roi()
+        new.shape = library.SHAPE_SPHERE
+        new.center_x_mm = 50.0
+        new.center_y_mm = 0.0
+        new.center_z_mm = 0.0
+        new.radius_mm = 10.0
+
+        union_keys, pairs = library._visible_roi_keys(s, matched)
+        assert union_keys == {"a", "b"}
+        assert len(pairs) == 2
+
+    def test_hidden_slot_excluded_from_union(self):
+        from hrfunc.gui.state import AppState
+
+        matched = {}
+        matched.update(self._hbo_hrf("a", (0.0, 0.0, 0.0)))
+        matched.update(self._hbo_hrf("b", (50.0, 0.0, 0.0)))
+
+        s = AppState()
+        s.cluster_roi_active = True
+        s.cluster_rois[0].shape = library.SHAPE_SPHERE
+        s.cluster_rois[0].center_x_mm = 0.0
+        s.cluster_rois[0].radius_mm = 10.0
+        new = s.add_roi()
+        new.shape = library.SHAPE_SPHERE
+        new.center_x_mm = 50.0
+        new.radius_mm = 10.0
+        new.visible = False  # hide the second
+
+        union_keys, pairs = library._visible_roi_keys(s, matched)
+        assert union_keys == {"a"}
+        assert len(pairs) == 1

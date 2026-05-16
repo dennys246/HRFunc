@@ -161,6 +161,50 @@ class ROISlot:
     # fields and the sphere's centre seed.
     anchor: Optional[Dict[str, Any]] = None
 
+    # PR #59 (originally planned as part of the v1.3 montage UX
+    # follow-up): per-ROI visibility toggle. A "layer" checkbox in the
+    # multi-ROI list -- when False, the ROI:
+    #   - is hidden from the viz (no shape overlay, no gold halo for
+    #     its member HRFs),
+    #   - is excluded from the saved montage.json,
+    #   - is excluded from the ROI-status summary in the Cluster
+    #     sub-tab.
+    # Active state (which slot's controls render in the right panel)
+    # is independent of visibility -- the user can edit a hidden ROI's
+    # parameters without it appearing on the viz. Defaults to True so
+    # newly-added ROIs (manual or via Add Montage) show up immediately.
+    visible: bool = True
+
+    def is_pristine_default(self) -> bool:
+        """True when this slot is identical to a fresh ``ROISlot()``.
+
+        Used by the Add-Montage flow to decide whether to drop the
+        list's single starting ROI (the one created by
+        ``_default_rois()``) before appending the per-channel slots.
+        Without this drop, a user clicking Add Montage on a fresh
+        project ends up with an orphan "ROI 1" at MNI (0, 0, 0)
+        cluttering the list above all the per-channel spheres.
+
+        The ``name`` field is ignored because a freshly-added ROI
+        could end up with any auto-name ("ROI 1", "ROI 5"). All
+        other fields must match the dataclass defaults.
+        """
+        default = ROISlot()
+        return (
+            self.shape == default.shape
+            and self.center_x_mm == default.center_x_mm
+            and self.center_y_mm == default.center_y_mm
+            and self.center_z_mm == default.center_z_mm
+            and self.box_half_x_mm == default.box_half_x_mm
+            and self.box_half_y_mm == default.box_half_y_mm
+            and self.box_half_z_mm == default.box_half_z_mm
+            and self.radius_mm == default.radius_mm
+            and self.atlas_label == default.atlas_label
+            and self.painted == default.painted
+            and self.anchor == default.anchor
+            and self.visible == default.visible
+        )
+
 
 def _default_rois() -> List[ROISlot]:
     """Factory for AppState.cluster_rois.

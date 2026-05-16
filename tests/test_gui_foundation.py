@@ -389,6 +389,84 @@ class TestClusterMultiROI:
         assert s.cluster_roi_active is False
 
 
+class TestROISlotVisibility:
+    """Per-ROI visibility (layer-toggle) added after PR #57. A
+    visibility=False slot is excluded from BOTH the viz and the
+    saved montage, but its parameters stay editable in the right
+    panel -- "active" and "visible" are independent."""
+
+    def test_visible_defaults_true(self):
+        from hrfunc.gui.state import ROISlot
+        assert ROISlot().visible is True
+
+    def test_visible_independent_of_other_fields(self):
+        from hrfunc.gui.state import ROISlot
+
+        a = ROISlot()
+        b = ROISlot()
+        b.visible = False
+        # Toggling visibility doesn't perturb any other defaults.
+        assert b.shape == a.shape
+        assert b.center_x_mm == a.center_x_mm
+        assert b.radius_mm == a.radius_mm
+        assert b.painted == a.painted
+
+
+class TestROISlotIsPristineDefault:
+    """``is_pristine_default()`` drives the Add-Montage drop-default
+    behaviour: a freshly-spawned default ROI 1 is replaced by the
+    per-channel slots rather than left as an orphan above them."""
+
+    def test_fresh_slot_is_pristine(self):
+        from hrfunc.gui.state import ROISlot
+        assert ROISlot().is_pristine_default() is True
+
+    def test_name_difference_alone_still_pristine(self):
+        """Auto-naming (`ROI 1` vs `ROI 5`) shouldn't make a slot
+        look "edited" -- only the parameter fields define pristine."""
+        from hrfunc.gui.state import ROISlot
+        slot = ROISlot(name="ROI 5")
+        assert slot.is_pristine_default() is True
+
+    def test_edited_centre_breaks_pristine(self):
+        from hrfunc.gui.state import ROISlot
+        slot = ROISlot()
+        slot.center_x_mm = 5.0
+        assert slot.is_pristine_default() is False
+
+    def test_edited_shape_breaks_pristine(self):
+        from hrfunc.gui.state import ROISlot
+        slot = ROISlot()
+        slot.shape = "atlas_region"
+        assert slot.is_pristine_default() is False
+
+    def test_edited_radius_breaks_pristine(self):
+        from hrfunc.gui.state import ROISlot
+        slot = ROISlot()
+        slot.radius_mm = 10.0
+        assert slot.is_pristine_default() is False
+
+    def test_painted_addition_breaks_pristine(self):
+        from hrfunc.gui.state import ROISlot
+        slot = ROISlot()
+        slot.painted.add("hbo:s1_d1_hbo-temp")
+        assert slot.is_pristine_default() is False
+
+    def test_anchor_set_breaks_pristine(self):
+        from hrfunc.gui.state import ROISlot
+        slot = ROISlot()
+        slot.anchor = {"_key": "hbo:s1_d1_hbo-temp"}
+        assert slot.is_pristine_default() is False
+
+    def test_visibility_toggle_breaks_pristine(self):
+        """Visibility counts as an intentional edit -- a user who
+        hid the default ROI doesn't want it silently replaced."""
+        from hrfunc.gui.state import ROISlot
+        slot = ROISlot()
+        slot.visible = False
+        assert slot.is_pristine_default() is False
+
+
 class TestBulkIterateState:
     """PR #55a added ``checked_scan_paths`` (set) and ``bulk_progress``
     (tuple) to AppState so Preprocess / HRF / Activity action buttons
