@@ -1104,9 +1104,13 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
         sphere ROI per unique channel location (PR #57)."""
         from .dataset_picker import pick_file
 
+        # pywebview's file_types syntax: extensions are joined by
+        # semicolons inside the parens. Space-separated extensions
+        # (the natural-looking form) fail pywebview's filter regex
+        # with "is not a valid file filter".
         path = await pick_file(
             file_types=[
-                "fNIRS files (*.snirf *.fif *.hdr)",
+                "fNIRS files (*.snirf;*.fif;*.hdr)",
                 "All files (*.*)",
             ],
         )
