@@ -88,6 +88,93 @@ class TestPickFolderShape:
         assert inspect.iscoroutinefunction(pick_folder)
 
 
+class TestPickFileShape:
+    """PR #57 added :func:`pick_file` as the OPEN-dialog mirror of
+    :func:`pick_folder`. Same async-coroutine + pywebview shim contract."""
+
+    def test_pick_file_is_async(self):
+        from hrfunc.gui.components.dataset_picker import pick_file
+        assert inspect.iscoroutinefunction(pick_file)
+
+    def test_pick_file_accepts_file_types_kwarg(self):
+        """The ``file_types`` kwarg is the way callers narrow the
+        picker. Regression guard against the kwarg being renamed /
+        removed by a refactor."""
+        import inspect as _inspect
+        from hrfunc.gui.components.dataset_picker import pick_file
+        sig = _inspect.signature(pick_file)
+        assert "file_types" in sig.parameters
+
+
+class TestPywebviewFilterFormat:
+    """pywebview's file_type filter syntax: ``description (*.ext1;*.ext2)``
+    -- semicolon-separated, NOT space-separated. PR #57 originally shipped
+    space-separated filters in hrtree_panel and pywebview's
+    parse_file_type raised ``"<filter> is not a valid file filter"``,
+    crashing the picker. These tests pin the filter format we pass in
+    the Add-montage flow so the bug can't slip back."""
+
+    def test_hrtree_panel_montage_filter_parses(self):
+        """The exact filter string the Add-montage button passes
+        must round-trip through pywebview's parser."""
+        webview = pytest.importorskip("webview")
+        from webview.util import parse_file_type
+
+        # Mirror the strings in hrtree_panel._on_add_montage. If those
+        # change, the strings here must change in lockstep -- the
+        # in-process parse is the contract.
+        for ft in (
+            "fNIRS files (*.snirf;*.fif;*.hdr)",
+            "All files (*.*)",
+        ):
+            description, exts = parse_file_type(ft)
+            assert description
+            assert "*." in exts
+
+    def test_pick_file_validates_bad_filter_early(self, monkeypatch):
+        """``pick_file`` should reject malformed filter strings in-
+        process (with a clear notify) rather than letting them blow
+        up inside the multiprocessing feeder thread, where the
+        traceback is invisible without a launching terminal."""
+        pytest.importorskip("webview")
+        import asyncio
+        from hrfunc.gui.components import dataset_picker
+
+        # Stand up just enough of app.native for the helper to think
+        # we're in native mode. The validation should fire BEFORE the
+        # window.create_file_dialog call, so we never need to mock
+        # that side.
+        class _FakeWindow:
+            def create_file_dialog(self, *args, **kwargs):
+                raise AssertionError(
+                    "create_file_dialog should not be reached when "
+                    "the filter is invalid"
+                )
+
+        class _FakeNative:
+            main_window = _FakeWindow()
+
+        # ``ui.notify`` needs an active NiceGUI slot context. Standalone
+        # asyncio.run() doesn't provide one, so capture the notify call
+        # via monkeypatch to keep the test deterministic + slot-free.
+        notifies: list = []
+        monkeypatch.setattr(
+            dataset_picker.ui, "notify",
+            lambda msg, **kwargs: notifies.append((msg, kwargs)),
+        )
+        monkeypatch.setattr(dataset_picker.app, "native", _FakeNative())
+        result = asyncio.run(
+            dataset_picker.pick_file(
+                file_types=["fNIRS files (*.snirf *.fif)"],  # spaces -- invalid
+            )
+        )
+        # On bad filter, pick_file returns None instead of crashing,
+        # and a single notify carries the failure message.
+        assert result is None
+        assert len(notifies) == 1
+        assert "Invalid file filter" in notifies[0][0]
+
+
 class TestOpenProjectPath:
     def test_open_project_path_is_async(self):
         from hrfunc.gui.components.dataset_picker import open_project_path
