@@ -123,6 +123,26 @@ async def pick_file(
     from .._webview_compat import dialog_kind
     kwargs = {}
     if file_types:
+        # pywebview validates each filter string against
+        # ``description (*.ext1;*.ext2)`` -- semicolon-separated, NOT
+        # space-separated. Catch the malformed shape here so callers
+        # see the failing string rather than a stack trace from the
+        # multiprocessing feeder thread (which is hard to spot
+        # without a launching terminal).
+        try:
+            from webview.util import parse_file_type
+            for ft in file_types:
+                parse_file_type(ft)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "pick_file: invalid file_types entry: %s", exc
+            )
+            ui.notify(
+                f"Invalid file filter -- contact the developer "
+                f"({type(exc).__name__}: {exc})",
+                type="negative",
+            )
+            return None
         kwargs["file_types"] = tuple(file_types)
     result = window.create_file_dialog(
         dialog_kind(webview, "OPEN"), **kwargs
