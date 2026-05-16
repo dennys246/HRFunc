@@ -256,6 +256,109 @@ def _alignment_for_shape(state: AppState, shape: Optional[Shape]) -> "Optional[n
     return _build_atlas_alignment_affine(state)
 
 
+def _build_shape_for_slot(state: AppState, slot) -> Optional[Shape]:
+    """Build the spatial-layer Shape for a specific ROI slot.
+
+    Sibling to :func:`_build_shape_unconditional` but reads from the
+    given slot rather than the active proxy. Used by the multi-ROI
+    visibility flow to render every visible slot's overlay
+    simultaneously on the viz.
+
+    Returns ``None`` for slots whose shape can't be built (atlas mode
+    without a region picked, or atlas mode when the bundled atlas
+    failed to load).
+    """
+    if slot.shape == SHAPE_BOX:
+        return Box(
+            center_mm=(slot.center_x_mm, slot.center_y_mm, slot.center_z_mm),
+            half_extents_mm=(
+                slot.box_half_x_mm, slot.box_half_y_mm, slot.box_half_z_mm,
+            ),
+        )
+    if slot.shape == SHAPE_ATLAS_REGION:
+        if not slot.atlas_label:
+            return None
+        atlas = load_harvard_oxford_cortical()
+        if atlas is None:
+            return None
+        try:
+            return AtlasRegion(atlas, slot.atlas_label)
+        except ValueError:
+            return None
+    if slot.shape == SHAPE_SPHERE:
+        return Sphere(
+            center_mm=(slot.center_x_mm, slot.center_y_mm, slot.center_z_mm),
+            radius_mm=float(slot.radius_mm),
+        )
+    return None
+
+
+def _visible_shapes(state: AppState) -> "List[Tuple[Any, Shape]]":
+    """Collect every visible ROI's (slot, Shape) pair (PR follow-up).
+
+    Returns an empty list when the cluster ROI master toggle is off,
+    or when no ROI is both visible and has a buildable shape. Each
+    visible slot whose shape can't be constructed (atlas mode without
+    a region selected, etc.) is silently dropped so the viz still
+    renders the others.
+
+    Used by both the viz pane (multi-overlay rendering) and the
+    Cluster sub-tab's ROI-status / save handler (iterate every
+    visible slot's membership).
+    """
+    if not state.cluster_roi_active:
+        return []
+    pairs: List = []
+    for slot in state.cluster_rois:
+        if not slot.visible:
+            continue
+        shape = _build_shape_for_slot(state, slot)
+        if shape is None:
+            continue
+        pairs.append((slot, shape))
+    return pairs
+
+
+def _visible_roi_keys(
+    state: AppState,
+    matched: Dict[str, Dict[str, Any]],
+) -> Tuple[set, "List[Tuple[Any, Shape]]"]:
+    """Compute the union of roi_keys across every visible ROI.
+
+    Returns ``(union_keys, visible_pairs)`` so callers can reuse the
+    ``[(slot, shape)]`` list for the multi-overlay viz without rebuilding.
+
+    Each pair's membership is computed with that pair's shape's
+    alignment affine (atlas mode needs it; sphere / box mode does
+    not). Per-slot oxygenation filter follows
+    :func:`_resolve_cluster_oxygenation` -- the slot's anchor wins
+    when present, otherwise the panel-level filter applies. Painted
+    keys come from the slot's own ``painted`` set.
+    """
+    pairs = _visible_shapes(state)
+    if not pairs:
+        return set(), []
+    union: set = set()
+    for slot, shape in pairs:
+        anchor = slot.anchor
+        if anchor is not None and anchor.get("oxygenation") is not None:
+            oxy: Optional[bool] = bool(anchor.get("oxygenation"))
+        elif state.library_oxygenation == "hbo":
+            oxy = True
+        elif state.library_oxygenation == "hbr":
+            oxy = False
+        else:
+            oxy = None
+        alignment = _alignment_for_shape(state, shape)
+        slot_keys = compute_roi_keys_by_shape(
+            matched, shape, slot.painted,
+            oxygenation_filter=oxy,
+            alignment_affine=alignment,
+        )
+        union |= set(slot_keys)
+    return union, pairs
+
+
 DataSource = Literal["library", "project", "both"]
 
 
@@ -805,6 +908,10 @@ def _render_cluster_subtab(state: AppState) -> None:
                 )
 
             # --- ROI status + Save button ----------------------------
+            # The status line reflects the ACTIVE ROI (which the user
+            # is currently editing in the right panel). It still
+            # serves as the "is the current shape valid?" check, but
+            # the save button reports across every visible slot.
             all_hrfs = gather_library_hrfs(state)
             matched = filter_by_oxygenation(
                 apply_filter(all_hrfs, state.library_filter),
@@ -824,15 +931,16 @@ def _render_cluster_subtab(state: AppState) -> None:
 
             if roi_result is None:
                 ui.label(
-                    "ROI has fewer than 2 averageable subject estimates "
-                    "in the current shape. Either widen the shape, paint "
-                    "more neighbours, or seed a different centre. (Note: "
-                    "HRFs without per-subject estimates are excluded.)"
+                    "Active ROI has fewer than 2 averageable subject "
+                    "estimates in the current shape. Either widen the "
+                    "shape, paint more neighbours, or seed a different "
+                    "centre. (Note: HRFs without per-subject estimates "
+                    "are excluded.)"
                 ).classes("text-xs opacity-60 italic")
             else:
                 _, _, n_subjects, n_channels = roi_result
                 ui.label(
-                    f"Current ROI: averaging {n_subjects} subject "
+                    f"Active ROI: averaging {n_subjects} subject "
                     f"estimates across {n_channels} channel"
                     f"{'s' if n_channels != 1 else ''}."
                 ).classes("text-xs opacity-70")
@@ -842,6 +950,19 @@ def _render_cluster_subtab(state: AppState) -> None:
                         f"{'s' if excluded_count != 1 else ''} excluded "
                         f"for lacking subject-level estimates.)"
                     ).classes("text-xs opacity-50 italic")
+
+            # Visibility summary for the multi-ROI case so the user
+            # knows the save button reflects fewer than the list shows.
+            visible_count = sum(
+                1 for s in state.cluster_rois if s.visible
+            )
+            hidden_count = len(state.cluster_rois) - visible_count
+            if hidden_count > 0:
+                ui.label(
+                    f"  ({hidden_count} ROI"
+                    f"{'s' if hidden_count != 1 else ''} hidden -- "
+                    f"will be excluded from save and viz)"
+                ).classes("text-xs opacity-50 italic")
 
             def _on_save_roi() -> None:
                 # PR #55: walk every slot in cluster_rois, build a
@@ -863,6 +984,12 @@ def _render_cluster_subtab(state: AppState) -> None:
                 original_anchor = state.library_selected_hrf
                 try:
                     for i, slot in enumerate(state.cluster_rois):
+                        # Hidden slots ride the layer-toggle semantics
+                        # -- excluded from BOTH viz AND save. They
+                        # don't even count as "skipped" in the failure
+                        # bucket since they were deliberately omitted.
+                        if not slot.visible:
+                            continue
                         # Make the slot active so the proxy-based
                         # helpers (_build_current_shape,
                         # _resolve_cluster_oxygenation, etc.) read its
@@ -1151,6 +1278,20 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
             )
             return
 
+        # When the only ROI in the list is the pristine default (sphere
+        # at MNI origin, never edited), drop it before appending the
+        # new montage slots. Without this, Add Montage on a fresh
+        # project leaves an orphan "ROI 1" at (0, 0, 0) cluttering the
+        # list above all the per-channel spheres. Conservative: a
+        # single field edit (centre move, radius tweak, anchor click,
+        # visibility toggle) keeps the slot in place.
+        dropped_default = (
+            len(state.cluster_rois) == 1
+            and state.cluster_rois[0].is_pristine_default()
+        )
+        if dropped_default:
+            state.cluster_rois.clear()
+
         # Append all new slots and activate the last one so the user
         # can immediately tweak it. ``add_roi`` is the per-slot
         # appender; we bypass it here for the bulk append to avoid
@@ -1159,11 +1300,13 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
         for slot in new_slots:
             state.cluster_rois.append(slot)
         state.cluster_active_index = len(state.cluster_rois) - 1
-        ui.notify(
+        toast = (
             f"Added {len(new_slots)} ROI"
-            f"{'s' if len(new_slots) != 1 else ''} from {path.name}.",
-            type="positive",
+            f"{'s' if len(new_slots) != 1 else ''} from {path.name}."
         )
+        if dropped_default:
+            toast += " Replaced the unused default ROI."
+        ui.notify(toast, type="positive")
         _refresh_all()
 
     def _on_select(index: int) -> None:
@@ -1189,6 +1332,18 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
         state.clear_active_roi()
         state.library_selected_hrf = state.active_roi.anchor
         _refresh_all()
+
+    def _on_toggle_visible(index: int) -> None:
+        """Flip a slot's ``visible`` flag (true layer-toggle).
+
+        Visibility gates BOTH viz rendering AND save inclusion. The
+        user can edit a hidden ROI's parameters without it appearing
+        on the viz -- active state is independent of visibility.
+        """
+        if 0 <= index < len(state.cluster_rois):
+            slot = state.cluster_rois[index]
+            slot.visible = not slot.visible
+            _refresh_all()
 
     with ui.row().classes("w-full items-center justify-between"):
         ui.label("ROIs").classes(
@@ -1227,6 +1382,7 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
                     if is_active
                     else "hover:bg-gray-100 dark:hover:bg-gray-800"
                 )
+                + ("" if slot.visible else " opacity-60")
             )
             with ui.row().classes(row_classes).on(
                 "click", lambda _e=None, idx=i: _on_select(idx)
@@ -1254,6 +1410,27 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
                     ui.label(_describe_slot(slot)).classes(
                         "text-xs opacity-60 font-mono"
                     )
+                # Visibility toggle (eye / eye-off). Mirrors a layers
+                # panel: clicking hides the ROI from the viz AND from
+                # the saved montage.json. Re-clicking restores it.
+                # The button click bubbles up to the row's _on_select
+                # handler -- intentional, since toggling a slot's
+                # visibility usually means the user is focused on
+                # that slot anyway.
+                vis_icon = (
+                    "visibility" if slot.visible else "visibility_off"
+                )
+                vis_opacity = "opacity-80" if slot.visible else "opacity-40"
+                ui.button(
+                    icon=vis_icon,
+                    on_click=lambda _e=None, idx=i: _on_toggle_visible(idx),
+                ).props("flat dense round size=sm").classes(
+                    vis_opacity
+                ).tooltip(
+                    "Hide from viz + save"
+                    if slot.visible
+                    else "Show on viz + include in save"
+                )
                 # Stop propagation on the delete click so it doesn't
                 # also fire the row's _on_select.
                 ui.button(
@@ -1597,21 +1774,22 @@ def _render_viz_pane(state: AppState) -> None:
         # Use a flex column so the plotly viz can claim flex-1 and the
         # overlay-toggles row sits underneath at content-height.
         with ui.column().classes("w-full h-full p-3 gap-2 flex flex-col"):
-            # Compute ROI keys now so the figure draws the highlight
-            # halo and the label can report the count.
-            shape = _build_current_shape(state)
-            oxy_filter = _resolve_cluster_oxygenation(state)
-            alignment = _alignment_for_shape(state, shape)
-            roi_keys = compute_roi_keys_by_shape(
-                matched,
-                shape,
-                state.library_roi_painted,
-                oxygenation_filter=oxy_filter,
-                alignment_affine=alignment,
+            # Compute the union of ROI keys across every VISIBLE ROI
+            # so the figure highlights everything currently in scope
+            # (multi-ROI visibility flow). Each visible slot's shape
+            # overlay also renders independently below.
+            union_roi_keys, visible_pairs = _visible_roi_keys(
+                state, matched,
             )
+            visible_shapes = [shape for _slot, shape in visible_pairs]
             roi_status = ""
-            if roi_keys:
-                roi_status = f"  •  ROI: {len(roi_keys)} highlighted"
+            if union_roi_keys:
+                n_visible = len(visible_pairs)
+                roi_status = (
+                    f"  •  ROI: {len(union_roi_keys)} highlighted "
+                    f"across {n_visible} visible ROI"
+                    f"{'s' if n_visible != 1 else ''}"
+                )
             ui.label(
                 f"{len(matched)} HRFs shown{roi_status}"
             ).classes("text-sm opacity-70")
@@ -1619,8 +1797,8 @@ def _render_viz_pane(state: AppState) -> None:
                 matched,
                 show_brain=state.library_show_brain,
                 show_scalp=state.library_show_scalp,
-                roi_keys=roi_keys,
-                roi_shape=shape,
+                roi_keys=union_roi_keys,
+                roi_shapes=visible_shapes,
             )
             plot = ui.plotly(fig).classes("w-full flex-1 min-h-0")
 
@@ -2089,6 +2267,7 @@ def build_plotly_figure(
     show_scalp: bool = False,
     roi_keys: Optional[Any] = None,
     roi_shape: Optional[Shape] = None,
+    roi_shapes: Optional[List[Shape]] = None,
 ):
     """Build the 3D scatter figure for the given HRF dict.
 
@@ -2182,17 +2361,27 @@ def build_plotly_figure(
     # the spatial-layer shape is in mm, so we down-convert before
     # building the trace -- the resulting Mesh3d is in meters and
     # overlays directly on the HRF scatter.
-    if roi_shape is not None:
-        if isinstance(roi_shape, Box):
+    #
+    # Two parameter forms: ``roi_shape`` (legacy single-shape, kept
+    # for back-compat) and ``roi_shapes`` (list, used by the multi-
+    # ROI visibility flow). Internally normalised into one list and
+    # rendered with one overlay trace per shape.
+    shape_list: List[Shape] = []
+    if roi_shapes:
+        shape_list.extend(roi_shapes)
+    elif roi_shape is not None:
+        shape_list.append(roi_shape)
+    for one_shape in shape_list:
+        if isinstance(one_shape, Box):
             box_m = Box(
-                center_mm=(c / 1000.0 for c in roi_shape.center_mm),
-                half_extents_mm=(h / 1000.0 for h in roi_shape.half_extents_mm),
+                center_mm=(c / 1000.0 for c in one_shape.center_mm),
+                half_extents_mm=(h / 1000.0 for h in one_shape.half_extents_mm),
             )
             traces.append(make_box_overlay_trace(box_m))
-        elif isinstance(roi_shape, Sphere):
+        elif isinstance(one_shape, Sphere):
             sphere_m = Sphere(
-                center_mm=(c / 1000.0 for c in roi_shape.center_mm),
-                radius_mm=roi_shape.radius_mm / 1000.0,
+                center_mm=(c / 1000.0 for c in one_shape.center_mm),
+                radius_mm=one_shape.radius_mm / 1000.0,
             )
             traces.append(make_sphere_overlay_trace(sphere_m))
 
