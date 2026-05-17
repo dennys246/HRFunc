@@ -1441,33 +1441,38 @@ def _render_roi_list(state: AppState, body_refreshable, *, atlas=None) -> None:
                 # right side of the row so the layout reads
                 # "checkbox / name | dropdowns | actions".
                 ui.element("div").classes("flex-1")
-                # Inline shape dropdown -- each ROI picks its own shape
-                # mode. Falls back to sphere when state holds an
-                # unsupported mode (e.g. atlas mode while atlas failed
-                # to load).
+                # Dropdowns column: shape (always) + region (atlas
+                # mode only) stacked vertically on the right side of
+                # the row. Region sits directly under the shape
+                # dropdown rather than alongside it -- long Harvard-
+                # Oxford region names ("Inferior Frontal Gyrus, pars
+                # triangularis", etc.) don't fit in a same-row slot
+                # without truncation, which was the "I can't see atlas
+                # regions once selected" report.
                 current_shape = (
                     slot.shape if slot.shape in shape_options
                     else SHAPE_SPHERE
                 )
-                ui.select(
-                    options=shape_options,
-                    value=current_shape,
-                    on_change=(
-                        lambda e, idx=i: _on_shape_dropdown(idx, e.value)
-                    ),
-                ).props("dense outlined options-dense").classes("w-32")
-                # Inline region dropdown -- only when this slot is in
-                # atlas mode. Falls back to sphere-only UI if no atlas.
-                if slot.shape == SHAPE_ATLAS_REGION and atlas is not None:
+                with ui.column().classes("items-end gap-1"):
                     ui.select(
-                        options=atlas.region_names,
-                        value=slot.atlas_label,
+                        options=shape_options,
+                        value=current_shape,
                         on_change=(
-                            lambda e, idx=i: _on_region_dropdown(idx, e.value)
+                            lambda e, idx=i: _on_shape_dropdown(idx, e.value)
                         ),
-                    ).props("dense outlined options-dense").classes(
-                        "w-40"
-                    )
+                    ).props("dense outlined options-dense").classes("w-48")
+                    if slot.shape == SHAPE_ATLAS_REGION and atlas is not None:
+                        ui.select(
+                            options=atlas.region_names,
+                            value=slot.atlas_label,
+                            on_change=(
+                                lambda e, idx=i: _on_region_dropdown(idx, e.value)
+                            ),
+                        ).props(
+                            "dense outlined options-dense use-input"
+                        ).classes("w-48").tooltip(
+                            "Pick a Harvard-Oxford cortical region."
+                        )
                 # Visibility toggle (eye / eye-off). Mirrors a layers
                 # panel: clicking hides the ROI from the viz AND from
                 # the saved montage.json. Re-clicking restores it.
