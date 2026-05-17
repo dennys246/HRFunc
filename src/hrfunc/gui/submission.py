@@ -668,8 +668,11 @@ def _render_health_pill(state: HealthState) -> None:
     - ``DOWN``: red, "Submission system down"
 
     Class strings follow the same Tailwind palette as the web pill
-    so the two clients are visually consistent (a researcher who
-    bounces between web and desktop sees the same colours).
+    so the two clients are visually consistent. The web pill is
+    just a coloured dot + status text; the desktop pill matches
+    that exact pattern (no Material icon -- the dot's colour is
+    the affordance, and the colour shift between gray / green / red
+    is recognisable without a separate iconographic cue).
     """
     from nicegui import ui
 
@@ -677,7 +680,6 @@ def _render_health_pill(state: HealthState) -> None:
         bg = "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200"
         dot = "bg-green-500"
         text = "Accepting HRF submissions"
-        icon_name = "check_circle"
     elif state == HealthState.DOWN:
         bg = "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200"
         dot = "bg-red-500"
@@ -685,14 +687,12 @@ def _render_health_pill(state: HealthState) -> None:
             "Submission system down — please try again later or "
             "contact help@hrfunc.org."
         )
-        icon_name = "error_outline"
     else:  # CHECKING
         bg = (
             "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-200"
         )
         dot = "bg-gray-400"
         text = "Checking submission status…"
-        icon_name = "hourglass_empty"
 
     with ui.row().classes(
         "items-center gap-2 px-3 py-1.5 rounded-full text-sm mt-2 mb-1 "
@@ -703,7 +703,6 @@ def _render_health_pill(state: HealthState) -> None:
         ui.element("div").classes(
             f"inline-block w-2.5 h-2.5 rounded-full {dot}"
         )
-        ui.icon(icon_name).classes("text-sm opacity-80")
         ui.label(text)
 
 
