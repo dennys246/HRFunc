@@ -166,6 +166,20 @@ def _render_body(state: AppState) -> None:
                 ui.icon("error_outline").classes("text-red-400")
                 ui.label(state.last_error).classes("text-sm text-red-400")
 
+        # ── Submit to HRtree (desktop counterpart of hrfunc-web's
+        # /hrf_upload form). Renders the metadata-collection panel
+        # inside a card so it visually matches the other export
+        # rows. The file picker inside the panel defaults to the
+        # most recently saved montage path so save -> submit is a
+        # two-click flow.
+        ui.separator()
+        with ui.card().classes("w-full"):
+            from ..submission import render_submission_panel
+            render_submission_panel(
+                state,
+                default_path=state.last_saved_roi_path,
+            )
+
 
 def _render_row(
     title: str,

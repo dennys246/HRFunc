@@ -1,0 +1,611 @@
+"""HRF submission panel — desktop counterpart to hrfunc-web's /hrf_upload.
+
+Researchers who've estimated HRFs in the HRfunc library can submit them
+to the HRtree via the web form at https://www.hrfunc.org/hrf_upload.
+This module ships the same flow inside the desktop GUI so users don't
+have to context-switch to a browser to share their work:
+
+- :class:`SubmissionMetadata` mirrors the web form's field names so
+  the backend's expectations don't fork between the two clients.
+- :func:`submit_payload` POSTs the payload JSON + metadata to
+  hrfunc-web's ``/upload_json`` endpoint, which then validates, rate-
+  limits, forwards to the canonical backend, and sends the
+  confirmation email.
+- :func:`render_submission_panel` renders the NiceGUI form. Caller
+  drops it on the Export tab (always) and on the HRFs tab (after a
+  successful estimation) so the submission flow is reachable from
+  the two places users naturally finish work.
+
+The upload endpoint is overridable via the ``HRFUNC_UPLOAD_URL``
+environment variable -- matches hrfunc-web's own override pattern so
+the same variable means the same thing in both clients. Default
+target is the production deployment at hrfunc-web.
+
+What lives where:
+
+- Form rendering / event wiring: :func:`render_submission_panel` (UI)
+- Pure data shape: :class:`SubmissionMetadata` (testable without UI)
+- HTTP I/O: :func:`submit_payload` (testable with mocked ``requests``)
+
+No state on AppState -- the form's transient values are held in a
+plain dataclass within the panel closure, same pattern the HRFs /
+Activity panels use for their per-render options snapshots.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+
+logger = logging.getLogger(__name__)
+
+
+# Default hrfunc-web upload endpoint. Overridable via env var to point
+# at a staging deployment without code changes -- mirrors hrfunc-web's
+# own ``HRFUNC_UPLOAD_URL`` convention (though that variable on the
+# server points to the *backend*, here it points to hrfunc-web itself).
+DEFAULT_UPLOAD_URL = "https://www.hrfunc.org/upload_json"
+
+
+@dataclass
+class SubmissionMetadata:
+    """The form-field bundle the user fills out for each submission.
+
+    Field names match the web form (``templates/hrf_upload.html``) so
+    when this dataclass is serialised into multipart form-data it
+    produces the same wire format the backend already understands.
+    The two clients (web + desktop) talk to the same API; one
+    canonical schema means no divergence to maintain.
+
+    Fields with a dash in the wire name (``area-codes``, ``health-
+    status``) use underscores here for valid Python identifiers; the
+    serialiser converts them back to dashes in
+    :meth:`to_form_dict`. The web form's two conditional sections
+    (``dataset_permission`` only when not the owner; ``hrfunc_extension``
+    only when not standard library) are not enforced as dataclass
+    invariants -- the panel hides those inputs when they don't apply,
+    and the backend tolerates missing values.
+    """
+
+    # ── Researcher contact
+    name: str = ""
+    email: str = ""
+    phone: str = ""
+
+    # ── Study identity
+    study: str = ""
+    area_codes: str = ""  # wire: area-codes
+    doi: str = ""
+
+    # ── Dataset rights
+    # "yes" / "no". Empty string before the user picks.
+    dataset_ownership: str = ""
+    dataset_permission: str = ""  # only when ownership == "no"
+    dataset_owner: str = ""       # only when permission == "yes"
+    dataset_contact: str = ""     # only when permission == "yes"
+
+    # ── HRfunc usage
+    hrfunc_standard: str = ""       # "yes" / "no"
+    hrfunc_extension: str = ""      # only when hrfunc_standard == "no"
+
+    # ── Dataset scope
+    dataset_subset: str = ""        # "yes" / "no"
+
+    # ── Experimental context (all required by the web form)
+    task: str = ""
+    conditions: str = ""
+    stimuli: str = ""
+    medium: str = ""
+    intensity: str = ""
+    protocol: str = ""
+    age: str = ""
+    demographics: str = ""
+    health_status: str = ""  # wire: health-status
+
+    # ── Optional notes
+    comment: str = ""
+
+    # Mapping from this dataclass's Python attribute name to the wire
+    # name expected by the backend. Most are identical; the dashes-vs-
+    # underscores cases are the only divergences. Kept as a module-
+    # level constant on the dataclass so :meth:`to_form_dict` and
+    # tests share one source of truth.
+    _WIRE_OVERRIDES = {
+        "area_codes": "area-codes",
+        "health_status": "health-status",
+    }
+
+    def to_form_dict(self) -> Dict[str, str]:
+        """Serialise to the multipart form-data dict the backend wants.
+
+        Skips the empty-string entries so the backend's
+        ``request.form.to_dict()`` mirror doesn't get clutter. Wire-
+        name overrides apply (``area_codes`` -> ``area-codes``, etc.).
+        """
+        out: Dict[str, str] = {}
+        for f in fields(self):
+            if f.name.startswith("_"):
+                continue
+            value = getattr(self, f.name)
+            if value in ("", None):
+                continue
+            wire = self._WIRE_OVERRIDES.get(f.name, f.name)
+            out[wire] = str(value)
+        return out
+
+    def missing_required(self) -> list:
+        """Return field labels the user still needs to fill in.
+
+        The web form's ``required`` attribute drives this list. The
+        conditional fields (dataset_permission / _owner / _contact /
+        hrfunc_extension) are only required in the right branch -- the
+        same conditionals the form encodes -- so they're checked
+        contextually here, not unconditionally.
+        """
+        missing = []
+        for attr, label in (
+            ("name", "Your Name"),
+            ("email", "Email"),
+            ("phone", "Phone Number"),
+            ("study", "Study Name"),
+            ("area_codes", "Area Codes"),
+            ("doi", "DOI"),
+            ("dataset_ownership", "Dataset Ownership"),
+            ("hrfunc_standard", "Used Unaltered HRfunc"),
+            ("dataset_subset", "Dataset Subset"),
+            ("task", "Task"),
+            ("conditions", "Conditions"),
+            ("stimuli", "Stimulus"),
+            ("medium", "Stimulus Medium"),
+            ("intensity", "Stimuli Intensity"),
+            ("protocol", "Protocol"),
+            ("age", "Age Range"),
+            ("demographics", "Demographics"),
+            ("health_status", "Health Status"),
+        ):
+            if not getattr(self, attr).strip():
+                missing.append(label)
+
+        # Conditional: permission only required when user doesn't own
+        # the dataset.
+        if self.dataset_ownership == "no" and not self.dataset_permission.strip():
+            missing.append("Dataset Permission")
+        # Conditional: owner + contact only required when permission == yes.
+        if self.dataset_permission == "yes":
+            if not self.dataset_owner.strip():
+                missing.append("Dataset Owner Name")
+            if not self.dataset_contact.strip():
+                missing.append("Dataset Owner Email")
+        # Conditional: hrfunc_extension required when not standard.
+        if self.hrfunc_standard == "no" and not self.hrfunc_extension.strip():
+            missing.append("HRfunc Modifications")
+
+        return missing
+
+
+# Module-level so :func:`submit_payload` and tests can derive the
+# default without duplicating the os.environ check.
+def upload_url() -> str:
+    """Return the hrfunc-web ``/upload_json`` URL to POST submissions to.
+
+    Honors the ``HRFUNC_UPLOAD_URL`` env var; falls back to the
+    production endpoint. Matches the override semantics hrfunc-web
+    uses for its own backend-forwarding URL so the same variable does
+    the same thing in both clients (desktop -> hrfunc-web vs
+    hrfunc-web -> backend).
+    """
+    return os.environ.get("HRFUNC_UPLOAD_URL", DEFAULT_UPLOAD_URL)
+
+
+@dataclass
+class SubmissionResult:
+    """Outcome of a single submission attempt.
+
+    Returned by :func:`submit_payload`. Three buckets:
+
+    - ``ok=True``: HTTP 200, the backend accepted the file. The user
+      will get a confirmation email at the address they entered.
+    - ``ok=False, status_code is not None``: server returned an error;
+      ``message`` carries the response body (truncated).
+    - ``ok=False, status_code is None``: transport failure (DNS,
+      connection refused, timeout); ``message`` is the exception text.
+    """
+
+    ok: bool
+    status_code: Optional[int]
+    message: str
+
+
+def submit_payload(
+    *,
+    payload_path: Path,
+    metadata: SubmissionMetadata,
+    target_url: Optional[str] = None,
+    timeout_s: float = 30.0,
+) -> SubmissionResult:
+    """POST ``payload_path`` + ``metadata`` to hrfunc-web's upload endpoint.
+
+    ``payload_path`` must point to a readable JSON file. The file is
+    sent as ``jsonFile`` multipart-form-data alongside the metadata
+    form fields -- byte-identical to what the web form's ``<form
+    enctype="multipart/form-data">`` produces, so the backend doesn't
+    need a separate code path for desktop submissions.
+
+    ``target_url`` defaults to :func:`upload_url` (env-var override
+    aware). Tests pass an explicit URL to point at a mock server.
+
+    Raises no exceptions on transport failure -- the failure is
+    captured in the returned :class:`SubmissionResult` so the panel
+    can surface it via ``ui.notify`` without try/except gymnastics.
+    """
+    import requests
+
+    if not payload_path.is_file():
+        return SubmissionResult(
+            ok=False,
+            status_code=None,
+            message=f"Payload not found: {payload_path}",
+        )
+
+    # Validate the file parses as JSON before shipping it. The web
+    # form does the same check; doing it client-side too means a
+    # malformed file fails fast without a round-trip.
+    try:
+        json.loads(payload_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return SubmissionResult(
+            ok=False,
+            status_code=None,
+            message=f"Payload is not valid JSON: {exc}",
+        )
+
+    url = target_url or upload_url()
+    form_data = metadata.to_form_dict()
+
+    try:
+        with payload_path.open("rb") as fh:
+            response = requests.post(
+                url,
+                data=form_data,
+                files={
+                    "jsonFile": (
+                        payload_path.name,
+                        fh,
+                        "application/json",
+                    ),
+                },
+                timeout=timeout_s,
+            )
+    except Exception as exc:  # noqa: BLE001 -- transport surface
+        logger.exception("submit_payload: transport error: %s", exc)
+        return SubmissionResult(
+            ok=False,
+            status_code=None,
+            message=f"{type(exc).__name__}: {exc}",
+        )
+
+    body = (response.text or "")[:512]
+    if response.status_code == 200:
+        return SubmissionResult(
+            ok=True,
+            status_code=200,
+            message=body or "Submission accepted.",
+        )
+    return SubmissionResult(
+        ok=False,
+        status_code=response.status_code,
+        message=body or f"HTTP {response.status_code}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# UI: render_submission_panel
+# ---------------------------------------------------------------------------
+
+
+# Yes/No select options shared by the three conditional questions.
+_YES_NO_OPTIONS = {"": "Select...", "yes": "Yes", "no": "No"}
+
+
+def render_submission_panel(state, *, default_path: Optional[Path] = None) -> None:
+    """Render the HRF submission form inside the current NiceGUI context.
+
+    The caller (Export tab body, HRFs tab body) wraps the call in
+    whatever container they want -- this function emits the form
+    rows directly so it composes cleanly inside an existing
+    ``ui.card`` or ``ui.column``.
+
+    ``default_path``: optional starting value for the file-path
+    input. The Export tab passes ``state.last_saved_roi_path`` so the
+    most recently saved montage is pre-filled.
+
+    The form mirrors the web form's required-field rules. Submission
+    runs ``metadata.missing_required()`` first and surfaces a notify
+    listing what's missing rather than letting the user discover
+    incomplete fields by waiting on the backend round-trip.
+    """
+    from nicegui import background_tasks, ui
+
+    metadata = SubmissionMetadata()
+    file_state: Dict[str, Optional[Path]] = {
+        "path": default_path,
+    }
+
+    @ui.refreshable
+    def _body() -> None:
+        ui.label("Submit HRFs to the HRtree").classes(
+            "text-lg font-semibold"
+        )
+        ui.label(
+            "Share your estimated HRFs with the community. Submissions "
+            "are reviewed before they appear in the HRtree library. "
+            "You'll receive a confirmation email at the address below."
+        ).classes("text-xs opacity-70")
+
+        # --- File selector --------------------------------------------
+        ui.label("HRF JSON file").classes(
+            "text-xs uppercase opacity-60 tracking-wide mt-3"
+        )
+        with ui.row().classes("w-full items-center gap-2"):
+            current = file_state["path"]
+            ui.label(
+                str(current) if current else "(no file selected)"
+            ).classes("text-xs font-mono opacity-80 break-all flex-1")
+
+            async def _on_pick() -> None:
+                from .components.dataset_picker import pick_file
+
+                path = await pick_file(
+                    file_types=[
+                        "HRF montage (*.json)",
+                        "All files (*.*)",
+                    ],
+                )
+                if path is not None:
+                    file_state["path"] = path
+                    _body.refresh()
+
+            ui.button(
+                "Pick file", icon="folder_open", on_click=_on_pick,
+            ).props("flat dense")
+
+        # --- Researcher contact ---------------------------------------
+        _section_label("Researcher")
+        _text_input(metadata, "name", "Your name")
+        _text_input(metadata, "email", "Email")
+        _text_input(metadata, "phone", "Phone number")
+
+        # --- Study identity -------------------------------------------
+        _section_label("Study")
+        _text_input(metadata, "study", "Study name")
+        _text_input(metadata, "area_codes", "Area codes (comma-separated)")
+        _text_input(metadata, "doi", "DOI of the paper detailing data collection")
+
+        # --- Dataset rights -------------------------------------------
+        _section_label("Dataset rights")
+        _select_input(
+            metadata, "dataset_ownership",
+            "Do you own the dataset these HRFs were estimated from?",
+            on_change=_body.refresh,
+        )
+        if metadata.dataset_ownership == "no":
+            _select_input(
+                metadata, "dataset_permission",
+                "Do you have the owner's permission to add these HRFs to the HRtree?",
+                on_change=_body.refresh,
+            )
+            if metadata.dataset_permission == "no":
+                with ui.row().classes("items-start gap-2"):
+                    ui.icon("warning").classes("text-amber-500")
+                    ui.label(
+                        "Without explicit permission from the dataset owner "
+                        "we can't add HRFs to the HRtree. Please reach out "
+                        "to the owner before submitting."
+                    ).classes("text-xs opacity-80")
+            if metadata.dataset_permission == "yes":
+                _text_input(metadata, "dataset_owner", "Dataset owner name")
+                _text_input(metadata, "dataset_contact", "Dataset owner email")
+
+        # --- HRfunc usage ---------------------------------------------
+        _section_label("HRfunc usage")
+        _select_input(
+            metadata, "hrfunc_standard",
+            "Did you estimate these HRFs using the unaltered HRfunc library?",
+            on_change=_body.refresh,
+        )
+        if metadata.hrfunc_standard == "no":
+            ui.label(
+                "Extensions are welcome, but the DOI above must detail "
+                "how you deviated from the standard library so HRtree "
+                "viewers can trace HRFs back to their origin."
+            ).classes("text-xs opacity-60")
+            _textarea_input(
+                metadata, "hrfunc_extension",
+                "Summarise the changes you made to the HRfunc library.",
+            )
+
+        # --- Dataset scope --------------------------------------------
+        _section_label("Dataset scope")
+        _select_input(
+            metadata, "dataset_subset",
+            "Are these HRFs estimated from a subset of your dataset?",
+        )
+
+        # --- Experimental context -------------------------------------
+        _section_label("Experimental context")
+        _text_input(metadata, "task", "Task (e.g. flanker, stroop, n-back)")
+        _text_input(metadata, "conditions", "Conditions (e.g. congruent,incongruent)")
+        _text_input(metadata, "stimuli", "Stimulus (e.g. arrows, colors, faces)")
+        _text_input(metadata, "medium", "Stimulus medium (e.g. monitor, cards)")
+        _text_input(
+            metadata, "intensity",
+            'Stimuli intensity (set to "1.0" if not modulated)',
+        )
+        _text_input(metadata, "protocol", 'Protocol (set to "default" if standard)')
+        _text_input(metadata, "age", "Age range (e.g. (18, 65))")
+        _text_input(
+            metadata, "demographics",
+            'Demographics (set to "all" if pool represents whole population)',
+        )
+        _text_input(
+            metadata, "health_status",
+            'Health status (set to "untested" if not surveyed)',
+        )
+
+        # --- Notes ----------------------------------------------------
+        _section_label("Notes (optional)")
+        _textarea_input(metadata, "comment", "Any additional details.")
+
+        # --- Submit ---------------------------------------------------
+        ui.separator()
+        with ui.row().classes("w-full items-center gap-2 mt-2"):
+            async def _on_submit() -> None:
+                # Pre-flight: surface missing required fields before
+                # we round-trip to the server. The web form does the
+                # same check via the HTML ``required`` attribute --
+                # we do it explicitly because NiceGUI inputs don't
+                # carry HTML5 validation semantics.
+                if file_state["path"] is None:
+                    ui.notify(
+                        "Pick a HRF JSON file before submitting.",
+                        type="warning",
+                    )
+                    return
+                missing = metadata.missing_required()
+                if missing:
+                    ui.notify(
+                        "Missing required fields: " + ", ".join(missing),
+                        type="warning",
+                    )
+                    return
+                # Hard block on the "no permission" branch -- matches
+                # the web form's banner.
+                if (
+                    metadata.dataset_ownership == "no"
+                    and metadata.dataset_permission == "no"
+                ):
+                    ui.notify(
+                        "Cannot submit without dataset-owner permission. "
+                        "Reach out to the owner first.",
+                        type="negative",
+                    )
+                    return
+
+                ui.notify("Uploading…", type="info")
+
+                # The HTTP call is sync (requests). Wrap in a thread
+                # so the event loop stays responsive.
+                import asyncio
+
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: submit_payload(
+                        payload_path=file_state["path"],
+                        metadata=metadata,
+                    ),
+                )
+                if result.ok:
+                    ui.notify(
+                        "Submission accepted. Check your email for "
+                        "confirmation.",
+                        type="positive",
+                    )
+                else:
+                    ui.notify(
+                        f"Submission failed: {result.message}",
+                        type="negative",
+                    )
+
+            ui.button(
+                "Submit to HRtree",
+                icon="cloud_upload",
+                on_click=_on_submit,
+            ).props("color=primary")
+            ui.label(
+                f"Endpoint: {upload_url()}"
+            ).classes("text-xs font-mono opacity-50 break-all")
+
+    _body()
+
+
+# ---------------------------------------------------------------------------
+# Private form helpers
+# ---------------------------------------------------------------------------
+
+
+def _section_label(text: str) -> None:
+    from nicegui import ui
+
+    ui.label(text).classes(
+        "text-xs uppercase opacity-60 tracking-wide mt-3"
+    )
+
+
+def _text_input(
+    metadata: SubmissionMetadata,
+    attr: str,
+    label_text: str,
+) -> None:
+    """One-line text input bound to ``metadata.<attr>``."""
+    from nicegui import ui
+
+    def _on_change(event) -> None:
+        setattr(metadata, attr, str(event.value or ""))
+
+    ui.input(
+        label=label_text,
+        value=getattr(metadata, attr),
+        on_change=_on_change,
+    ).props("dense outlined").classes("w-full")
+
+
+def _textarea_input(
+    metadata: SubmissionMetadata,
+    attr: str,
+    label_text: str,
+) -> None:
+    """Multi-line textarea bound to ``metadata.<attr>``."""
+    from nicegui import ui
+
+    def _on_change(event) -> None:
+        setattr(metadata, attr, str(event.value or ""))
+
+    ui.textarea(
+        label=label_text,
+        value=getattr(metadata, attr),
+        on_change=_on_change,
+    ).props("dense outlined").classes("w-full")
+
+
+def _select_input(
+    metadata: SubmissionMetadata,
+    attr: str,
+    label_text: str,
+    *,
+    on_change=None,
+) -> None:
+    """Yes/no dropdown bound to ``metadata.<attr>``.
+
+    ``on_change`` is called after the value is stamped onto metadata --
+    used by conditional sections that need to re-render when the user
+    picks yes or no.
+    """
+    from nicegui import ui
+
+    def _handler(event) -> None:
+        setattr(metadata, attr, str(event.value or ""))
+        if on_change is not None:
+            on_change()
+
+    ui.label(label_text).classes("text-sm")
+    ui.select(
+        options=_YES_NO_OPTIONS,
+        value=getattr(metadata, attr) or "",
+        on_change=_handler,
+    ).props("dense outlined").classes("w-full")
