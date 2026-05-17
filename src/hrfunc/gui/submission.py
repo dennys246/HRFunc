@@ -64,6 +64,53 @@ DEFAULT_UPLOAD_URL = "https://www.hrfunc.org/upload_json"
 # either entry point.
 DEFAULT_HEALTH_URL = "https://api.hrfunc.org/healthz"
 
+# Base URL of hrfunc-web. The submission flow's context-field labels
+# link into its ``/experimental_contexts`` page so users can read
+# pre-existing entries before deciding what to type. The anchor
+# fragments below match the section IDs hrfunc-web renders in that
+# page (see hrfunc-web/templates/experimental_contexts.html). When the
+# upload URL is overridden, we derive this base from it so a local
+# hrfunc-web instance has the help links pointing at the local copy
+# rather than production.
+HRFUNC_WEB_BASE_URL = "https://www.hrfunc.org"
+
+# Per-field anchor fragments on /experimental_contexts. Keyed by the
+# ``SubmissionMetadata`` attribute name so :func:`_text_input` can
+# look them up by attr. Mirrors the ``href`` attributes the web
+# form's label tags carry.
+EXPERIMENTAL_CONTEXT_ANCHORS: Dict[str, str] = {
+    "task": "context-tasks",
+    "conditions": "context-conditions",
+    "stimuli": "context-stimuli",
+    "medium": "context-medium",
+    "protocol": "context-protocols",
+    "demographics": "context-demographics",
+    "health_status": "context-health-status",
+}
+
+
+def _experimental_context_url(anchor: str) -> str:
+    """Build a full URL into hrfunc-web's experimental-contexts page.
+
+    Derives the base from ``HRFUNC_UPLOAD_URL`` when it's set to a
+    non-production target, so pointing the desktop at a local
+    hrfunc-web instance (``HRFUNC_UPLOAD_URL=http://localhost:8000/upload_json``)
+    sends the help links to the same instance rather than to
+    production. Falls back to :data:`HRFUNC_WEB_BASE_URL` when no
+    override is in effect.
+    """
+    override = os.environ.get("HRFUNC_UPLOAD_URL")
+    if override:
+        # The upload URL has a path; trim it back to scheme+host so
+        # we can append ``/experimental_contexts#anchor``.
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(override)
+        base = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+    else:
+        base = HRFUNC_WEB_BASE_URL
+    return f"{base}/experimental_contexts#{anchor}"
+
+
 # How often the panel re-polls the health endpoint while it's open.
 # Matches hrfunc-web's 60-second JS interval -- frequent enough that
 # a state change becomes visible within a minute, infrequent enough
@@ -719,7 +766,16 @@ def _text_input(
     attr: str,
     label_text: str,
 ) -> None:
-    """One-line text input bound to ``metadata.<attr>``."""
+    """One-line text input bound to ``metadata.<attr>``.
+
+    When ``attr`` is one of the experimental-context fields (task,
+    conditions, stimuli, etc.), a small "see examples ↗" link is
+    rendered below the input that opens hrfunc-web's
+    ``/experimental_contexts`` page at the matching anchor. The
+    link mirrors the corresponding ``<a target="_blank">`` element
+    in hrfunc-web's hrf_upload form so users can browse existing
+    entries before deciding what to type.
+    """
     from nicegui import ui
 
     def _on_change(event) -> None:
@@ -730,6 +786,16 @@ def _text_input(
         value=getattr(metadata, attr),
         on_change=_on_change,
     ).props("dense outlined").classes("w-full")
+
+    anchor = EXPERIMENTAL_CONTEXT_ANCHORS.get(attr)
+    if anchor is not None:
+        url = _experimental_context_url(anchor)
+        ui.link(
+            "see examples on hrfunc.org ↗", url, new_tab=True,
+        ).classes(
+            "text-xs text-indigo-500 hover:text-indigo-300 "
+            "no-underline -mt-2"
+        )
 
 
 def _textarea_input(

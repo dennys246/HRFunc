@@ -19,9 +19,12 @@ pytest.importorskip("nicegui")
 from hrfunc.gui.submission import (  # noqa: E402
     DEFAULT_HEALTH_URL,
     DEFAULT_UPLOAD_URL,
+    EXPERIMENTAL_CONTEXT_ANCHORS,
+    HRFUNC_WEB_BASE_URL,
     HealthState,
     SubmissionMetadata,
     SubmissionResult,
+    _experimental_context_url,
     check_hrserv_health,
     health_url,
     submit_payload,
@@ -400,3 +403,85 @@ class TestCheckHrservHealth:
         monkeypatch.setattr(requests, "get", _fake_get)
         check_hrserv_health()
         assert captured["url"] == "http://override.example.com/healthz"
+
+
+# ---------------------------------------------------------------------------
+# Experimental-context help links
+# ---------------------------------------------------------------------------
+
+
+class TestExperimentalContextAnchors:
+    """The submission panel renders ``see examples ↗`` links under
+    the experimental-context fields so users can browse pre-existing
+    entries on hrfunc-web. The anchor mapping must match the
+    section IDs hrfunc-web's ``/experimental_contexts`` page emits.
+    """
+
+    def test_anchor_keys_match_metadata_attrs(self):
+        """Every attr in EXPERIMENTAL_CONTEXT_ANCHORS must exist on
+        SubmissionMetadata -- otherwise the panel renders a link
+        for a field that doesn't exist (or vice versa)."""
+        attrs = {f.name for f in SubmissionMetadata.__dataclass_fields__.values()}
+        for attr in EXPERIMENTAL_CONTEXT_ANCHORS:
+            assert attr in attrs, (
+                f"Anchor mapping references {attr!r} but it's not a "
+                f"SubmissionMetadata field"
+            )
+
+    def test_anchors_cover_the_seven_context_fields(self):
+        """Pinning the exact attr set so a future field-rename touches
+        this map intentionally (rather than silently dropping a link)."""
+        assert set(EXPERIMENTAL_CONTEXT_ANCHORS) == {
+            "task", "conditions", "stimuli", "medium",
+            "protocol", "demographics", "health_status",
+        }
+
+    def test_anchor_values_match_hrfunc_web_section_ids(self):
+        """Anchors mirror the section IDs the hrfunc-web template
+        emits on its experimental_contexts page. ``protocol`` is the
+        only attribute whose anchor isn't a plain ``context-<attr>``
+        suffix (it's ``context-protocols``, plural)."""
+        assert EXPERIMENTAL_CONTEXT_ANCHORS["task"] == "context-tasks"
+        assert EXPERIMENTAL_CONTEXT_ANCHORS["protocol"] == "context-protocols"
+        assert EXPERIMENTAL_CONTEXT_ANCHORS["health_status"] == "context-health-status"
+
+
+class TestExperimentalContextUrl:
+    """``_experimental_context_url`` derives a full URL from the
+    hrfunc-web base + anchor fragment. When ``HRFUNC_UPLOAD_URL`` is
+    set to a non-production target (e.g. local hrfunc-web for
+    integration testing), the help links follow it so they point at
+    the same instance, not production."""
+
+    def test_default_uses_production_base(self, monkeypatch):
+        monkeypatch.delenv("HRFUNC_UPLOAD_URL", raising=False)
+        url = _experimental_context_url("context-tasks")
+        assert url == (
+            f"{HRFUNC_WEB_BASE_URL}/experimental_contexts#context-tasks"
+        )
+
+    def test_upload_url_override_redirects_base(self, monkeypatch):
+        """Setting HRFUNC_UPLOAD_URL to a local hrfunc-web should make
+        the help links target the same instance. Trims the upload
+        URL's path back to scheme+host before appending."""
+        monkeypatch.setenv(
+            "HRFUNC_UPLOAD_URL", "http://localhost:8000/upload_json",
+        )
+        url = _experimental_context_url("context-conditions")
+        assert url == (
+            "http://localhost:8000/experimental_contexts#context-conditions"
+        )
+
+    def test_upload_url_with_subpath_strips_to_host(self, monkeypatch):
+        """An override URL with a non-trivial path (proxied behind
+        e.g. /hrfunc/upload_json) still trims back to scheme+host so
+        the contexts link doesn't accidentally inherit the upload's
+        subpath."""
+        monkeypatch.setenv(
+            "HRFUNC_UPLOAD_URL",
+            "https://lab.example.com/hrfunc/upload_json",
+        )
+        url = _experimental_context_url("context-stimuli")
+        assert url == (
+            "https://lab.example.com/experimental_contexts#context-stimuli"
+        )
