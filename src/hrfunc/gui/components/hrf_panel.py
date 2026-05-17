@@ -205,6 +205,20 @@ def _render_body(state: AppState, opts: EstimationOptions) -> None:
             )
             _render_hrf_preview(state, scan, opts)
 
+            # Submission card -- same form the Export tab renders.
+            # Surfaced here so users who finish an estimation can go
+            # straight to sharing without hopping to Export. The
+            # file picker defaults to state.last_saved_roi_path (set
+            # by the Cluster sub-tab's Save montage flow); if the
+            # user hasn't saved yet, they pick the JSON manually.
+            ui.separator()
+            with ui.card().classes("w-full"):
+                from ..submission import render_submission_panel
+                render_submission_panel(
+                    state,
+                    default_path=state.last_saved_roi_path,
+                )
+
 
 def _refresh_body_for(state: AppState):
     """Return a callable that re-publishes scan_selected to refresh subscribers.
