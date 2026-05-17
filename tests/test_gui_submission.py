@@ -411,8 +411,8 @@ class TestCheckHrservHealth:
 
 
 class TestExperimentalContextAnchors:
-    """The submission panel renders ``see examples ↗`` links under
-    the experimental-context fields so users can browse pre-existing
+    """The submission panel renders ``examples ↗`` links under the
+    experimental-context fields so users can browse pre-existing
     entries on hrfunc-web. The anchor mapping must match the
     section IDs hrfunc-web's ``/experimental_contexts`` page emits.
     """

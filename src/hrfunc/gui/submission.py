@@ -769,7 +769,7 @@ def _text_input(
     """One-line text input bound to ``metadata.<attr>``.
 
     When ``attr`` is one of the experimental-context fields (task,
-    conditions, stimuli, etc.), a small "see examples ↗" link is
+    conditions, stimuli, etc.), a small "examples ↗" link is
     rendered below the input that opens hrfunc-web's
     ``/experimental_contexts`` page at the matching anchor. The
     link mirrors the corresponding ``<a target="_blank">`` element
@@ -791,7 +791,7 @@ def _text_input(
     if anchor is not None:
         url = _experimental_context_url(anchor)
         ui.link(
-            "see examples on hrfunc.org ↗", url, new_tab=True,
+            "examples ↗", url, new_tab=True,
         ).classes(
             "text-xs text-indigo-500 hover:text-indigo-300 "
             "no-underline -mt-2"
