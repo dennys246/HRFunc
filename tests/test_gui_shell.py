@@ -68,13 +68,13 @@ async def test_shell_renders_all_tabs_in_order(user: User):
     """All seven v1.4 tabs are rendered. HRtree is leftmost (soft
     default landing, matches the paper's terminology); Inspect follows
     as a passive 'look at the scan' step before the active pipeline
-    (Preprocess → Estimate → Activity → Quality → Export). The legacy
-    'HRFs' / 'Library' tab names are gone (HRtree subsumes Library;
-    Estimate subsumes HRFs)."""
+    (Preprocess → HRFs → Activity → Quality → Export). The 'HRFs'
+    tab was briefly named 'Estimate' in v1.4; renamed back so the
+    label matches the canonical scientific term users search for."""
     from hrfunc.gui.pages.shell import TAB_NAMES
 
     expected = (
-        "HRtree", "Inspect", "Preprocess", "Estimate",
+        "HRtree", "Inspect", "Preprocess", "HRFs",
         "Activity", "Quality", "Export",
     )
     assert TAB_NAMES == expected
