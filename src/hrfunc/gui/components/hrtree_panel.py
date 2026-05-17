@@ -1341,23 +1341,16 @@ def _render_roi_list(state: AppState, body_refreshable, *, atlas=None) -> None:
     # vertical density. Buttons stretch with ``flex-1`` so they
     # divide the sub-panel width evenly and hug both outer edges --
     # narrower splitter panes shrink them, wider panes give them
-    # more breathing room. Order reads left-to-right: destructive
-    # (Clear) -> additive (Add ROI) -> bulk additive (Add Montage).
+    # more breathing room. Order reads left-to-right: bulk additive
+    # (Add Montage) -> additive (Add ROI) -> destructive (Clear) --
+    # the destructive action sits on the far right so it's the
+    # button furthest from where users typically hover-click.
     clear_label = (
         "Clear"
         if len(state.cluster_rois) <= 1
         else "Delete"
     )
     with ui.row().classes("w-full items-center gap-1 no-wrap"):
-        ui.button(
-            clear_label, icon="clear", on_click=_on_clear_roi,
-        ).props("flat dense").classes("flex-1").tooltip(
-            "Reset the active ROI to defaults (when it's the only "
-            "ROI) or remove it (when 2+ exist)."
-        )
-        ui.button(
-            "Add ROI", icon="add", on_click=_on_add,
-        ).props("flat dense color=primary").classes("flex-1")
         # PR #57: auto-create one sphere ROI per unique channel
         # location from an MNE-compatible file. The handler is
         # async (file picker + load), so it must be passed as a
@@ -1370,6 +1363,15 @@ def _render_roi_list(state: AppState, body_refreshable, *, atlas=None) -> None:
         ).props("flat dense").classes("flex-1").tooltip(
             "Pick a SNIRF / NIRX / FIF file and add a sphere ROI "
             "per unique channel location."
+        )
+        ui.button(
+            "Add ROI", icon="add", on_click=_on_add,
+        ).props("flat dense color=primary").classes("flex-1")
+        ui.button(
+            clear_label, icon="clear", on_click=_on_clear_roi,
+        ).props("flat dense").classes("flex-1").tooltip(
+            "Reset the active ROI to defaults (when it's the only "
+            "ROI) or remove it (when 2+ exist)."
         )
 
     # Cap the visible height so a long montage scrolls inside the
