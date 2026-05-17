@@ -17,9 +17,13 @@ import pytest
 pytest.importorskip("nicegui")
 
 from hrfunc.gui.submission import (  # noqa: E402
+    DEFAULT_HEALTH_URL,
     DEFAULT_UPLOAD_URL,
+    HealthState,
     SubmissionMetadata,
     SubmissionResult,
+    check_hrserv_health,
+    health_url,
     submit_payload,
     upload_url,
 )
@@ -296,3 +300,103 @@ class TestSubmitPayloadFailureBuckets:
         assert result.status_code is None
         assert "ConnectionError" in result.message
         assert "no route to host" in result.message
+
+
+# ---------------------------------------------------------------------------
+# HRServ health polling
+# ---------------------------------------------------------------------------
+
+
+class TestHealthUrl:
+    """``health_url`` mirrors ``upload_url`` -- env-var override with a
+    production default. Both clients (web + desktop) hit the same
+    HRServ endpoint so a state change is consistent across them."""
+
+    def test_default_is_production(self, monkeypatch):
+        monkeypatch.delenv("HRFUNC_HEALTH_URL", raising=False)
+        assert health_url() == DEFAULT_HEALTH_URL
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv(
+            "HRFUNC_HEALTH_URL",
+            "http://staging.example.com/healthz",
+        )
+        assert health_url() == "http://staging.example.com/healthz"
+
+
+class TestCheckHrservHealth:
+    """``check_hrserv_health`` maps the GET /healthz response to a
+    three-state enum -- the same three states the hrfunc-web JS pill
+    shows. Tests pin each branch via a monkey-patched ``requests.get``."""
+
+    def test_200_returns_ok(self, monkeypatch):
+        import requests
+
+        def _fake_get(url, timeout=None):
+            return _FakeResponse(status_code=200, text='{"status":"ok"}')
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        assert check_hrserv_health(
+            target_url="http://test.local/healthz",
+        ) == HealthState.OK
+
+    def test_503_returns_down(self, monkeypatch):
+        """HRServ returns 503 when its DB ping fails -- the panel should
+        surface that as DOWN, not silently treat any 2xx as ok."""
+        import requests
+
+        def _fake_get(url, timeout=None):
+            return _FakeResponse(status_code=503, text='{"status":"degraded"}')
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        assert check_hrserv_health(
+            target_url="http://test.local/healthz",
+        ) == HealthState.DOWN
+
+    def test_transport_exception_returns_down(self, monkeypatch):
+        """A transport failure (DNS, connection refused, timeout) is
+        functionally identical to HRServ being unreachable -- the
+        helper collapses both into DOWN so the pill colour matches
+        what the user can actually do (try again later)."""
+        import requests
+
+        def _fake_get(url, timeout=None):
+            raise ConnectionError("connection refused")
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        assert check_hrserv_health(
+            target_url="http://test.local/healthz",
+        ) == HealthState.DOWN
+
+    def test_timeout_returns_down(self, monkeypatch):
+        """``requests.exceptions.Timeout`` is just an Exception -- the
+        BLE001 catch in the helper handles it. Pin this specifically so
+        future helper changes don't lose the timeout branch."""
+        import requests
+
+        def _fake_get(url, timeout=None):
+            raise requests.exceptions.Timeout("read timed out")
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        assert check_hrserv_health(
+            target_url="http://test.local/healthz",
+        ) == HealthState.DOWN
+
+    def test_target_url_defaults_to_env_or_production(self, monkeypatch):
+        """When ``target_url`` is None, the helper threads the call
+        through :func:`health_url` so the env-var override applies.
+        We capture the URL via a stub to confirm the indirection."""
+        import requests
+        monkeypatch.setenv(
+            "HRFUNC_HEALTH_URL",
+            "http://override.example.com/healthz",
+        )
+        captured = {}
+
+        def _fake_get(url, timeout=None):
+            captured["url"] = url
+            return _FakeResponse(status_code=200, text="ok")
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        check_hrserv_health()
+        assert captured["url"] == "http://override.example.com/healthz"
