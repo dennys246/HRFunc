@@ -221,28 +221,53 @@ class TestAppStateReset:
 
 
 class TestClusterMultiROI:
-    """PR #55 introduced per-ROI state via ``cluster_rois: list[ROISlot]``.
-    The pre-existing ``cluster_*`` / ``library_roi_*`` field names now
+    """Multi-ROI state via ``cluster_rois: list[ROISlot]``. The
+    pre-existing ``cluster_*`` / ``library_roi_*`` field names now
     proxy onto the active slot so existing panel bindings keep working.
 
-    These tests pin down the proxy semantics, list mutation helpers,
-    and reset behaviour.
+    Layout refactor (2026-05-16): the list defaults to EMPTY -- adding
+    a ROI is the implicit activation. Proxy reads return slot defaults
+    when the list is empty; proxy writes silently no-op (no slot to
+    mutate).
     """
 
-    def test_default_state_has_one_roi_slot(self):
+    def test_default_state_has_empty_roi_list(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        assert s.cluster_rois == []
+        assert s.cluster_active_index == 0
+        # Empty active_roi == None.
+        assert s.active_roi is None
+
+    def test_empty_state_proxy_reads_return_slot_defaults(self):
+        """With no slots in the list, reading the proxies should give
+        the same values a fresh ``ROISlot()`` would -- callers can read
+        ``state.cluster_shape`` etc. in an empty-state render path
+        without crashing."""
         from hrfunc.gui.state import AppState, ROISlot
 
         s = AppState()
-        assert len(s.cluster_rois) == 1
-        assert s.cluster_active_index == 0
-        assert isinstance(s.cluster_rois[0], ROISlot)
-        # Default slot matches the pre-PR-#55 defaults so callers that
-        # never touch the multi-ROI helpers see the same starting state.
-        assert s.cluster_shape == "sphere"
-        assert s.cluster_center_x_mm == 0.0
-        assert s.cluster_box_half_x_mm == 20.0
-        assert s.library_roi_radius_m == 0.02
+        default = ROISlot()
+        assert s.cluster_shape == default.shape
+        assert s.cluster_center_x_mm == default.center_x_mm
+        assert s.cluster_box_half_x_mm == default.box_half_x_mm
+        assert s.library_roi_radius_m == default.radius_mm / 1000.0
         assert s.library_roi_painted == set()
+
+    def test_empty_state_proxy_writes_silently_no_op(self):
+        """A stray write while the list is empty must not resurrect a
+        slot. The new empty state is meaningful -- we don't want a
+        stale UI binding to undo it accidentally."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.cluster_shape = "atlas_region"
+        s.cluster_center_x_mm = 50.0
+        s.library_roi_radius_m = 0.03
+        assert s.cluster_rois == []
+        # Reads still return defaults, not the failed writes.
+        assert s.cluster_shape == "sphere"
 
     def test_each_app_state_has_independent_roi_list(self):
         """The list uses ``field(default_factory=...)`` so two AppStates
@@ -253,12 +278,14 @@ class TestClusterMultiROI:
         b = AppState()
         assert a.cluster_rois is not b.cluster_rois
         a.add_roi()
-        assert len(b.cluster_rois) == 1
+        assert b.cluster_rois == []
 
     def test_proxy_setter_writes_to_active_slot(self):
+        """Once a slot exists, proxy writes land on it just as before."""
         from hrfunc.gui.state import AppState
 
         s = AppState()
+        s.add_roi()
         s.cluster_center_x_mm = 12.5
         s.cluster_shape = "atlas_region"
         s.cluster_atlas_label = "Frontal Pole"
@@ -274,21 +301,36 @@ class TestClusterMultiROI:
         assert slot.painted == {"hbo:s1_d1_hbo-temp"}
 
     def test_painted_set_returned_by_reference(self):
-        """Pre-PR-#55 panels did ``state.library_roi_painted.clear()``
+        """Pre-refactor panels did ``state.library_roi_painted.clear()``
         and ``.add(...)`` -- the proxy must return the same set so those
         mutations land on the active slot."""
         from hrfunc.gui.state import AppState
 
         s = AppState()
+        s.add_roi()
         s.library_roi_painted.add("k1")
         assert s.library_roi_painted is s.cluster_rois[0].painted
         s.library_roi_painted.clear()
         assert s.cluster_rois[0].painted == set()
 
+    def test_add_roi_from_empty_list(self):
+        """Add ROI is the implicit activation now -- a fresh AppState
+        plus one ``add_roi()`` produces the one-slot state every prior
+        test assumed by default."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        slot = s.add_roi()
+        assert len(s.cluster_rois) == 1
+        assert s.cluster_active_index == 0
+        assert slot.name == "ROI 1"
+        assert s.cluster_shape == "sphere"
+
     def test_add_roi_appends_and_activates(self):
         from hrfunc.gui.state import AppState
 
         s = AppState()
+        s.add_roi()
         s.cluster_center_x_mm = 5.0
         slot2 = s.add_roi()
 
@@ -306,6 +348,7 @@ class TestClusterMultiROI:
         from hrfunc.gui.state import AppState
 
         s = AppState()
+        s.add_roi()
         s.cluster_center_x_mm = 1.0
         s.add_roi()
         s.cluster_center_x_mm = 2.0
@@ -324,28 +367,28 @@ class TestClusterMultiROI:
         s.set_active_roi(-1)
         assert s.cluster_active_index == 0
 
-    def test_clear_active_roi_resets_last_slot(self):
-        """With only one ROI in the list, CLEAR ROI resets it in place
-        rather than removing it -- the proxy properties need at least
-        one slot to point at."""
+    def test_clear_active_roi_empties_single_slot(self):
+        """Layout refactor: clearing the last slot drops it entirely.
+        Pre-refactor we kept one resetting-in-place because the proxies
+        needed a slot; the proxies now handle the empty case."""
         from hrfunc.gui.state import AppState
 
         s = AppState()
+        s.add_roi()
         s.cluster_shape = "atlas_region"
         s.cluster_center_x_mm = 50.0
-        s.library_roi_painted.add("k1")
 
         s.clear_active_roi()
 
-        assert len(s.cluster_rois) == 1
+        assert s.cluster_rois == []
+        # Reads via the proxy still return defaults.
         assert s.cluster_shape == "sphere"
-        assert s.cluster_center_x_mm == 0.0
-        assert s.library_roi_painted == set()
 
     def test_clear_active_roi_drops_active_when_multiple(self):
         from hrfunc.gui.state import AppState
 
         s = AppState()
+        s.add_roi()
         s.add_roi()
         s.add_roi()
         # 3 slots: ROI 1 / ROI 2 / ROI 3 (active is the last)
@@ -359,18 +402,26 @@ class TestClusterMultiROI:
         # Names re-stamped so the list stays "ROI 1 ... ROI N" in order.
         assert [r.name for r in s.cluster_rois] == ["ROI 1", "ROI 2"]
 
-    def test_active_roi_recovers_from_out_of_range_index(self):
-        """Defensive: if external state lands the index out of range,
-        the property clamps to 0 rather than raising."""
+    def test_clear_active_roi_on_empty_list_no_op(self):
         from hrfunc.gui.state import AppState
 
         s = AppState()
+        s.clear_active_roi()  # must not raise
+        assert s.cluster_rois == []
+
+    def test_active_roi_recovers_from_out_of_range_index(self):
+        """Defensive: if external state lands the index out of range
+        while the list is non-empty, the property clamps to 0."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.add_roi()
         s.cluster_active_index = 99
         slot = s.active_roi
         assert slot is s.cluster_rois[0]
         assert s.cluster_active_index == 0
 
-    def test_reset_returns_to_one_default_slot(self):
+    def test_reset_returns_to_empty_list(self):
         from hrfunc.gui.state import AppState
 
         s = AppState()
@@ -378,15 +429,86 @@ class TestClusterMultiROI:
         s.add_roi()
         s.cluster_shape = "atlas_region"
         s.cluster_atlas_label = "Frontal Pole"
-        s.cluster_roi_active = True
 
         s.reset()
 
-        assert len(s.cluster_rois) == 1
+        assert s.cluster_rois == []
         assert s.cluster_active_index == 0
+        # Proxy reads return defaults again.
         assert s.cluster_shape == "sphere"
         assert s.cluster_atlas_label is None
-        assert s.cluster_roi_active is False
+
+
+class TestROISlotSelection:
+    """Per-ROI selection (layout refactor 2026-05-16). The selection
+    checkbox in the ROI-list row picks slots into the bulk-edit set --
+    when 2+ slots are selected, the radius slider + centre inputs
+    apply to every selected slot at once. Independent of ``active``
+    (which row the right-panel readouts come from) and ``visible``
+    (which slots render on the viz / land in the saved montage)."""
+
+    def test_selected_defaults_false(self):
+        from hrfunc.gui.state import ROISlot
+        assert ROISlot().selected is False
+
+    def test_add_roi_auto_selects(self):
+        """Newly-added ROIs are auto-ticked so they immediately join
+        the bulk-edit set the next time the user touches a slider."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        slot = s.add_roi()
+        assert slot.selected is True
+
+    def test_selected_rois_returns_only_selected(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        a = s.add_roi()
+        b = s.add_roi()
+        c = s.add_roi()
+        b.selected = False
+        result = s.selected_rois()
+        assert result == [a, c]
+
+    def test_bulk_edit_targets_uses_selected_when_non_empty(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        a = s.add_roi()
+        b = s.add_roi()
+        # Both auto-selected.
+        assert s.bulk_edit_targets() == [a, b]
+
+    def test_bulk_edit_targets_falls_back_to_active_when_empty(self):
+        """When no slot is ticked, edits apply to the active row only.
+        This preserves single-slot semantics for users who haven't
+        opted into the multi-select workflow."""
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.add_roi()
+        s.set_all_selected(False)
+        targets = s.bulk_edit_targets()
+        assert targets == [s.active_roi]
+
+    def test_bulk_edit_targets_empty_when_no_active_and_no_selection(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        assert s.bulk_edit_targets() == []
+
+    def test_set_all_selected_toggles_in_one_shot(self):
+        from hrfunc.gui.state import AppState
+
+        s = AppState()
+        s.add_roi()
+        s.add_roi()
+        s.add_roi()
+        s.set_all_selected(False)
+        assert all(not slot.selected for slot in s.cluster_rois)
+        s.set_all_selected(True)
+        assert all(slot.selected for slot in s.cluster_rois)
 
 
 class TestROISlotVisibility:
@@ -464,6 +586,16 @@ class TestROISlotIsPristineDefault:
         from hrfunc.gui.state import ROISlot
         slot = ROISlot()
         slot.visible = False
+        assert slot.is_pristine_default() is False
+
+    def test_selection_toggle_breaks_pristine(self):
+        """Same rationale as visibility -- a user who explicitly
+        ticked or unticked the default ROI signalled intent. The
+        pristine-default drop should only kick in for an untouched
+        slot."""
+        from hrfunc.gui.state import ROISlot
+        slot = ROISlot()
+        slot.selected = True
         assert slot.is_pristine_default() is False
 
 

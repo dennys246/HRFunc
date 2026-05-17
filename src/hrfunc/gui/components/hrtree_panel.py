@@ -139,12 +139,11 @@ def _build_current_shape(state: AppState) -> Optional[Shape]:
     Returns None for unknown shape modes (defensive -- a stale state
     value from a future / legacy build shouldn't crash the render).
 
-    PR #54: returns None when ``state.cluster_roi_active`` is False so
-    the gold halo + shape overlay + save button stay quiet by default;
-    researchers opt into ROI mode explicitly via the toggle at the top
-    of the Cluster sub-tab.
+    Layout refactor (2026-05-16): returns None when the ROI list is
+    empty -- adding a ROI is the implicit activation. Pre-refactor
+    this checked ``state.cluster_roi_active`` (a removed field).
     """
-    if not state.cluster_roi_active:
+    if not state.cluster_rois:
         return None
     return _build_shape_unconditional(state)
 
@@ -296,17 +295,17 @@ def _build_shape_for_slot(state: AppState, slot) -> Optional[Shape]:
 def _visible_shapes(state: AppState) -> "List[Tuple[Any, Shape]]":
     """Collect every visible ROI's (slot, Shape) pair (PR follow-up).
 
-    Returns an empty list when the cluster ROI master toggle is off,
-    or when no ROI is both visible and has a buildable shape. Each
-    visible slot whose shape can't be constructed (atlas mode without
-    a region selected, etc.) is silently dropped so the viz still
-    renders the others.
+    Returns an empty list when the ROI list is empty (no implicit
+    activation yet) or when no ROI is both visible and has a
+    buildable shape. Each visible slot whose shape can't be
+    constructed (atlas mode without a region selected, etc.) is
+    silently dropped so the viz still renders the others.
 
     Used by both the viz pane (multi-overlay rendering) and the
     Cluster sub-tab's ROI-status / save handler (iterate every
     visible slot's membership).
     """
-    if not state.cluster_roi_active:
+    if not state.cluster_rois:
         return []
     pairs: List = []
     for slot in state.cluster_rois:
@@ -704,111 +703,44 @@ def _render_cluster_subtab(state: AppState) -> None:
         atlas = load_harvard_oxford_cortical()
 
         with ui.column().classes("w-full gap-3"):
-            ui.label("Cluster").classes(
-                "text-xs uppercase opacity-60 tracking-wide"
-            )
+            # --- Multi-ROI list (PR #55, layout refactor 2026-05-16) ---
+            # Top of the sub-tab is just the list -- no separate
+            # "Cluster" header (redundant with the sub-tab strip) and
+            # no master "ROI active" toggle (adding a ROI IS the
+            # activation now). Each row carries its own shape dropdown
+            # (Sphere / Atlas region) and, when atlas mode is picked,
+            # an inline region dropdown next to it.
+            _render_roi_list(state, _body, atlas=atlas)
 
-            # --- ROI active toggle (PR #54) ---------------------------
-            # Default off so a fresh page load shows raw HRFs without a
-            # mystery gold halo around (0, 0, 0). Researchers explicitly
-            # opt in to ROI mode before the shape, centre, radius, etc.
-            # contribute to membership.
-            def _on_roi_active_change(event) -> None:
-                state.cluster_roi_active = bool(event.value)
-                state.publish("hrtree_filter_changed", state.library_filter)
-
-            ui.switch(
-                "ROI active",
-                value=state.cluster_roi_active,
-                on_change=_on_roi_active_change,
-            ).props("dense").tooltip(
-                "Turn the ROI on to highlight matching HRFs in the viz "
-                "and enable Save. Off by default so the page loads "
-                "without a default ROI applied."
-            )
-
-            # --- Multi-ROI list (PR #55) ----------------------------
-            # The active ROI is what the shape / centre / radius / atlas
-            # widgets below operate on (proxy properties on AppState).
-            # ADD ROI appends a fresh slot at defaults; clicking a row
-            # switches the active index; the trash icon deletes the
-            # row (refusing to drop below one slot -- the proxy
-            # properties need a target). The list is scrollable so a
-            # large montage doesn't push the rest of the sub-tab off
-            # screen.
-            _render_roi_list(state, _body)
-
-            # --- Shape radio -----------------------------------------
-            shape_options = {SHAPE_SPHERE: "Sphere"}
-            if atlas is not None:
-                shape_options[SHAPE_ATLAS_REGION] = "Atlas region"
-            # Defensive: if persisted state has atlas mode but atlas
-            # failed to load, fall back to sphere so the user isn't
-            # stuck on a dead option.
-            current_shape = state.cluster_shape
-            if current_shape not in shape_options:
-                current_shape = SHAPE_SPHERE
-                state.cluster_shape = SHAPE_SPHERE
-
-            def _on_shape_change(event) -> None:
-                new_shape = event.value
-                if new_shape not in shape_options:
-                    return
-                state.cluster_shape = new_shape
-                state.publish("hrtree_filter_changed", state.library_filter)
-                _body.refresh()
-
-            ui.radio(
-                shape_options,
-                value=current_shape,
-                on_change=_on_shape_change,
-            ).props("inline dense")
-
-            if state.cluster_shape == SHAPE_SPHERE:
+            # Empty-state guard: when no ROIs exist yet, skip every
+            # control below (radius / centre / readouts / save) and
+            # render a single placeholder line. Researchers get a
+            # clean "I need to add a ROI" cue rather than a panel
+            # full of disabled controls.
+            if not state.cluster_rois:
                 ui.label(
-                    "Place the ROI sphere in MNI mm. Click an HRF in "
-                    "the viz to seed the centre, or type coordinates "
-                    "directly."
-                ).classes("text-xs opacity-60")
-            elif state.cluster_shape == SHAPE_ATLAS_REGION:
-                ui.label(
-                    "Pick a Harvard-Oxford cortical region. The ROI "
-                    "includes every HRF whose MNI coordinate falls "
-                    "inside the region's voxel mask."
-                ).classes("text-xs opacity-60")
-
-            # --- Centre inputs (MNI mm) ------------------------------
-            # Always visible: drives the atlas readout in both modes,
-            # and is also the sphere centre in sphere mode.
-            ui.label("Centre (MNI mm)").classes(
-                "text-xs uppercase opacity-60 tracking-wide"
-            )
-
-            def _make_centre_input(axis: str, attr: str):
-                def _on_change(event) -> None:
-                    try:
-                        value = float(event.value or 0.0)
-                    except (TypeError, ValueError):
-                        return
-                    setattr(state, attr, value)
-                    state.publish("hrtree_filter_changed", state.library_filter)
-
-                return ui.number(
-                    label=axis,
-                    value=getattr(state, attr),
-                    step=1.0,
-                    format="%.1f",
-                    on_change=_on_change,
-                ).props("dense").classes("w-20")
-
-            with ui.row().classes("w-full gap-2"):
-                _make_centre_input("x", "cluster_center_x_mm")
-                _make_centre_input("y", "cluster_center_y_mm")
-                _make_centre_input("z", "cluster_center_z_mm")
+                    "Add a ROI or montage to begin."
+                ).classes("text-sm opacity-60 italic mt-3")
+                return
 
             # --- Sphere radius (sphere mode only) --------------------
+            # Layout-refactor: radius bar sits directly below the ROI
+            # list / shape radio so the most-used per-ROI knob is right
+            # under the buttons that select the ROI. Centre coords
+            # follow underneath.
+            #
+            # Bulk-edit semantics (layout refactor 2026-05-16): the
+            # slider's on_change applies the new radius to EVERY slot
+            # in ``state.bulk_edit_targets()`` (the selected set if
+            # non-empty, otherwise just the active slot). The slider
+            # value display tracks the active slot for readability.
+            targets = state.bulk_edit_targets()
+            n_targets = len(targets)
+            bulk_suffix = (
+                f"  ({n_targets} selected)" if n_targets > 1 else ""
+            )
             if state.cluster_shape == SHAPE_SPHERE:
-                ui.label("ROI radius").classes(
+                ui.label(f"ROI radius{bulk_suffix}").classes(
                     "text-xs uppercase opacity-60 tracking-wide"
                 )
                 radius_label = ui.label(
@@ -817,7 +749,9 @@ def _render_cluster_subtab(state: AppState) -> None:
 
                 def _on_radius_change(event) -> None:
                     cm = float(event.value)
-                    state.library_roi_radius_m = cm / 100.0
+                    new_radius_mm = cm * 10.0  # cm -> mm
+                    for slot in state.bulk_edit_targets():
+                        slot.radius_mm = new_radius_mm
                     radius_label.set_text(f"{cm:.1f} cm")
                     state.publish(
                         "hrtree_filter_changed", state.library_filter
@@ -829,25 +763,44 @@ def _render_cluster_subtab(state: AppState) -> None:
                     on_change=_on_radius_change,
                 ).props("dense")
 
-            # --- Atlas region dropdown (atlas mode only) -------------
+            # --- Centre inputs (MNI mm) ------------------------------
+            # Always visible: drives the atlas readout in both modes,
+            # and is also the sphere centre in sphere mode. Bulk-edit
+            # semantics same as the radius slider above.
+            ui.label(f"Centre (MNI mm){bulk_suffix}").classes(
+                "text-xs uppercase opacity-60 tracking-wide"
+            )
+
+            def _make_centre_input(axis: str, slot_attr: str, proxy_attr: str):
+                def _on_change(event) -> None:
+                    try:
+                        value = float(event.value or 0.0)
+                    except (TypeError, ValueError):
+                        return
+                    for slot in state.bulk_edit_targets():
+                        setattr(slot, slot_attr, value)
+                    state.publish("hrtree_filter_changed", state.library_filter)
+
+                return ui.number(
+                    label=axis,
+                    value=getattr(state, proxy_attr),
+                    step=1.0,
+                    format="%.1f",
+                    on_change=_on_change,
+                ).props("dense").classes("w-20")
+
+            with ui.row().classes("w-full gap-2"):
+                _make_centre_input("x", "center_x_mm", "cluster_center_x_mm")
+                _make_centre_input("y", "center_y_mm", "cluster_center_y_mm")
+                _make_centre_input("z", "center_z_mm", "cluster_center_z_mm")
+
+            # --- Atlas alignment (atlas-active slot only) ------------
+            # Region selection moved INLINE into each ROI row (see
+            # _render_roi_list). The alignment section stays at the
+            # panel level because alignment is a GLOBAL property of
+            # the dataset's coord frame, not of any individual ROI
+            # (locked decision 2026-05-14).
             if state.cluster_shape == SHAPE_ATLAS_REGION and atlas is not None:
-                ui.label("Atlas region").classes(
-                    "text-xs uppercase opacity-60 tracking-wide"
-                )
-
-                def _on_region_change(event) -> None:
-                    state.cluster_atlas_label = event.value or None
-                    state.publish(
-                        "hrtree_filter_changed", state.library_filter
-                    )
-
-                ui.select(
-                    options=atlas.region_names,
-                    value=state.cluster_atlas_label,
-                    label="Region",
-                    on_change=_on_region_change,
-                ).props("dense outlined").classes("w-full")
-
                 # --- Atlas alignment (HRF coords -> MNI mm) ----------
                 # Library HRFs are stored in MNE head coords (origin
                 # near auditory meatus); the atlas is in MNI mm.
@@ -858,31 +811,9 @@ def _render_cluster_subtab(state: AppState) -> None:
                 # (a one-click "shift everything"). They compose.
                 _render_atlas_alignment_section(state, _body)
 
-            # --- Clear ROI button ------------------------------------
-            # PR #55: when there are 2+ ROIs in the list, CLEAR ROI
-            # deletes the active slot and advances to the prior one.
-            # When there's only one ROI left, it resets that slot to
-            # defaults rather than deleting it -- the proxy properties
-            # need at least one slot to point at, and "clear" on a
-            # fresh page shouldn't make the list disappear entirely.
-            # Library-side selection (``library_selected_hrf``) is
-            # also cleared so the detail pane returns to its empty
-            # state for the new active slot.
-            def _on_clear_roi() -> None:
-                state.clear_active_roi()
-                state.library_selected_hrf = None
-                state.publish("hrtree_selection_changed", None)
-                state.publish("hrtree_filter_changed", state.library_filter)
-                _body.refresh()
-
-            clear_label = (
-                "Clear ROI"
-                if len(state.cluster_rois) <= 1
-                else "Delete active ROI"
-            )
-            ui.button(
-                clear_label, on_click=_on_clear_roi
-            ).props("flat dense")
+            # Clear-ROI lives in the ROI-list header now (left of the
+            # Add ROI / Add Montage buttons), so there's no standalone
+            # button here anymore.
 
             # --- MNI + atlas readouts --------------------------------
             ui.separator()
@@ -1197,25 +1128,31 @@ def _looks_out_of_mni(hrfs: Dict[str, Dict[str, Any]]) -> bool:
     return sampled >= 3 and over_threshold >= 3
 
 
-def _render_roi_list(state: AppState, body_refreshable) -> None:
-    """Render the multi-ROI list (PR #55).
+def _render_roi_list(state: AppState, body_refreshable, *, atlas=None) -> None:
+    """Render the multi-ROI list (PR #55, layout refactor 2026-05-16).
 
     Layout:
-        +-------------------------------------------+
-        | ROIs                              [+ ADD] |
-        | > [active] ROI 1                       x  |
-        |   ROI 2                                x  |
-        |   ROI 3                                x  |
-        +-------------------------------------------+
+        +------------------------------------------------------+
+        | [Clear ROI]                  [+ ROI] [+ Montage]     |
+        | > ROI 1   [Sphere ▾]                  (eye)  x       |
+        |   ROI 2   [Atlas  ▾] [Frontal Pole ▾] (eye)  x       |
+        |   ROI 3   [Sphere ▾]                  (eye)  x       |
+        +------------------------------------------------------+
 
-    Clicking a row switches the active index; the trash icon deletes
-    that row. The list is scrollable (capped at ~8 rows visible)
-    so a long montage doesn't push the rest of the Cluster sub-tab
-    off screen.
+    Each row carries its own shape dropdown so each ROI can be sphere
+    or atlas independently (matches the per-slot storage). When a row
+    is in atlas mode, a region dropdown appears inline next to the
+    shape dropdown. The eye icon toggles visibility; the trash icon
+    deletes the row; clicking elsewhere on the row switches the
+    active index.
+
+    ``atlas`` (optional) is the loaded Harvard-Oxford atlas; required
+    for the per-row region dropdown to populate. ``None`` means the
+    atlas failed to load and rows can't switch into atlas mode.
 
     ``body_refreshable`` is the cluster sub-tab's ``@ui.refreshable``
-    body so list mutations re-render the sub-tab and the shape
-    widgets pick up the new active slot.
+    body so list mutations re-render the sub-tab and the right-side
+    controls pick up the new active slot.
     """
 
     def _refresh_all() -> None:
@@ -1296,6 +1233,17 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
         if dropped_default:
             state.cluster_rois.clear()
 
+        # Selection: Add Montage clears any prior per-slot selection
+        # and ticks every newly-appended slot. The intent is "this
+        # montage is the user's working set" -- they likely want to
+        # bulk-edit the whole montage immediately (size, position).
+        # Stamp ``selected=True`` directly on the new slots (the
+        # ``rois_from_raw`` helper defaulted them to ``selected=False``
+        # to keep its pure-helper contract simple).
+        state.set_all_selected(False)
+        for slot in new_slots:
+            slot.selected = True
+
         # Append all new slots and activate the last one so the user
         # can immediately tweak it. ``add_roi`` is the per-slot
         # appender; we bypass it here for the bulk append to avoid
@@ -1319,11 +1267,11 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
         # ROI was last anchored on. None is fine -- detail pane shows
         # its empty state.
         state.set_active_roi(index)
-        state.library_selected_hrf = state.active_roi.anchor
+        active = state.active_roi
+        state.library_selected_hrf = active.anchor if active else None
         state.publish(
             "hrtree_selection_changed",
-            None if state.active_roi.anchor is None
-            else state.active_roi.anchor.get("_key"),
+            active.anchor.get("_key") if active and active.anchor else None,
         )
         _refresh_all()
 
@@ -1331,10 +1279,32 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
         # Use clear_active_roi semantics, but delete the targeted
         # index rather than always the active. Switch active there
         # first so the helper's "remove active, walk back one" logic
-        # applies to the right slot.
+        # applies to the right slot. After clearing, the list may be
+        # empty -- ``state.active_roi`` returns None and the detail
+        # pane reverts to its empty state.
         state.set_active_roi(index)
         state.clear_active_roi()
-        state.library_selected_hrf = state.active_roi.anchor
+        active = state.active_roi
+        state.library_selected_hrf = active.anchor if active else None
+        _refresh_all()
+
+    def _on_shape_dropdown(index: int, value: str) -> None:
+        """Per-row shape dropdown handler. Updates the slot's shape
+        mode; if switching from atlas to sphere/box, the atlas_label
+        is dropped so the descriptor reads cleanly."""
+        if not (0 <= index < len(state.cluster_rois)):
+            return
+        slot = state.cluster_rois[index]
+        slot.shape = value
+        if value != SHAPE_ATLAS_REGION:
+            slot.atlas_label = None
+        _refresh_all()
+
+    def _on_region_dropdown(index: int, value) -> None:
+        """Per-row region dropdown handler. Atlas mode only."""
+        if not (0 <= index < len(state.cluster_rois)):
+            return
+        state.cluster_rois[index].atlas_label = value or None
         _refresh_all()
 
     def _on_toggle_visible(index: int) -> None:
@@ -1349,37 +1319,75 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
             slot.visible = not slot.visible
             _refresh_all()
 
-    with ui.row().classes("w-full items-center justify-between"):
-        ui.label("ROIs").classes(
-            "text-xs uppercase opacity-60 tracking-wide"
+    def _on_toggle_selected(index: int, value: bool) -> None:
+        """Per-row selection checkbox handler. Marks the slot as part
+        of the bulk-edit set so the panel's radius / centre controls
+        apply to every selected slot at once."""
+        if 0 <= index < len(state.cluster_rois):
+            state.cluster_rois[index].selected = bool(value)
+            _refresh_all()
+
+    def _on_clear_roi() -> None:
+        """Reset the active slot (single-ROI case) or delete it
+        (multi-ROI case). Sibling to ``state.clear_active_roi`` but
+        also clears the library-side anchor + republishes the
+        selection / filter events so dependent panes re-render."""
+        state.clear_active_roi()
+        state.library_selected_hrf = None
+        state.publish("hrtree_selection_changed", None)
+        _refresh_all()
+
+    # All three header actions sit together on a single line for
+    # vertical density. Buttons stretch with ``flex-1`` so they
+    # divide the sub-panel width evenly and hug both outer edges --
+    # narrower splitter panes shrink them, wider panes give them
+    # more breathing room. Order reads left-to-right: destructive
+    # (Clear) -> additive (Add ROI) -> bulk additive (Add Montage).
+    clear_label = (
+        "Clear"
+        if len(state.cluster_rois) <= 1
+        else "Delete"
+    )
+    with ui.row().classes("w-full items-center gap-1 no-wrap"):
+        ui.button(
+            clear_label, icon="clear", on_click=_on_clear_roi,
+        ).props("flat dense").classes("flex-1").tooltip(
+            "Reset the active ROI to defaults (when it's the only "
+            "ROI) or remove it (when 2+ exist)."
         )
-        with ui.row().classes("items-center gap-1"):
-            ui.button(
-                "Add ROI", icon="add", on_click=_on_add,
-            ).props("flat dense color=primary")
-            # PR #57: auto-create one sphere ROI per unique channel
-            # location from an MNE-compatible file. The handler is
-            # async (file picker + load), so it must be passed as a
-            # coroutine-function -- a sync lambda wrapping the async
-            # call would silently no-op (see gui-async-gotchas memory).
-            ui.button(
-                "Add montage",
-                icon="device_hub",
-                on_click=_on_add_montage,
-            ).props("flat dense").tooltip(
-                "Pick a SNIRF / NIRX / FIF file and add a sphere ROI "
-                "per unique channel location."
-            )
+        ui.button(
+            "Add ROI", icon="add", on_click=_on_add,
+        ).props("flat dense color=primary").classes("flex-1")
+        # PR #57: auto-create one sphere ROI per unique channel
+        # location from an MNE-compatible file. The handler is
+        # async (file picker + load), so it must be passed as a
+        # coroutine-function -- a sync lambda wrapping the async
+        # call would silently no-op (see gui-async-gotchas memory).
+        ui.button(
+            "Add montage",
+            icon="device_hub",
+            on_click=_on_add_montage,
+        ).props("flat dense").classes("flex-1").tooltip(
+            "Pick a SNIRF / NIRX / FIF file and add a sphere ROI "
+            "per unique channel location."
+        )
 
     # Cap the visible height so a long montage scrolls inside the
     # sub-tab instead of stretching the page. ~8 rows at ~32px each.
+    # Shape dropdown options: sphere always; atlas only when the
+    # bundled atlas loaded. Box stays hidden from the UI until v1.4
+    # rotatable-box work.
+    shape_options = {SHAPE_SPHERE: "Sphere"}
+    if atlas is not None:
+        shape_options[SHAPE_ATLAS_REGION] = "Atlas region"
+
     with ui.column().classes(
         "w-full gap-1 overflow-auto"
     ).style("max-height: 256px"):
         for i, slot in enumerate(state.cluster_rois):
             is_active = i == state.cluster_active_index
             row_classes = (
-                "w-full items-center gap-2 px-2 py-1 rounded cursor-pointer "
+                "w-full items-center gap-2 px-2 py-1 rounded "
                 + (
                     "bg-amber-50 dark:bg-amber-900/30 "
                     "border border-amber-400"
@@ -1388,31 +1396,75 @@ def _render_roi_list(state: AppState, body_refreshable) -> None:
                 )
                 + ("" if slot.visible else " opacity-60")
             )
-            with ui.row().classes(row_classes).on(
-                "click", lambda _e=None, idx=i: _on_select(idx)
-            ):
-                # Active indicator + shape glyph + name.
-                shape_glyph = {
-                    SHAPE_SPHERE: "radio_button_unchecked",
-                    SHAPE_BOX: "crop_square",
-                    SHAPE_ATLAS_REGION: "map",
-                }.get(slot.shape, "radio_button_unchecked")
-                ui.icon(
-                    "arrow_right" if is_active else "circle",
-                    size="sm" if is_active else "xs",
-                ).classes(
-                    "opacity-80" if is_active else "opacity-30"
+            # No click handler on the outer row anymore -- that handler
+            # used to call ``body_refreshable.refresh()`` which would
+            # rebuild the DOM mid-click and silently cancel the
+            # per-row dropdowns from opening. Selection is wired only
+            # on the name label + active arrow / glyph (the user-
+            # obvious "row identity" region), which keeps the
+            # dropdown clicks free to expand their menus.
+            with ui.row().classes(row_classes):
+                # Selection checkbox -- bulk-edit toggle. Multiple
+                # selected slots become a group target for the radius
+                # slider + centre inputs. Auto-selected on Add ROI
+                # and Add Montage so the new slots are immediately
+                # ready for bulk edits.
+                ui.checkbox(
+                    value=slot.selected,
+                    on_change=lambda e, idx=i: _on_toggle_selected(
+                        idx, e.value
+                    ),
+                ).props("dense size=sm").tooltip(
+                    "Tick to include in bulk edits (radius / centre "
+                    "apply to all selected ROIs at once)."
                 )
-                ui.icon(shape_glyph, size="sm").classes("opacity-70")
-                with ui.column().classes("flex-1 gap-0"):
+                # Active indicator + name -- clicking either selects
+                # the row as active. Wrapping them in a clickable
+                # element keeps the click target obvious without
+                # capturing the dropdowns to its right.
+                with ui.row().classes(
+                    "items-center gap-2 cursor-pointer"
+                ).on("click", lambda _e=None, idx=i: _on_select(idx)):
+                    ui.icon(
+                        "arrow_right" if is_active else "circle",
+                        size="sm" if is_active else "xs",
+                    ).classes(
+                        "opacity-80" if is_active else "opacity-30"
+                    )
                     ui.label(slot.name).classes(
                         "text-sm "
                         + ("font-semibold" if is_active else "")
                     )
-                    # Secondary line: shape-specific summary so the
-                    # user can tell ROIs apart without clicking.
-                    ui.label(_describe_slot(slot)).classes(
-                        "text-xs opacity-60 font-mono"
+                # Spacer pushes the dropdowns + action buttons to the
+                # right side of the row so the layout reads
+                # "checkbox / name | dropdowns | actions".
+                ui.element("div").classes("flex-1")
+                # Inline shape dropdown -- each ROI picks its own shape
+                # mode. Falls back to sphere when state holds an
+                # unsupported mode (e.g. atlas mode while atlas failed
+                # to load).
+                current_shape = (
+                    slot.shape if slot.shape in shape_options
+                    else SHAPE_SPHERE
+                )
+                ui.select(
+                    options=shape_options,
+                    value=current_shape,
+                    on_change=(
+                        lambda e, idx=i: _on_shape_dropdown(idx, e.value)
+                    ),
+                ).props("dense outlined options-dense").classes("w-32")
+                # Inline region dropdown -- only when this slot is in
+                # atlas mode. Falls back to sphere-only UI if no atlas.
+                if slot.shape == SHAPE_ATLAS_REGION and atlas is not None:
+                    ui.select(
+                        options=atlas.region_names,
+                        value=slot.atlas_label,
+                        on_change=(
+                            lambda e, idx=i: _on_region_dropdown(idx, e.value)
+                        ),
+                    ).props("dense outlined options-dense").classes(
+                        "w-40"
                     )
                 # Visibility toggle (eye / eye-off). Mirrors a layers
                 # panel: clicking hides the ROI from the viz AND from

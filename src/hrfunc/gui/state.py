@@ -175,6 +175,16 @@ class ROISlot:
     # newly-added ROIs (manual or via Add Montage) show up immediately.
     visible: bool = True
 
+    # Layout refactor (2026-05-16): per-row selection checkbox for the
+    # bulk-edit workflow. When two or more slots are selected, the
+    # radius slider + centre inputs apply to the whole selected set so
+    # the user can move / resize a group of ROIs together. When the
+    # selected set is empty, edits fall back to the active slot
+    # (single-slot semantics). Auto-set to True by ``AppState.add_roi``
+    # and by the Add Montage flow (which clears prior selection and
+    # ticks every new slot). Independent of ``visible`` and ``active``.
+    selected: bool = False
+
     def is_pristine_default(self) -> bool:
         """True when this slot is identical to a fresh ``ROISlot()``.
 
@@ -203,18 +213,23 @@ class ROISlot:
             and self.painted == default.painted
             and self.anchor == default.anchor
             and self.visible == default.visible
+            and self.selected == default.selected
         )
 
 
 def _default_rois() -> List[ROISlot]:
     """Factory for AppState.cluster_rois.
 
-    Always seeds with one default ROISlot so the active-index has
-    something to point at and the proxy properties never look at an
-    empty list. CLEAR ROI deletes the active slot but refuses to drop
-    below one entry (it resets the last slot instead).
+    Layout refactor (2026-05-16): the list now defaults to EMPTY.
+    Pre-refactor it always seeded one slot so the active-index had
+    something to point at and the proxy properties never looked at
+    an empty list. The new UI removes the master "ROI active" toggle
+    and the auto-spawned default ROI -- adding the first ROI (via
+    Add ROI or Add Montage) is the implicit activation. Proxy
+    properties handle the empty case by returning sensible defaults
+    on read and silently no-oping on write (no slot to mutate).
     """
-    return [ROISlot()]
+    return []
 
 
 @dataclass
@@ -333,23 +348,15 @@ class AppState:
     # onto ``cluster_rois[cluster_active_index]`` so existing panel
     # bindings and tests keep working. See ``ROISlot``.
     #
-    # Multi-ROI list (PR #55). Always at least one entry -- CLEAR ROI
-    # on the last slot resets it instead of removing it, so the
-    # proxy properties never index an empty list. The active index
-    # picks which slot the proxies read/write. UI exposes ADD ROI to
-    # append, click-to-switch on the list, and CLEAR ROI on the
-    # current active slot.
+    # Multi-ROI list (PR #55). Defaults to EMPTY since the layout
+    # refactor (2026-05-16) -- adding the first ROI (Add ROI / Add
+    # Montage) is the implicit activation. CLEAR ROI on the last slot
+    # removes it, returning the list to empty. Active index picks
+    # which slot the proxies read/write; when the list is empty,
+    # proxy reads return slot defaults (sphere, origin, 20 mm) and
+    # proxy writes silently no-op.
     cluster_rois: List[ROISlot] = field(default_factory=_default_rois)
     cluster_active_index: int = 0
-    # PR #54: cluster ROI active toggle (default off). When False, the
-    # cluster shape doesn't contribute to ROI membership at all -- the
-    # viz pane shows raw HRFs with no halo, the detail-pane ROI-average
-    # section stays hidden, and the save button is disabled. Researchers
-    # opt into ROI mode explicitly via the toggle at the top of the
-    # Cluster sub-tab. Pre-PR-#54 the ROI was always on which made the
-    # gold halo around the default-centre (0, 0, 0) appear as if the
-    # tool had pre-selected something.
-    cluster_roi_active: bool = False
     # PR #54: HRF-coords-to-MNI alignment for atlas membership. Bundled
     # library HRFs are stored in MNE head coordinates (origin near the
     # auditory meatus); the Harvard-Oxford atlas is in MNI mm (origin
@@ -385,90 +392,125 @@ class AppState:
     # PR-#55 names. The actual storage lives in
     # ``cluster_rois[cluster_active_index]``.
     #
-    # Switching the active ROI changes which slot the proxies read /
-    # write -- callers re-render after touching ``cluster_active_index``
-    # to pick up the new values. The proxies fall back to the first
-    # slot when the index is out of range; ``cluster_rois`` is also
-    # never empty (CLEAR ROI resets the last slot rather than removing
-    # it), so the fallback is defensive against bad external state, not
-    # an expected code path.
+    # Layout refactor (2026-05-16): the list can now be empty (Add
+    # ROI / Add Montage is the implicit activation). ``active_roi``
+    # returns None when the list is empty; proxy reads return slot
+    # defaults so panel code that reads ``cluster_shape`` etc. in an
+    # empty-state render still sees sensible values, and proxy writes
+    # silently no-op so a stray ``state.cluster_shape = ...`` in an
+    # empty-state path doesn't ressurect a slot.
 
     @property
-    def active_roi(self) -> ROISlot:
-        """The currently-active ROI slot. Always returns a slot --
-        if the list is empty (shouldn't happen under normal flow) one
-        is created. If the index is out of range it clamps to 0."""
+    def active_roi(self) -> Optional[ROISlot]:
+        """The currently-active ROI slot, or None when the list is empty.
+
+        If the list is non-empty but the index is out of range, clamps
+        to 0 (defensive against external mutation).
+        """
         if not self.cluster_rois:
-            self.cluster_rois.append(ROISlot())
-            self.cluster_active_index = 0
-            return self.cluster_rois[0]
+            return None
         if not (0 <= self.cluster_active_index < len(self.cluster_rois)):
             self.cluster_active_index = 0
         return self.cluster_rois[self.cluster_active_index]
 
+    # Cached default slot used as the source of read values when
+    # ``active_roi`` is None. Constructed once per AppState so reads
+    # don't allocate a fresh slot on every access.
+    @property
+    def _proxy_default(self) -> ROISlot:
+        cached = getattr(self, "__proxy_default_cache", None)
+        if cached is None:
+            cached = ROISlot()
+            object.__setattr__(self, "__proxy_default_cache", cached)
+        return cached
+
     @property
     def cluster_shape(self) -> str:
-        return self.active_roi.shape
+        slot = self.active_roi
+        return slot.shape if slot is not None else self._proxy_default.shape
 
     @cluster_shape.setter
     def cluster_shape(self, value: str) -> None:
-        self.active_roi.shape = value
+        slot = self.active_roi
+        if slot is not None:
+            slot.shape = value
 
     @property
     def cluster_center_x_mm(self) -> float:
-        return self.active_roi.center_x_mm
+        slot = self.active_roi
+        return slot.center_x_mm if slot is not None else self._proxy_default.center_x_mm
 
     @cluster_center_x_mm.setter
     def cluster_center_x_mm(self, value: float) -> None:
-        self.active_roi.center_x_mm = float(value)
+        slot = self.active_roi
+        if slot is not None:
+            slot.center_x_mm = float(value)
 
     @property
     def cluster_center_y_mm(self) -> float:
-        return self.active_roi.center_y_mm
+        slot = self.active_roi
+        return slot.center_y_mm if slot is not None else self._proxy_default.center_y_mm
 
     @cluster_center_y_mm.setter
     def cluster_center_y_mm(self, value: float) -> None:
-        self.active_roi.center_y_mm = float(value)
+        slot = self.active_roi
+        if slot is not None:
+            slot.center_y_mm = float(value)
 
     @property
     def cluster_center_z_mm(self) -> float:
-        return self.active_roi.center_z_mm
+        slot = self.active_roi
+        return slot.center_z_mm if slot is not None else self._proxy_default.center_z_mm
 
     @cluster_center_z_mm.setter
     def cluster_center_z_mm(self, value: float) -> None:
-        self.active_roi.center_z_mm = float(value)
+        slot = self.active_roi
+        if slot is not None:
+            slot.center_z_mm = float(value)
 
     @property
     def cluster_box_half_x_mm(self) -> float:
-        return self.active_roi.box_half_x_mm
+        slot = self.active_roi
+        return slot.box_half_x_mm if slot is not None else self._proxy_default.box_half_x_mm
 
     @cluster_box_half_x_mm.setter
     def cluster_box_half_x_mm(self, value: float) -> None:
-        self.active_roi.box_half_x_mm = float(value)
+        slot = self.active_roi
+        if slot is not None:
+            slot.box_half_x_mm = float(value)
 
     @property
     def cluster_box_half_y_mm(self) -> float:
-        return self.active_roi.box_half_y_mm
+        slot = self.active_roi
+        return slot.box_half_y_mm if slot is not None else self._proxy_default.box_half_y_mm
 
     @cluster_box_half_y_mm.setter
     def cluster_box_half_y_mm(self, value: float) -> None:
-        self.active_roi.box_half_y_mm = float(value)
+        slot = self.active_roi
+        if slot is not None:
+            slot.box_half_y_mm = float(value)
 
     @property
     def cluster_box_half_z_mm(self) -> float:
-        return self.active_roi.box_half_z_mm
+        slot = self.active_roi
+        return slot.box_half_z_mm if slot is not None else self._proxy_default.box_half_z_mm
 
     @cluster_box_half_z_mm.setter
     def cluster_box_half_z_mm(self, value: float) -> None:
-        self.active_roi.box_half_z_mm = float(value)
+        slot = self.active_roi
+        if slot is not None:
+            slot.box_half_z_mm = float(value)
 
     @property
     def cluster_atlas_label(self) -> Optional[str]:
-        return self.active_roi.atlas_label
+        slot = self.active_roi
+        return slot.atlas_label if slot is not None else self._proxy_default.atlas_label
 
     @cluster_atlas_label.setter
     def cluster_atlas_label(self, value: Optional[str]) -> None:
-        self.active_roi.atlas_label = value
+        slot = self.active_roi
+        if slot is not None:
+            slot.atlas_label = value
 
     @property
     def library_roi_radius_m(self) -> float:
@@ -476,11 +518,14 @@ class AppState:
         is in mm to match the spatial-layer convention -- the meter
         view is kept for back-compat with pre-PR-#55 panel code and
         tests that compute ``radius_m * 1000`` at the boundary."""
-        return self.active_roi.radius_mm / 1000.0
+        slot = self.active_roi
+        return (slot.radius_mm if slot is not None else self._proxy_default.radius_mm) / 1000.0
 
     @library_roi_radius_m.setter
     def library_roi_radius_m(self, value: float) -> None:
-        self.active_roi.radius_mm = float(value) * 1000.0
+        slot = self.active_roi
+        if slot is not None:
+            slot.radius_mm = float(value) * 1000.0
 
     @property
     def library_roi_painted(self) -> Set[str]:
@@ -488,12 +533,26 @@ class AppState:
         callers that do ``state.library_roi_painted.add(...)`` or
         ``.clear()`` mutate the active slot's set directly -- matches
         the pre-PR-#55 contract where this attribute *was* a mutable
-        set on AppState."""
-        return self.active_roi.painted
+        set on AppState.
+
+        When the ROI list is empty, returns a transient empty set so
+        mutation calls (``.add``, ``.clear``) silently no-op. Reads of
+        that empty set return an empty membership, which matches the
+        "no ROI yet" semantics.
+        """
+        slot = self.active_roi
+        if slot is not None:
+            return slot.painted
+        # Transient empty set -- mutations on it are dropped on the
+        # next access (it's reconstructed each read), which is the
+        # right "no slot to write to" semantic.
+        return set()
 
     @library_roi_painted.setter
     def library_roi_painted(self, value: Set[str]) -> None:
-        self.active_roi.painted = set(value)
+        slot = self.active_roi
+        if slot is not None:
+            slot.painted = set(value)
 
     # ------------------------------------------------------------------
     # PR #55: ROI list manipulation helpers.
@@ -506,11 +565,18 @@ class AppState:
         it starts at the dataclass defaults. Auto-names it
         "ROI <n>" where n is the new length of the list.
 
+        Layout refactor (2026-05-16): the new slot is also auto-
+        selected (``selected=True``) so it joins the bulk-edit set
+        immediately. Users adding one ROI at a time still see
+        single-slot behaviour (the selected set has one entry, the
+        active slot); users iterating Add ROI multiple times build
+        up a selected group ready for bulk edits.
+
         Returns the new slot so callers can stamp additional state
         onto it before publishing the change.
         """
         name = f"ROI {len(self.cluster_rois) + 1}"
-        slot = ROISlot(name=name)
+        slot = ROISlot(name=name, selected=True)
         self.cluster_rois.append(slot)
         self.cluster_active_index = len(self.cluster_rois) - 1
         return slot
@@ -520,28 +586,65 @@ class AppState:
         if 0 <= index < len(self.cluster_rois):
             self.cluster_active_index = index
 
-    def clear_active_roi(self) -> None:
-        """Reset the active ROI to default geometry (CLEAR ROI button).
+    def selected_rois(self) -> List[ROISlot]:
+        """Return every slot with ``selected=True`` in list order."""
+        return [s for s in self.cluster_rois if s.selected]
 
-        If there are 2+ ROIs, removes the active slot and advances the
-        active index to the previous slot (or 0 if we removed slot 0).
-        If there's exactly one ROI, resets its fields to defaults
-        rather than removing it -- the proxy properties always need
-        at least one slot to point at, and "clear" on a fresh project
-        shouldn't disappear the list entirely.
+    def bulk_edit_targets(self) -> List[ROISlot]:
+        """Slots an edit (radius slider, centre input) should apply to.
+
+        Returns the selected set when non-empty; falls back to a
+        one-element list with the active slot when nothing is
+        selected. Returns an empty list when the active is None AND
+        nothing is selected (no ROI to edit). The radius/centre
+        handlers iterate this list so a single proxy write naturally
+        becomes a multi-slot update when the user has multiple slots
+        checked.
         """
-        if len(self.cluster_rois) <= 1:
-            self.cluster_rois[0] = ROISlot()
-            self.cluster_active_index = 0
+        selected = self.selected_rois()
+        if selected:
+            return selected
+        active = self.active_roi
+        return [active] if active is not None else []
+
+    def set_all_selected(self, value: bool) -> None:
+        """Tick (or untick) every slot in ``cluster_rois`` in one shot.
+
+        Used by Add Montage to clear prior selection before ticking
+        the new slots. Also useful for a future "Select all / None"
+        button in the ROI-list header.
+        """
+        for slot in self.cluster_rois:
+            slot.selected = bool(value)
+
+    def clear_active_roi(self) -> None:
+        """Remove the active ROI from the list.
+
+        Layout refactor (2026-05-16): the list is now allowed to be
+        empty. Clearing the last slot drops it entirely -- pre-refactor
+        we kept one resetting-in-place because the proxy properties
+        needed a slot to point at, but the proxies now handle the
+        empty case via the cached default slot. Empty list = "no ROI
+        active, viz shows raw HRFs, save button disabled".
+
+        With 2+ ROIs: removes the active slot and advances the index
+        to the previous slot (or 0 if we removed slot 0). With 1 ROI:
+        clears the list; index becomes 0 (which now means "no slot",
+        a state the proxies handle).
+        """
+        if not self.cluster_rois:
             return
         del self.cluster_rois[self.cluster_active_index]
-        self.cluster_active_index = max(0, self.cluster_active_index - 1)
-        # Renumber default names so the list stays in "ROI 1 ... ROI N"
-        # order. Custom-named slots (once renaming lands) would be
-        # detected by checking against the auto-name pattern; for now
-        # every name is auto so a simple re-stamp is correct.
-        for i, slot in enumerate(self.cluster_rois):
-            slot.name = f"ROI {i + 1}"
+        if self.cluster_rois:
+            self.cluster_active_index = max(
+                0, self.cluster_active_index - 1
+            )
+            # Renumber default names so the list stays
+            # "ROI 1 ... ROI N" in order.
+            for i, slot in enumerate(self.cluster_rois):
+                slot.name = f"ROI {i + 1}"
+        else:
+            self.cluster_active_index = 0
 
     def subscribe(self, event: str, callback: EventCallback) -> None:
         """Register ``callback`` to be called on ``publish(event, ...)``.
@@ -653,11 +756,12 @@ class AppState:
         self.library_show_brain = True
         self.library_show_scalp = True
         self.library_oxygenation = "both"
-        # PR #55: per-ROI cluster state lives in ``cluster_rois``;
-        # reset to the default-single-slot list.
+        # Per-ROI cluster state lives in ``cluster_rois``. Layout
+        # refactor (2026-05-16) made the empty list the default; adding
+        # a ROI is the implicit activation, so there's no separate
+        # ``cluster_roi_active`` field to reset.
         self.cluster_rois = _default_rois()
         self.cluster_active_index = 0
-        self.cluster_roi_active = False
         self.cluster_atlas_alignment_affine = None
         self.cluster_atlas_offset_x_mm = 0.0
         self.cluster_atlas_offset_y_mm = 0.0
