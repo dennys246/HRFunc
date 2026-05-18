@@ -17,9 +17,16 @@ import pytest
 pytest.importorskip("nicegui")
 
 from hrfunc.gui.submission import (  # noqa: E402
+    DEFAULT_HEALTH_URL,
     DEFAULT_UPLOAD_URL,
+    EXPERIMENTAL_CONTEXT_ANCHORS,
+    HRFUNC_WEB_BASE_URL,
+    HealthState,
     SubmissionMetadata,
     SubmissionResult,
+    _experimental_context_url,
+    check_hrserv_health,
+    health_url,
     submit_payload,
     upload_url,
 )
@@ -296,3 +303,185 @@ class TestSubmitPayloadFailureBuckets:
         assert result.status_code is None
         assert "ConnectionError" in result.message
         assert "no route to host" in result.message
+
+
+# ---------------------------------------------------------------------------
+# HRServ health polling
+# ---------------------------------------------------------------------------
+
+
+class TestHealthUrl:
+    """``health_url`` mirrors ``upload_url`` -- env-var override with a
+    production default. Both clients (web + desktop) hit the same
+    HRServ endpoint so a state change is consistent across them."""
+
+    def test_default_is_production(self, monkeypatch):
+        monkeypatch.delenv("HRFUNC_HEALTH_URL", raising=False)
+        assert health_url() == DEFAULT_HEALTH_URL
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv(
+            "HRFUNC_HEALTH_URL",
+            "http://staging.example.com/healthz",
+        )
+        assert health_url() == "http://staging.example.com/healthz"
+
+
+class TestCheckHrservHealth:
+    """``check_hrserv_health`` maps the GET /healthz response to a
+    three-state enum -- the same three states the hrfunc-web JS pill
+    shows. Tests pin each branch via a monkey-patched ``requests.get``."""
+
+    def test_200_returns_ok(self, monkeypatch):
+        import requests
+
+        def _fake_get(url, timeout=None):
+            return _FakeResponse(status_code=200, text='{"status":"ok"}')
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        assert check_hrserv_health(
+            target_url="http://test.local/healthz",
+        ) == HealthState.OK
+
+    def test_503_returns_down(self, monkeypatch):
+        """HRServ returns 503 when its DB ping fails -- the panel should
+        surface that as DOWN, not silently treat any 2xx as ok."""
+        import requests
+
+        def _fake_get(url, timeout=None):
+            return _FakeResponse(status_code=503, text='{"status":"degraded"}')
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        assert check_hrserv_health(
+            target_url="http://test.local/healthz",
+        ) == HealthState.DOWN
+
+    def test_transport_exception_returns_down(self, monkeypatch):
+        """A transport failure (DNS, connection refused, timeout) is
+        functionally identical to HRServ being unreachable -- the
+        helper collapses both into DOWN so the pill colour matches
+        what the user can actually do (try again later)."""
+        import requests
+
+        def _fake_get(url, timeout=None):
+            raise ConnectionError("connection refused")
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        assert check_hrserv_health(
+            target_url="http://test.local/healthz",
+        ) == HealthState.DOWN
+
+    def test_timeout_returns_down(self, monkeypatch):
+        """``requests.exceptions.Timeout`` is just an Exception -- the
+        BLE001 catch in the helper handles it. Pin this specifically so
+        future helper changes don't lose the timeout branch."""
+        import requests
+
+        def _fake_get(url, timeout=None):
+            raise requests.exceptions.Timeout("read timed out")
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        assert check_hrserv_health(
+            target_url="http://test.local/healthz",
+        ) == HealthState.DOWN
+
+    def test_target_url_defaults_to_env_or_production(self, monkeypatch):
+        """When ``target_url`` is None, the helper threads the call
+        through :func:`health_url` so the env-var override applies.
+        We capture the URL via a stub to confirm the indirection."""
+        import requests
+        monkeypatch.setenv(
+            "HRFUNC_HEALTH_URL",
+            "http://override.example.com/healthz",
+        )
+        captured = {}
+
+        def _fake_get(url, timeout=None):
+            captured["url"] = url
+            return _FakeResponse(status_code=200, text="ok")
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        check_hrserv_health()
+        assert captured["url"] == "http://override.example.com/healthz"
+
+
+# ---------------------------------------------------------------------------
+# Experimental-context help links
+# ---------------------------------------------------------------------------
+
+
+class TestExperimentalContextAnchors:
+    """The submission panel renders ``examples ↗`` links under the
+    experimental-context fields so users can browse pre-existing
+    entries on hrfunc-web. The anchor mapping must match the
+    section IDs hrfunc-web's ``/experimental_contexts`` page emits.
+    """
+
+    def test_anchor_keys_match_metadata_attrs(self):
+        """Every attr in EXPERIMENTAL_CONTEXT_ANCHORS must exist on
+        SubmissionMetadata -- otherwise the panel renders a link
+        for a field that doesn't exist (or vice versa)."""
+        attrs = {f.name for f in SubmissionMetadata.__dataclass_fields__.values()}
+        for attr in EXPERIMENTAL_CONTEXT_ANCHORS:
+            assert attr in attrs, (
+                f"Anchor mapping references {attr!r} but it's not a "
+                f"SubmissionMetadata field"
+            )
+
+    def test_anchors_cover_the_seven_context_fields(self):
+        """Pinning the exact attr set so a future field-rename touches
+        this map intentionally (rather than silently dropping a link)."""
+        assert set(EXPERIMENTAL_CONTEXT_ANCHORS) == {
+            "task", "conditions", "stimuli", "medium",
+            "protocol", "demographics", "health_status",
+        }
+
+    def test_anchor_values_match_hrfunc_web_section_ids(self):
+        """Anchors mirror the section IDs the hrfunc-web template
+        emits on its experimental_contexts page. ``protocol`` is the
+        only attribute whose anchor isn't a plain ``context-<attr>``
+        suffix (it's ``context-protocols``, plural)."""
+        assert EXPERIMENTAL_CONTEXT_ANCHORS["task"] == "context-tasks"
+        assert EXPERIMENTAL_CONTEXT_ANCHORS["protocol"] == "context-protocols"
+        assert EXPERIMENTAL_CONTEXT_ANCHORS["health_status"] == "context-health-status"
+
+
+class TestExperimentalContextUrl:
+    """``_experimental_context_url`` derives a full URL from the
+    hrfunc-web base + anchor fragment. When ``HRFUNC_UPLOAD_URL`` is
+    set to a non-production target (e.g. local hrfunc-web for
+    integration testing), the help links follow it so they point at
+    the same instance, not production."""
+
+    def test_default_uses_production_base(self, monkeypatch):
+        monkeypatch.delenv("HRFUNC_UPLOAD_URL", raising=False)
+        url = _experimental_context_url("context-tasks")
+        assert url == (
+            f"{HRFUNC_WEB_BASE_URL}/experimental_contexts#context-tasks"
+        )
+
+    def test_upload_url_override_redirects_base(self, monkeypatch):
+        """Setting HRFUNC_UPLOAD_URL to a local hrfunc-web should make
+        the help links target the same instance. Trims the upload
+        URL's path back to scheme+host before appending."""
+        monkeypatch.setenv(
+            "HRFUNC_UPLOAD_URL", "http://localhost:8000/upload_json",
+        )
+        url = _experimental_context_url("context-conditions")
+        assert url == (
+            "http://localhost:8000/experimental_contexts#context-conditions"
+        )
+
+    def test_upload_url_with_subpath_strips_to_host(self, monkeypatch):
+        """An override URL with a non-trivial path (proxied behind
+        e.g. /hrfunc/upload_json) still trims back to scheme+host so
+        the contexts link doesn't accidentally inherit the upload's
+        subpath."""
+        monkeypatch.setenv(
+            "HRFUNC_UPLOAD_URL",
+            "https://lab.example.com/hrfunc/upload_json",
+        )
+        url = _experimental_context_url("context-stimuli")
+        assert url == (
+            "https://lab.example.com/experimental_contexts#context-stimuli"
+        )

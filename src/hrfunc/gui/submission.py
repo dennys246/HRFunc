@@ -11,6 +11,9 @@ have to context-switch to a browser to share their work:
   hrfunc-web's ``/upload_json`` endpoint, which then validates, rate-
   limits, forwards to the canonical backend, and sends the
   confirmation email.
+- :func:`check_hrserv_health` polls HRServ's ``/healthz`` so the panel
+  can surface an "Accepting HRF Submissions" pill (mirrors the web
+  form's JS-driven status pill).
 - :func:`render_submission_panel` renders the NiceGUI form. Caller
   drops it on the Export tab (always) and on the HRFs tab (after a
   successful estimation) so the submission flow is reachable from
@@ -19,13 +22,16 @@ have to context-switch to a browser to share their work:
 The upload endpoint is overridable via the ``HRFUNC_UPLOAD_URL``
 environment variable -- matches hrfunc-web's own override pattern so
 the same variable means the same thing in both clients. Default
-target is the production deployment at hrfunc-web.
+target is the production deployment at hrfunc-web. The health
+endpoint similarly overridable via ``HRFUNC_HEALTH_URL``; defaults to
+``https://api.hrfunc.org/healthz`` (HRServ's public health route).
 
 What lives where:
 
 - Form rendering / event wiring: :func:`render_submission_panel` (UI)
 - Pure data shape: :class:`SubmissionMetadata` (testable without UI)
-- HTTP I/O: :func:`submit_payload` (testable with mocked ``requests``)
+- HTTP I/O: :func:`submit_payload`, :func:`check_hrserv_health`
+  (testable with mocked ``requests``)
 
 No state on AppState -- the form's transient values are held in a
 plain dataclass within the panel closure, same pattern the HRFs /
@@ -34,6 +40,7 @@ Activity panels use for their per-render options snapshots.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -50,6 +57,90 @@ logger = logging.getLogger(__name__)
 # own ``HRFUNC_UPLOAD_URL`` convention (though that variable on the
 # server points to the *backend*, here it points to hrfunc-web itself).
 DEFAULT_UPLOAD_URL = "https://www.hrfunc.org/upload_json"
+
+# HRServ's public health-check route. The web form polls the same
+# URL from JS; rendering the same pill in the desktop GUI keeps the
+# two clients consistent so a HRServ outage looks identical from
+# either entry point.
+DEFAULT_HEALTH_URL = "https://api.hrfunc.org/healthz"
+
+# Base URL of hrfunc-web. The submission flow's context-field labels
+# link into its ``/experimental_contexts`` page so users can read
+# pre-existing entries before deciding what to type. The anchor
+# fragments below match the section IDs hrfunc-web renders in that
+# page (see hrfunc-web/templates/experimental_contexts.html). When the
+# upload URL is overridden, we derive this base from it so a local
+# hrfunc-web instance has the help links pointing at the local copy
+# rather than production.
+HRFUNC_WEB_BASE_URL = "https://www.hrfunc.org"
+
+# Per-field anchor fragments on /experimental_contexts. Keyed by the
+# ``SubmissionMetadata`` attribute name so :func:`_text_input` can
+# look them up by attr. Mirrors the ``href`` attributes the web
+# form's label tags carry.
+EXPERIMENTAL_CONTEXT_ANCHORS: Dict[str, str] = {
+    "task": "context-tasks",
+    "conditions": "context-conditions",
+    "stimuli": "context-stimuli",
+    "medium": "context-medium",
+    "protocol": "context-protocols",
+    "demographics": "context-demographics",
+    "health_status": "context-health-status",
+}
+
+
+def _experimental_context_url(anchor: str) -> str:
+    """Build a full URL into hrfunc-web's experimental-contexts page.
+
+    Derives the base from ``HRFUNC_UPLOAD_URL`` when it's set to a
+    non-production target, so pointing the desktop at a local
+    hrfunc-web instance (``HRFUNC_UPLOAD_URL=http://localhost:8000/upload_json``)
+    sends the help links to the same instance rather than to
+    production. Falls back to :data:`HRFUNC_WEB_BASE_URL` when no
+    override is in effect.
+    """
+    override = os.environ.get("HRFUNC_UPLOAD_URL")
+    if override:
+        # The upload URL has a path; trim it back to scheme+host so
+        # we can append ``/experimental_contexts#anchor``.
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(override)
+        base = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+    else:
+        base = HRFUNC_WEB_BASE_URL
+    return f"{base}/experimental_contexts#{anchor}"
+
+
+# How often the panel re-polls the health endpoint while it's open.
+# Matches hrfunc-web's 60-second JS interval -- frequent enough that
+# a state change becomes visible within a minute, infrequent enough
+# that an open panel doesn't hammer the endpoint.
+HEALTH_POLL_INTERVAL_S = 60.0
+
+# Default timeout for the health GET. Should be much shorter than
+# the submission timeout because a slow-responding healthz makes the
+# pill look stuck in "Checking…" -- better to fail fast and render
+# "down" so the user knows the backend can't be reached.
+HEALTH_TIMEOUT_S = 5.0
+
+
+class HealthState(str, enum.Enum):
+    """Three discriminable states the health pill can render in.
+
+    String values so the panel can pass them straight to NiceGUI's
+    class-string attribute without an explicit conversion.
+
+    - ``CHECKING``: poll in flight (or panel just mounted, no poll
+      result yet). Grey pill with neutral copy.
+    - ``OK``: HRServ returned HTTP 200. Green pill, "Accepting HRF
+      Submissions" copy.
+    - ``DOWN``: HRServ returned a non-200, or the request raised a
+      transport exception. Red pill, "Submission system down" copy.
+    """
+
+    CHECKING = "checking"
+    OK = "ok"
+    DOWN = "down"
 
 
 @dataclass
@@ -202,6 +293,50 @@ def upload_url() -> str:
     return os.environ.get("HRFUNC_UPLOAD_URL", DEFAULT_UPLOAD_URL)
 
 
+def health_url() -> str:
+    """Return the HRServ ``/healthz`` URL the pill polls.
+
+    Honors the ``HRFUNC_HEALTH_URL`` env var; defaults to the
+    production endpoint at ``https://api.hrfunc.org/healthz``.
+    Override is useful when pointing the desktop at a staging
+    HRServ during integration testing.
+    """
+    return os.environ.get("HRFUNC_HEALTH_URL", DEFAULT_HEALTH_URL)
+
+
+def check_hrserv_health(
+    *,
+    target_url: Optional[str] = None,
+    timeout_s: float = HEALTH_TIMEOUT_S,
+) -> HealthState:
+    """Probe HRServ's healthz endpoint and map the response to a state.
+
+    Mirrors what the hrfunc-web JS pill does: GET, treat HTTP 200 as
+    ``OK``, anything else (non-200 response, transport exception) as
+    ``DOWN``. No retries -- the panel timer re-fires on the same
+    interval (60 s by default) so a transient blip auto-recovers
+    without us building a backoff ladder here.
+
+    ``target_url`` defaults to :func:`health_url` (env-var override
+    aware). Tests pass an explicit URL to point at a mock server.
+
+    HEAD would be more efficient (HRServ's route accepts it) but
+    requests' default ``redirect`` behavior strips the body on GET
+    when the response is HEAD-style anyway, and using GET keeps the
+    code identical to the web form's ``fetch(URL)``. Symmetry between
+    the two clients matters more than the tiny bandwidth win.
+    """
+    import requests
+
+    url = target_url or health_url()
+    try:
+        response = requests.get(url, timeout=timeout_s)
+    except Exception as exc:  # noqa: BLE001 -- mirror JS fetch's
+        logger.debug("check_hrserv_health: transport error: %s", exc)
+        return HealthState.DOWN
+    return HealthState.OK if response.status_code == 200 else HealthState.DOWN
+
+
 @dataclass
 class SubmissionResult:
     """Outcome of a single submission attempt.
@@ -335,6 +470,13 @@ def render_submission_panel(state, *, default_path: Optional[Path] = None) -> No
     file_state: Dict[str, Optional[Path]] = {
         "path": default_path,
     }
+    # Closure-held health state. Starts in CHECKING so the very first
+    # render shows a neutral pill -- the ``ui.timer`` below fires on
+    # mount (the ``active=True, immediate=True`` form) and replaces
+    # this with the real state within the timeout window.
+    health_state: Dict[str, HealthState] = {
+        "value": HealthState.CHECKING,
+    }
 
     @ui.refreshable
     def _body() -> None:
@@ -346,6 +488,13 @@ def render_submission_panel(state, *, default_path: Optional[Path] = None) -> No
             "are reviewed before they appear in the HRtree library. "
             "You'll receive a confirmation email at the address below."
         ).classes("text-xs opacity-70")
+
+        # --- HRServ health pill ---------------------------------------
+        # Mirrors the hrfunc-web JS pill at the top of /hrf_upload.
+        # Three states: checking / ok / down. Polls every
+        # ``HEALTH_POLL_INTERVAL_S`` (default 60 s) so a state change
+        # surfaces within a minute without us hammering the endpoint.
+        _render_health_pill(health_state["value"])
 
         # --- File selector --------------------------------------------
         ui.label("HRF JSON file").classes(
@@ -533,10 +682,75 @@ def render_submission_panel(state, *, default_path: Optional[Path] = None) -> No
 
     _body()
 
+    # Background poller -- runs on the NiceGUI event loop, dispatches
+    # the blocking HTTP call to an executor thread so the UI stays
+    # responsive. ``immediate=True`` triggers a first poll right after
+    # mount instead of waiting a full interval to leave the pill
+    # stuck in "Checking…".
+    async def _poll_health() -> None:
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        new_state = await loop.run_in_executor(None, check_hrserv_health)
+        if new_state == health_state["value"]:
+            return  # No change -- skip the refresh to avoid render churn.
+        health_state["value"] = new_state
+        _body.refresh()
+
+    ui.timer(HEALTH_POLL_INTERVAL_S, _poll_health, immediate=True)
+
 
 # ---------------------------------------------------------------------------
 # Private form helpers
 # ---------------------------------------------------------------------------
+
+
+def _render_health_pill(state: HealthState) -> None:
+    """Render a coloured pill mirroring hrfunc-web's status indicator.
+
+    Three visual states keyed off :class:`HealthState`:
+
+    - ``CHECKING``: neutral grey, "Checking submission status…"
+    - ``OK``: green, "Accepting HRF submissions"
+    - ``DOWN``: red, "Submission system down"
+
+    Class strings follow the same Tailwind palette as the web pill
+    so the two clients are visually consistent. The web pill is
+    just a coloured dot + status text; the desktop pill matches
+    that exact pattern (no Material icon -- the dot's colour is
+    the affordance, and the colour shift between gray / green / red
+    is recognisable without a separate iconographic cue).
+    """
+    from nicegui import ui
+
+    if state == HealthState.OK:
+        bg = "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200"
+        dot = "bg-green-500"
+        text = "Accepting HRF submissions"
+    elif state == HealthState.DOWN:
+        bg = "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200"
+        dot = "bg-red-500"
+        text = (
+            "Submission system down — please try again later or "
+            "contact help@hrfunc.org."
+        )
+    else:  # CHECKING
+        bg = (
+            "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-200"
+        )
+        dot = "bg-gray-400"
+        text = "Checking submission status…"
+
+    with ui.row().classes(
+        "items-center gap-2 px-3 py-1.5 rounded-full text-sm mt-2 mb-1 "
+        + bg
+    ).style("width: fit-content"):
+        # Status dot. Sized + coloured to mirror the web pill's
+        # 10px coloured circle.
+        ui.element("div").classes(
+            f"inline-block w-2.5 h-2.5 rounded-full {dot}"
+        )
+        ui.label(text)
 
 
 def _section_label(text: str) -> None:
@@ -552,7 +766,16 @@ def _text_input(
     attr: str,
     label_text: str,
 ) -> None:
-    """One-line text input bound to ``metadata.<attr>``."""
+    """One-line text input bound to ``metadata.<attr>``.
+
+    When ``attr`` is one of the experimental-context fields (task,
+    conditions, stimuli, etc.), a small "examples ↗" link is
+    rendered below the input that opens hrfunc-web's
+    ``/experimental_contexts`` page at the matching anchor. The
+    link mirrors the corresponding ``<a target="_blank">`` element
+    in hrfunc-web's hrf_upload form so users can browse existing
+    entries before deciding what to type.
+    """
     from nicegui import ui
 
     def _on_change(event) -> None:
@@ -563,6 +786,16 @@ def _text_input(
         value=getattr(metadata, attr),
         on_change=_on_change,
     ).props("dense outlined").classes("w-full")
+
+    anchor = EXPERIMENTAL_CONTEXT_ANCHORS.get(attr)
+    if anchor is not None:
+        url = _experimental_context_url(anchor)
+        ui.link(
+            "examples ↗", url, new_tab=True,
+        ).classes(
+            "text-xs text-indigo-500 hover:text-indigo-300 "
+            "no-underline -mt-2"
+        )
 
 
 def _textarea_input(
